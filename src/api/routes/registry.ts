@@ -1,0 +1,84 @@
+import { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
+import { prisma } from '../../lib/db';
+import { requestContext } from '../../lib/request-context';
+
+interface PackageInput {
+  name: string;
+  version: string;
+  integrityHash: string;
+  manifest: any;
+  policyId: string;
+  dependencies?: { name: string; version: string; integrity?: string; kind?: string }[];
+}
+
+export default async function registryRoutes(fastify: FastifyInstance) {
+  // list packages for current group
+  fastify.get('/packages', async (req: FastifyRequest, reply: FastifyReply) => {
+    const ctx = requestContext.getStore();
+    if (!ctx?.groupId) return reply.code(400).send({ error: 'groupId required' });
+    const packages = await prisma.componentPackage.findMany({
+      where: { ownerGroupId: ctx.groupId },
+      include: { dependencies: true }
+    });
+    reply.send(packages);
+  });
+
+  // register draft package
+  fastify.post('/packages', async (req: FastifyRequest, reply: FastifyReply) => {
+    const ctx = requestContext.getStore();
+    if (!ctx?.groupId || !ctx?.userId) return reply.code(401).send({ error: 'unauthorized' });
+    const body = req.body as PackageInput;
+    const result = await prisma.$transaction(async (tx) => {
+      const pkg = await tx.componentPackage.create({
+        data: {
+          name: body.name,
+          version: body.version,
+          integrityHash: body.integrityHash,
+          manifest: body.manifest,
+          policyId: body.policyId,
+          ownerGroupId: ctx.groupId!,
+          createdById: ctx.userId!
+        }
+      });
+
+      if (body.dependencies?.length) {
+        await tx.componentDependency.createMany({
+          data: body.dependencies.map((d) => ({
+            packageId: pkg.id,
+            depName: d.name,
+            depVersion: d.version,
+            integrity: d.integrity,
+            kind: (d.kind as any) ?? 'RUNTIME'
+          }))
+        });
+      }
+      return pkg;
+    });
+
+    reply.code(201).send(result);
+  });
+
+  fastify.post('/packages/:id/approve', async (req: FastifyRequest, reply: FastifyReply) => {
+    const ctx = requestContext.getStore();
+    if (!ctx?.groupId) return reply.code(401).send({ error: 'unauthorized' });
+    const { id } = req.params as { id: string };
+    const updated = await prisma.componentPackage.updateMany({
+      where: { id, ownerGroupId: ctx.groupId },
+      data: { status: 'APPROVED', approvedAt: new Date() }
+    });
+    if (updated.count === 0) return reply.code(404).send({ error: 'not found' });
+    reply.send({ id, status: 'APPROVED' });
+  });
+
+  fastify.post('/packages/:id/revoke', async (req: FastifyRequest, reply: FastifyReply) => {
+    const ctx = requestContext.getStore();
+    if (!ctx?.groupId) return reply.code(401).send({ error: 'unauthorized' });
+    const { id } = req.params as { id: string };
+    const updated = await prisma.componentPackage.updateMany({
+      where: { id, ownerGroupId: ctx.groupId },
+      data: { status: 'REVOKED' }
+    });
+    if (updated.count === 0) return reply.code(404).send({ error: 'not found' });
+    reply.send({ id, status: 'REVOKED' });
+  });
+}

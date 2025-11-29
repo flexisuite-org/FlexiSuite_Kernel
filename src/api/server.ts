@@ -8,6 +8,7 @@ import healthRoutes from './routes/health';
 import authRoutes from './routes/auth';
 import metricsRoutes from './routes/metrics';
 import { authHook } from './hooks/auth';
+import registryRoutes from './routes/registry';
 
 export function buildServer() {
   // Fastify v5 requires logger to be passed as a configuration object or boolean
@@ -28,6 +29,7 @@ export function buildServer() {
   app.register(async (instance) => contextPlugin(instance));
   app.register(healthRoutes, { prefix: '/health' });
   app.register(authRoutes, { prefix: '/auth' });
+  app.register(registryRoutes, { prefix: '/registry' });
   app.register(metricsRoutes, { prefix: '/metrics' });
 
   return app;
