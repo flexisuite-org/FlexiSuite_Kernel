@@ -6,6 +6,8 @@ import { ComponentManifest } from '../../kernel/components/types';
 import semver from 'semver';
 import { z } from 'zod';
 import { verifyIntegrity } from '../../lib/integrity';
+import { verifyHmac } from '../../lib/signature';
+import { config } from '../../config';
 
 interface InstallBody {
   packageId?: string;
@@ -39,6 +41,12 @@ async function makeFetcher(groupId: string, allowDraft: boolean): Promise<Manife
     const manifestStr = JSON.stringify(manifest);
     if (!verifyIntegrity(pkg.integrityHash, manifestStr)) {
       throw new Error(`integrity mismatch for ${name}@${pkg.version}`);
+    }
+
+    if (manifest.signature && config.SIGNING_SECRET) {
+      if (!verifyHmac(manifestStr, manifest.signature, config.SIGNING_SECRET)) {
+        throw new Error(`signature mismatch for ${name}@${pkg.version}`);
+      }
     }
 
     return { manifest, integrity: pkg.integrityHash, resolved: pkg.id };

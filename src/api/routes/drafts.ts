@@ -17,7 +17,7 @@ export default async function draftsRoutes(fastify: FastifyInstance) {
 
     try {
       const result = await sandbox.run(body.script, {
-        kernel: { groupId: ctx.groupId, userId: ctx.userId, payload: body.payload }
+        kernel: { groupId: ctx.groupId, userId: ctx.userId, payload: body.payload, channel: 'draft' }
       });
 
       await prisma.auditLog.create({
