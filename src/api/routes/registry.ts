@@ -8,9 +8,9 @@ import { config } from '../../config';
 interface PackageInput {
   name: string;
   version: string;
-  integrityHash: string;
   manifest: any;
   policyId: string;
+  bundleIntegrity?: string;
   dependencies?: { name: string; version: string; integrity?: string; kind?: string }[];
 }
 
@@ -33,9 +33,11 @@ export default async function registryRoutes(fastify: FastifyInstance) {
     const body = req.body as PackageInput;
     const manifestBase = body.manifest;
     const integrity = sha256Hex(JSON.stringify(manifestBase));
-    const signature = config.SIGNING_SECRET ? signHmac(JSON.stringify({ ...manifestBase, integrity }), config.SIGNING_SECRET) : undefined;
+    const bundleIntegrity = body.bundleIntegrity;
+    const signingPayload = JSON.stringify({ manifestIntegrity: integrity, bundleIntegrity });
+    const signature = config.SIGNING_SECRET ? signHmac(signingPayload, config.SIGNING_SECRET) : undefined;
 
-    const manifestToStore = { ...manifestBase, integrity, signature };
+    const manifestToStore = { ...manifestBase, integrity, bundleIntegrity, signature };
 
     const result = await prisma.$transaction(async (tx) => {
       const pkg = await tx.componentPackage.create({
@@ -43,6 +45,8 @@ export default async function registryRoutes(fastify: FastifyInstance) {
           name: body.name,
           version: body.version,
           integrityHash: integrity,
+          bundleIntegrity,
+          bundleSignature: signature,
           manifest: manifestToStore,
           policyId: body.policyId,
           ownerGroupId: ctx.groupId!,

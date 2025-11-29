@@ -17,7 +17,7 @@
 
 ### Registry / Package
 - `POST /registry/packages` – 署名対象の manifest+payload を登録（承認ステータス: draft）。
-- 署名フロー: manifest を SHA256 → integrity に保存し、SIGNING_SECRET があれば HMAC 署名を付与。Install/Run で integrity と署名を検証。
+- 署名フロー: manifest を SHA256 → integrity に保存し、SIGNING_SECRET があれば HMAC 署名を付与。bundleIntegrity があれば manifestIntegrity と組にして署名。Install/Run で integrity と署名を検証。
 - `POST /registry/packages/:id/approve` – カーネルが署名し、`approved` に遷移。
 - `POST /registry/packages/:id/revoke` – 誤配信対策で失効。
 - `GET /registry/packages/:name` – バージョン一覧/メタデータ。

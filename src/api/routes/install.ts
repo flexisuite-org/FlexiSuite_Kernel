@@ -49,6 +49,13 @@ async function makeFetcher(groupId: string, allowDraft: boolean): Promise<Manife
       }
     }
 
+    if (pkg.bundleIntegrity && config.SIGNING_SECRET) {
+      const signingPayload = JSON.stringify({ manifestIntegrity: pkg.integrityHash, bundleIntegrity: pkg.bundleIntegrity });
+      if (!pkg.bundleSignature || !verifyHmac(signingPayload, pkg.bundleSignature, config.SIGNING_SECRET)) {
+        throw new Error(`bundle signature mismatch for ${name}@${pkg.version}`);
+      }
+    }
+
     return { manifest, integrity: pkg.integrityHash, resolved: pkg.id };
   };
 }
