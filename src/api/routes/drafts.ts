@@ -20,6 +20,9 @@ export default async function draftsRoutes(fastify: FastifyInstance) {
     if (!parsed.success) return reply.code(400).send({ error: 'invalid_input', details: parsed.error.flatten() });
     const body = parsed.data;
 
+    // mark context as draft to block DB writes except playground log
+    requestContext.enterWith({ ...ctx, mode: 'draft' });
+
     try {
       const result = await sandbox.run(body.script, {
         kernel: { groupId: ctx.groupId, userId: ctx.userId, payload: body.payload, channel: 'draft' }
