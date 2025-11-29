@@ -4,6 +4,7 @@ import { requestContext } from '../../lib/request-context';
 import { sha256Hex } from '../../lib/integrity';
 import { signHmac } from '../../lib/signature';
 import { config } from '../../config';
+import { bundleStorage } from '../../kernel/components/storage';
 
 interface PackageInput {
   name: string;
@@ -134,11 +135,7 @@ export default async function registryRoutes(fastify: FastifyInstance) {
 
     const updated = await prisma.componentPackage.updateMany({ where: { id, ownerGroupId: ctx.groupId }, data: { bundleIntegrity: body.integrity, bundleSignature: signature } });
     if (updated.count === 0) return reply.code(404).send({ error: 'not found' });
-
-    const fs = await import('fs');
-    await fs.promises.mkdir('storage/bundles', { recursive: true });
-    await fs.promises.writeFile(`storage/bundles/${id}.bin`, buffer);
-
+    await bundleStorage.save(id, buffer);
     reply.code(201).send({ id, bundleIntegrity: body.integrity, bundleSignature: signature });
   });
 }

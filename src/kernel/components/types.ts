@@ -23,6 +23,7 @@ export interface ComponentManifest {
   capabilities?: string[];
   uiMount?: string;
   signature?: string; // HMAC signature of manifest JSON (optional)
+  allowedCapabilities?: string[]; // explicit allowlist enforced by policy/config
 }
 
 export interface LockDependency {

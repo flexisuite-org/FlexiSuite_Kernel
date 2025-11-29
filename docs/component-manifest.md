@@ -14,6 +14,7 @@
 - `integrity`: manifest と payload の SHA256（hex）。
 - `policyId`: 適用する `ComponentPolicy`（メモリ/タイムアウト/ネットワーク/allowedModules）。
 - `capabilities`: 必要権限の宣言（例: `data.read`, `events.publish`）。
+- `allowedCapabilities`: 実行許可する capability の明示的リスト。未指定なら `capabilities` を使用。
 - `uiMount` (任意): UIコンポーネントのマウントポイント指定。
 - `bundleIntegrity` (任意): バンドル本体の SHA256。署名時は manifestIntegrity と組み合わせて HMAC 化。
 - `signature` (任意): HMAC-SHA256({manifestIntegrity,bundleIntegrity}) を SIGNING_SECRET で生成。
