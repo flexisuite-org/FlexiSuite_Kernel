@@ -23,13 +23,13 @@
 - `GET /registry/packages/:id/download` – bundle/payload ダウンロード（署名+integrity付き）。
 
 ### Install
-- `POST /install` – { packageId, version, channel? } → 依存解決＋ロック生成をアトミック実行。
+- `POST /install` – { packageId, version, channel? } → 依存解決＋ロック生成をアトミック実行。入力は Zod で検証し、root manifest の integrity を照合。
 - `DELETE /install/:installId` – アンインストール。
 - `POST /install/:installId/rollback` – 直前ロックに戻す。
 - `GET /install` – インストール一覧（groupスコープ）。
 
 ### Run / Bundle（本番パッケージのみ）
-- `POST /components/:id/run` – APIモードで実行メタを返す（ユーザーコードは実行しない）。署名/integrity検証と監査のみ。
+- `POST /components/:id/run` – APIモードで capabilities を実行（カーネル側の安全ハンドラのみ）。署名/integrity検証と監査を実施。ユーザーコードは走らせない。
 - `GET /components/:id/bundle` – クライアント用バンドル取得。`If-None-Match` 等でキャッシュ。
 
 ### Draft Sandbox

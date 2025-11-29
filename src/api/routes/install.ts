@@ -3,6 +3,8 @@ import { prisma } from '../../lib/db';
 import { requestContext } from '../../lib/request-context';
 import { resolveToLock, ManifestFetcher } from '../../kernel/components/resolver';
 import { ComponentManifest } from '../../kernel/components/types';
+import semver from 'semver';
+import { z } from 'zod';
 
 interface InstallBody {
   packageId?: string;
@@ -11,12 +13,13 @@ interface InstallBody {
   channel?: 'STABLE' | 'DRAFT';
 }
 
-async function makeFetcher(groupId: string): Promise<ManifestFetcher> {
+async function makeFetcher(groupId: string, allowDraft: boolean): Promise<ManifestFetcher> {
   return async (name: string, range: string) => {
-    // For now, resolve by exact version match; semver range is checked in resolver.
-    const pkg = await prisma.componentPackage.findFirst({
-      where: { name, version: range, ownerGroupId: groupId }
+    const all = await prisma.componentPackage.findMany({
+      where: { name, ownerGroupId: groupId, status: allowDraft ? undefined : 'APPROVED' },
+      orderBy: { version: 'desc' }
     });
+    const pkg = all.find((p) => semver.satisfies(p.version, range));
     if (!pkg) throw new Error(`package not found ${name}@${range}`);
 
     const deps = await prisma.componentDependency.findMany({ where: { packageId: pkg.id } });
@@ -40,12 +43,22 @@ async function makeFetcher(groupId: string): Promise<ManifestFetcher> {
 }
 
 export default async function installRoutes(fastify: FastifyInstance) {
+  const installSchema = z.object({
+    packageId: z.string().optional(),
+    name: z.string().optional(),
+    version: z.string().optional(),
+    channel: z.enum(['STABLE', 'DRAFT']).optional()
+  }).refine((v) => v.packageId || (v.name && v.version), { message: 'packageId or (name+version) required' });
+
   // Install package for current group
   fastify.post('/install', async (req: FastifyRequest, reply: FastifyReply) => {
     const ctx = requestContext.getStore();
     if (!ctx?.groupId || !ctx?.userId) return reply.code(401).send({ error: 'unauthorized' });
 
-    const body = req.body as InstallBody;
+    const parsed = installSchema.safeParse(req.body);
+    if (!parsed.success) return reply.code(400).send({ error: 'invalid_input', details: parsed.error.flatten() });
+
+    const body = parsed.data as InstallBody;
     const channel = body.channel ?? 'STABLE';
 
     const target = body.packageId
@@ -57,8 +70,11 @@ export default async function installRoutes(fastify: FastifyInstance) {
       return reply.code(409).send({ error: 'package not approved' });
     }
 
-    const fetcher = await makeFetcher(ctx.groupId);
+    const fetcher = await makeFetcher(ctx.groupId, channel === 'DRAFT');
     const root = await fetcher(target.name, target.version);
+    if (root.manifest.integrity !== target.integrityHash) {
+      return reply.code(422).send({ error: 'integrity_mismatch_root' });
+    }
     const lock = await resolveToLock(root, fetcher, {});
 
     const install = await prisma.componentInstall.create({

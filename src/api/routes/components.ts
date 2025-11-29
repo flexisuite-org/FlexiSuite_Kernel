@@ -1,6 +1,12 @@
 import { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { prisma } from '../../lib/db';
 import { requestContext } from '../../lib/request-context';
+import { ComponentManifest } from '../../kernel/components/types';
+
+const capabilityHandlers: Record<string, (payload: any) => Promise<any> | any> = {
+  'echo': async (payload) => ({ echo: payload }),
+  'time.now': async () => ({ now: new Date().toISOString() })
+};
 
 // Minimal run/bundle placeholders using install lock
 
@@ -43,18 +49,35 @@ export default async function componentsRoutes(fastify: FastifyInstance) {
       return reply.code(422).send({ error: 'integrity_mismatch' });
     }
 
-    // APIモード固定: ユーザーコードはここでは実行しない。本番コンポーネントはフロント/別プロセスで動く前提。
+    // APIモード: capabilities に基づき限定的な処理のみ実行
+    const manifest = install.package.manifest as ComponentManifest;
+    const requested = (manifest.capabilities ?? []);
+    const payload = req.body ?? {};
+    const results: Record<string, any> = {};
+    for (const cap of requested) {
+      const handler = capabilityHandlers[cap];
+      if (!handler) {
+        results[cap] = { error: 'unsupported_capability' };
+        continue;
+      }
+      try {
+        results[cap] = await handler(payload);
+      } catch (err: any) {
+        results[cap] = { error: err?.message || 'capability_error' };
+      }
+    }
+
     await prisma.auditLog.create({
       data: {
         actorUserId: ctx.userId,
         groupId: ctx.groupId,
         resource: 'component.run',
         action: 'api',
-        metadata: { installId: install.id, packageId: install.packageId, mode: 'API' },
+        metadata: { installId: install.id, packageId: install.packageId, mode: 'API', capabilities: requested },
         success: true
       }
     });
 
-    reply.send({ status: 'ok', mode: 'API', manifest: install.package.manifest, lock: install.lockData });
+    reply.send({ status: 'ok', mode: 'API', results, manifest: install.package.manifest, lock: install.lockData });
   });
 }
