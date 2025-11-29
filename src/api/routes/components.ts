@@ -2,6 +2,7 @@ import { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { prisma } from '../../lib/db';
 import { requestContext } from '../../lib/request-context';
 import { ComponentManifest } from '../../kernel/components/types';
+import { verifyIntegrity } from '../../lib/integrity';
 
 const capabilityHandlers: Record<string, (payload: any) => Promise<any> | any> = {
   'echo': async (payload) => ({ echo: payload }),
@@ -47,6 +48,22 @@ export default async function componentsRoutes(fastify: FastifyInstance) {
         }
       });
       return reply.code(422).send({ error: 'integrity_mismatch' });
+    }
+
+    // verify manifest integrity at runtime as well
+    const manifestStr = JSON.stringify(install.package.manifest);
+    if (!verifyIntegrity(install.package.integrityHash, manifestStr)) {
+      await prisma.auditLog.create({
+        data: {
+          actorUserId: ctx.userId,
+          groupId: ctx.groupId,
+          resource: 'component.run',
+          action: 'integrity_mismatch_manifest',
+          metadata: { installId: install.id },
+          success: false
+        }
+      });
+      return reply.code(422).send({ error: 'integrity_mismatch_manifest' });
     }
 
     // APIモード: capabilities に基づき限定的な処理のみ実行

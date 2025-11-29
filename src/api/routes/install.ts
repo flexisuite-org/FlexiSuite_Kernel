@@ -5,6 +5,7 @@ import { resolveToLock, ManifestFetcher } from '../../kernel/components/resolver
 import { ComponentManifest } from '../../kernel/components/types';
 import semver from 'semver';
 import { z } from 'zod';
+import { verifyIntegrity } from '../../lib/integrity';
 
 interface InstallBody {
   packageId?: string;
@@ -34,11 +35,13 @@ async function makeFetcher(groupId: string, allowDraft: boolean): Promise<Manife
       optionalDependencies: deps.filter((d) => d.kind === 'OPTIONAL').map((d) => ({ name: d.depName, version: d.depVersion, integrity: d.integrity || undefined }))
     };
 
-    return {
-      manifest,
-      integrity: pkg.integrityHash,
-      resolved: pkg.id
-    };
+    // integrity check against stored hash of manifest JSON
+    const manifestStr = JSON.stringify(manifest);
+    if (!verifyIntegrity(pkg.integrityHash, manifestStr)) {
+      throw new Error(`integrity mismatch for ${name}@${pkg.version}`);
+    }
+
+    return { manifest, integrity: pkg.integrityHash, resolved: pkg.id };
   };
 }
 
