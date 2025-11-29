@@ -1,5 +1,6 @@
 import { FastifyInstance, FastifyRequest } from 'fastify';
 import { setRlsContext } from '../../lib/db';
+import { setRequestContext } from '../../lib/request-context';
 
 declare module 'fastify' {
   interface FastifyRequest {
@@ -11,6 +12,7 @@ export async function contextPlugin(fastify: FastifyInstance) {
   fastify.addHook('onRequest', async (req: FastifyRequest) => {
     const groupId = (req.user as any)?.groupId ?? null;
     const userId = (req.user as any)?.id ?? null;
+    setRequestContext({ groupId, userId });
     await setRlsContext(groupId, userId);
   });
 }
