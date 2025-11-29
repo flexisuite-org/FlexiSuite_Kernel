@@ -3,18 +3,22 @@ import { sandbox } from '../../kernel/runtime/sandbox';
 import { requestContext } from '../../lib/request-context';
 import { prisma } from '../../lib/db';
 import { saveDraftResult } from '../../lib/playground-db';
+import { z } from 'zod';
 
-interface DraftRunBody {
-  script: string; // JS code to run inside sandbox
-  payload?: any;
-}
+const draftRunSchema = z.object({
+  script: z.string().min(1),
+  payload: z.any().optional()
+});
 
 export default async function draftsRoutes(fastify: FastifyInstance) {
   // Draft sandbox execution (playground only, no persistent writes)
   fastify.post('/sandbox/drafts/run', async (req: FastifyRequest, reply: FastifyReply) => {
     const ctx = requestContext.getStore();
     if (!ctx?.groupId) return reply.code(401).send({ error: 'unauthorized' });
-    const body = req.body as DraftRunBody;
+
+    const parsed = draftRunSchema.safeParse(req.body);
+    if (!parsed.success) return reply.code(400).send({ error: 'invalid_input', details: parsed.error.flatten() });
+    const body = parsed.data;
 
     try {
       const result = await sandbox.run(body.script, {

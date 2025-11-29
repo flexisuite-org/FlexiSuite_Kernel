@@ -6,10 +6,12 @@ import { verifyIntegrity } from '../../lib/integrity';
 import { verifyHmac } from '../../lib/signature';
 import { config } from '../../config';
 import { capabilityHandlers } from '../../kernel/components/capabilities';
+import { z } from 'zod';
 
 // Minimal run/bundle placeholders using install lock
 
 export default async function componentsRoutes(fastify: FastifyInstance) {
+  const runSchema = z.object({ payload: z.any().optional() });
   fastify.get('/components/:id/bundle', async (req: FastifyRequest, reply: FastifyReply) => {
     const ctx = requestContext.getStore();
     if (!ctx?.groupId) return reply.code(401).send({ error: 'unauthorized' });
@@ -25,6 +27,9 @@ export default async function componentsRoutes(fastify: FastifyInstance) {
   fastify.post('/components/:id/run', async (req: FastifyRequest, reply: FastifyReply) => {
     const ctx = requestContext.getStore();
     if (!ctx?.groupId) return reply.code(401).send({ error: 'unauthorized' });
+    const parsedBody = runSchema.safeParse(req.body ?? {});
+    if (!parsedBody.success) return reply.code(400).send({ error: 'invalid_input', details: parsedBody.error.flatten() });
+    const inputPayload = parsedBody.data.payload;
     const { id } = req.params as { id: string };
     const install = await prisma.componentInstall.findFirst({
       where: { id, groupId: ctx.groupId },
@@ -84,7 +89,7 @@ export default async function componentsRoutes(fastify: FastifyInstance) {
     // APIモード: capabilities に基づき限定的な処理のみ実行
     const manifest = install.package.manifest as ComponentManifest;
     const requested = (manifest.capabilities ?? []);
-    const payload = req.body ?? {};
+    const payload = inputPayload;
     const results: Record<string, any> = {};
     for (const cap of requested) {
       const handler = capabilityHandlers[cap];
