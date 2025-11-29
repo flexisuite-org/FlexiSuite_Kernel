@@ -16,7 +16,7 @@
 - `capabilities`: 必要権限の宣言（例: `data.read`, `events.publish`）。
 - `uiMount` (任意): UIコンポーネントのマウントポイント指定。
 - `bundleIntegrity` (任意): バンドル本体の SHA256。署名時は manifestIntegrity と組み合わせて HMAC 化。
-- `signature` (任意): HMAC-SHA256(manifestIntegrity, bundleIntegrity) を SIGNING_SECRET で生成。
+- `signature` (任意): HMAC-SHA256({manifestIntegrity,bundleIntegrity}) を SIGNING_SECRET で生成。
 
 ## ロックファイル `component-lock.json`
 - 各インストールで生成される決定的スナップショット。
