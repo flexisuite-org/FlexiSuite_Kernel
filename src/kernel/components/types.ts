@@ -19,6 +19,7 @@ export interface ComponentManifest {
   optionalDependencies?: ManifestDependency[];
   integrity: string; // overall payload integrity (sha256)
   policyId: string;
+  executionMode?: 'API' | 'SANDBOX';
   capabilities?: string[];
   uiMount?: string;
 }
