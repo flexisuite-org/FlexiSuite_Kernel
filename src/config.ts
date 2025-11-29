@@ -10,6 +10,7 @@ const schema = z.object({
   JWT_EXPIRES_IN: z.string().default('15m'),
   REFRESH_TOKEN_SECRET: z.string().min(16),
   REFRESH_TOKEN_EXPIRES_IN: z.string().default('7d'),
+  SIGNING_SECRET: z.string().optional(),
   RATE_LIMIT_MAX: z.string().default('100'),
   RATE_LIMIT_WINDOW: z.string().default('60000'),
   SANDBOX_MEMORY_MB: z.string().default('128'),

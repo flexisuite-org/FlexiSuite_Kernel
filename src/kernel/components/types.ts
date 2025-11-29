@@ -22,6 +22,7 @@ export interface ComponentManifest {
   executionMode?: 'API' | 'SANDBOX';
   capabilities?: string[];
   uiMount?: string;
+  signature?: string; // HMAC signature of manifest JSON (optional)
 }
 
 export interface LockDependency {
