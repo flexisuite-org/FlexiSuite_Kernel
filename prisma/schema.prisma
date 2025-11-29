@@ -19,6 +19,23 @@ enum PermissionScope {
   TENANT
 }
 
+enum ComponentStatus {
+  DRAFT
+  APPROVED
+  REVOKED
+}
+
+enum DependencyKind {
+  RUNTIME
+  PEER
+  OPTIONAL
+}
+
+enum ReleaseChannel {
+  STABLE
+  DRAFT
+}
+
 model User {
   id           String    @id @default(cuid())
   email        String    @unique
@@ -31,6 +48,8 @@ model User {
   memberships   GroupMember[]
   refreshTokens RefreshToken[]
   auditLogs     AuditLog[]     @relation("AuditActor")
+  createdPackages ComponentPackage[] @relation("ComponentCreator")
+  componentInstalls ComponentInstall[]
 }
 
 model Group {
@@ -49,6 +68,8 @@ model Group {
   records     EntityRecord[]
   permissions Permission[]   @relation("PermissionGroup")
   auditLogs   AuditLog[]     @relation("AuditGroup")
+  componentPackages ComponentPackage[] @relation("ComponentOwner")
+  componentInstalls ComponentInstall[]
 }
 
 model GroupMember {
@@ -179,4 +200,79 @@ model AuditLog {
 
   actor User?  @relation("AuditActor", fields: [actorUserId], references: [id])
   group Group? @relation("AuditGroup", fields: [groupId], references: [id])
+}
+
+model ComponentPolicy {
+  id             String   @id @default(cuid())
+  name           String
+  memoryMb       Int      @default(128)
+  timeoutMs      Int      @default(500)
+  allowNetwork   Boolean  @default(false)
+  allowedModules String[] @default([])
+
+  packages ComponentPackage[]
+}
+
+model ComponentPackage {
+  id            String          @id @default(cuid())
+  name          String
+  version       String
+  status        ComponentStatus @default(DRAFT)
+  integrityHash String
+  manifest      Json
+  policyId      String
+  ownerGroupId  String
+  createdById   String?
+  approvedAt    DateTime?
+  createdAt     DateTime        @default(now())
+
+  policy ComponentPolicy @relation(fields: [policyId], references: [id])
+  owner  Group           @relation("ComponentOwner", fields: [ownerGroupId], references: [id])
+  creator User?          @relation("ComponentCreator", fields: [createdById], references: [id])
+  dependencies ComponentDependency[]
+  installs     ComponentInstall[]
+
+  @@unique([name, version])
+  @@index([ownerGroupId])
+}
+
+model ComponentDependency {
+  id           String         @id @default(cuid())
+  packageId    String
+  depName      String
+  depVersion   String
+  integrity    String?
+  kind         DependencyKind @default(RUNTIME)
+
+  package ComponentPackage @relation(fields: [packageId], references: [id], onDelete: Cascade)
+}
+
+model ComponentInstall {
+  id          String         @id @default(cuid())
+  packageId   String
+  groupId     String
+  channel     ReleaseChannel @default(STABLE)
+  lockData    Json
+  installedBy String?
+  installedAt DateTime       @default(now())
+  rollbackOf  String?
+
+  package ComponentPackage @relation(fields: [packageId], references: [id])
+  group   Group            @relation(fields: [groupId], references: [id])
+  actor   User?            @relation(fields: [installedBy], references: [id])
+  rollout RolloutRule?
+
+  @@unique([packageId, groupId, channel])
+  @@index([groupId])
+}
+
+model RolloutRule {
+  id         String   @id @default(cuid())
+  installId  String   @unique
+  percentage Int      @default(100)
+  allowlist  Json?
+  blocklist  Json?
+  createdAt  DateTime @default(now())
+
+  install ComponentInstall @relation(fields: [installId], references: [id], onDelete: Cascade)
 }

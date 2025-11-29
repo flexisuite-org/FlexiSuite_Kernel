@@ -23,6 +23,7 @@
     "ioredis": "^5.3.2",
     "isolated-vm": "^5.0.0",
     "jsonwebtoken": "^9.0.2",
+    "semver": "^7.6.3",
     "uuid": "^9.0.1",
     "pino": "^8.14.1",
     "prom-client": "^15.0.0",
