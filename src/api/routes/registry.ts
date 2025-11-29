@@ -71,6 +71,23 @@ export default async function registryRoutes(fastify: FastifyInstance) {
     reply.code(201).send(result);
   });
 
+  // update bundle integrity/signature after upload
+  fastify.post('/packages/:id/bundle', async (req: FastifyRequest, reply: FastifyReply) => {
+    const ctx = requestContext.getStore();
+    if (!ctx?.groupId) return reply.code(401).send({ error: 'unauthorized' });
+    const { id } = req.params as { id: string };
+    const { bundleIntegrity } = req.body as { bundleIntegrity: string };
+    if (!bundleIntegrity) return reply.code(400).send({ error: 'bundleIntegrity_required' });
+    const signingPayload = JSON.stringify({ manifestIntegrity: undefined, bundleIntegrity });
+    const signature = config.SIGNING_SECRET ? signHmac(signingPayload, config.SIGNING_SECRET) : undefined;
+    const updated = await prisma.componentPackage.updateMany({
+      where: { id, ownerGroupId: ctx.groupId },
+      data: { bundleIntegrity, bundleSignature: signature }
+    });
+    if (updated.count === 0) return reply.code(404).send({ error: 'not found' });
+    reply.send({ id, bundleIntegrity, bundleSignature: signature });
+  });
+
   fastify.post('/packages/:id/approve', async (req: FastifyRequest, reply: FastifyReply) => {
     const ctx = requestContext.getStore();
     if (!ctx?.groupId) return reply.code(401).send({ error: 'unauthorized' });

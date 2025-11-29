@@ -17,5 +17,17 @@ export const capabilityHandlers: Record<string, (payload: any) => Promise<any> |
       take: Math.min(100, limit)
     });
     return { items: recs.map((r) => ({ id: r.id, definitionId: r.definitionId, data: r.data })) };
+  },
+  'data.entity.listByDefinition': async (payload) => {
+    if (!payload?.definitionId) return { error: 'definitionId_required' };
+    const { limit = 20 } = payload;
+    const recs = await prisma.entityRecord.findMany({ where: { definitionId: payload.definitionId }, take: Math.min(100, limit) });
+    return { items: recs.map((r) => ({ id: r.id, data: r.data })) };
+  },
+  'data.entity.getDefinition': async (payload) => {
+    if (!payload?.definitionId) return { error: 'definitionId_required' };
+    const def = await prisma.entityDefinition.findFirst({ where: { id: payload.definitionId } });
+    if (!def) return { error: 'not_found' };
+    return { id: def.id, name: def.name, version: def.version, schema: def.schema };
   }
 };

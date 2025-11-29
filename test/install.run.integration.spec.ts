@@ -88,6 +88,33 @@ describe('install/run integration', () => {
     expect(res.status).toBe(422);
   });
 
+  test('bundle signature mismatch blocks install', async () => {
+    const manifest = { name: '@ga/bundle', version: '1.0.5', engine: '1.0.0', capabilities: ['echo'] };
+    const integrity = sha256Hex(JSON.stringify(manifest));
+    const policyId = (await prisma.componentPolicy.findFirst())?.id || (await prisma.componentPolicy.create({ data: { name: 'p6' } })).id;
+    setRequestContext({ groupId: groupA, userId: userA });
+    await prisma.componentPackage.create({
+      data: {
+        name: manifest.name,
+        version: manifest.version,
+        status: 'APPROVED',
+        integrityHash: integrity,
+        bundleIntegrity: 'deadbeef',
+        bundleSignature: 'wrongsig',
+        manifest,
+        policyId,
+        ownerGroupId: groupA
+      }
+    });
+
+    const res = await request(app.server)
+      .post('/install')
+      .set('authorization', 'Bearer ' + token(userA, groupA))
+      .send({ name: manifest.name, version: manifest.version, channel: 'STABLE' });
+
+    expect(res.status).toBeGreaterThanOrEqual(400);
+  });
+
   test('cross-group run is not found', async () => {
     const manifest = { name: '@ga/echo', version: '1.0.1', engine: '1.0.0', capabilities: ['echo'] };
     const integrity = sha256Hex(JSON.stringify(manifest));
