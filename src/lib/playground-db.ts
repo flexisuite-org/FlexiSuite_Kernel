@@ -4,6 +4,7 @@ import { prisma } from './db';
 // For now, we just tag data with isPlayground=true; later we can move to separate schema.
 
 export async function saveDraftResult(groupId: string, userId: string | null, payload: any) {
+  // For now we log into AuditLog with isPlayground flag; could be moved to a dedicated table/schema later.
   return prisma.auditLog.create({
     data: {
       actorUserId: userId ?? undefined,
