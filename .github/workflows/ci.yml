@@ -1,0 +1,51 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: flexi
+          POSTGRES_PASSWORD: flexi
+          POSTGRES_DB: flexi
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd "pg_isready -U flexi" --health-interval 10s --health-timeout 5s --health-retries 5
+      redis:
+        image: redis:7
+        ports:
+          - 6380:6379
+        options: >-
+          --health-cmd "redis-cli ping" --health-interval 10s --health-timeout 5s --health-retries 5
+    env:
+      DATABASE_URL: postgresql://flexi:flexi@localhost:5433/flexi?schema=public
+      REDIS_URL: redis://localhost:6380
+      JWT_SECRET: testjwtsecret1234567890
+      REFRESH_TOKEN_SECRET: testrefreshsecret1234567890
+      SIGNING_SECRET: testsecret
+      PORT: 9000
+      RATE_LIMIT_MAX: 100
+      RATE_LIMIT_WINDOW: 60000
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v2
+        with:
+          version: 8
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'pnpm'
+      - run: pnpm install --frozen-lockfile
+      - name: Wait for services
+        run: |
+          until pg_isready -h localhost -p 5433 -U flexi; do sleep 2; done
+          until redis-cli -p 6380 ping; do sleep 2; done
+      - run: pnpm prisma migrate deploy
+      - run: pnpm test

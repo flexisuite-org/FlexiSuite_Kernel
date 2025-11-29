@@ -7,14 +7,15 @@ export const prisma = new PrismaClient({
 });
 
 // Set Postgres session variables for RLS per request.
-export async function setRlsContext(groupId: string | null, userId: string | null) {
+export async function setRlsContext(groupId: string | null, userId: string | null, mode: 'draft' | 'stable' = 'stable') {
   const group = groupId ?? null;
   const user = userId ?? null;
   try {
     await prisma.$executeRawUnsafe(
-      "SELECT set_config('flexi.current_group', $1, true), set_config('flexi.current_user', $2, true)",
+      "SELECT set_config('flexi.current_group', $1, true), set_config('flexi.current_user', $2, true), set_config('default_transaction_read_only', $3, true)",
       group,
-      user
+      user,
+      mode === 'draft' ? 'on' : 'off'
     );
   } catch (err) {
     logger.warn({ err, group, user }, 'failed to set RLS context');
