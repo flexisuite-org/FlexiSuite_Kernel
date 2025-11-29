@@ -36,6 +36,11 @@ enum ReleaseChannel {
   DRAFT
 }
 
+enum ExecutionMode {
+  API
+  SANDBOX
+}
+
 model User {
   id           String    @id @default(cuid())
   email        String    @unique
@@ -209,6 +214,7 @@ model ComponentPolicy {
   timeoutMs      Int      @default(500)
   allowNetwork   Boolean  @default(false)
   allowedModules String[] @default([])
+  executionMode  ExecutionMode @default(API)
 
   packages ComponentPackage[]
 }
