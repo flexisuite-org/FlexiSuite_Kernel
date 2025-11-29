@@ -7,6 +7,7 @@ import { contextPlugin } from '../kernel/iam/context.plugin';
 import healthRoutes from './routes/health';
 import authRoutes from './routes/auth';
 import metricsRoutes from './routes/metrics';
+import { authHook } from './hooks/auth';
 
 export function buildServer() {
   // Fastify v5 requires logger to be passed as a configuration object or boolean
@@ -23,6 +24,7 @@ export function buildServer() {
     timeWindow: config.rateLimit.windowMs
   });
 
+  app.register(async (instance) => authHook(instance));
   app.register(async (instance) => contextPlugin(instance));
   app.register(healthRoutes, { prefix: '/health' });
   app.register(authRoutes, { prefix: '/auth' });
