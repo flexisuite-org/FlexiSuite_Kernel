@@ -26,6 +26,7 @@
 
 ### Install
 - `POST /install` – { packageId, version, channel? } → 依存解決＋ロック生成をアトミック実行。入力は Zod で検証し、root manifest の integrity を照合。
+- draft 実行 (`/sandbox/drafts/run`) は `default_transaction_read_only=on` + ミドルウェアで書き込みを拒否（PlaygroundLog を除く）。
 - `DELETE /install/:installId` – アンインストール。
 - `POST /install/:installId/rollback` – 直前ロックに戻す。
 - `GET /install` – インストール一覧（groupスコープ）。
