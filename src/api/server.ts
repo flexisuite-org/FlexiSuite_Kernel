@@ -12,6 +12,7 @@ import registryRoutes from './routes/registry';
 import installRoutes from './routes/install';
 import componentsRoutes from './routes/components';
 import draftsRoutes from './routes/drafts';
+import { mapPrismaError } from '../lib/prisma-draft-guard';
 
 export function buildServer() {
   // Fastify v5 requires logger to be passed as a configuration object or boolean
@@ -37,6 +38,12 @@ export function buildServer() {
   app.register(componentsRoutes, { prefix: '/' });
   app.register(draftsRoutes, { prefix: '/' });
   app.register(metricsRoutes, { prefix: '/metrics' });
+
+  app.setErrorHandler((error, _req, reply) => {
+    const mapped = mapPrismaError(error);
+    if (mapped) return reply.code(mapped.status).send(mapped.body);
+    reply.code(500).send({ error: 'internal_error', message: error.message });
+  });
 
   return app;
 }
