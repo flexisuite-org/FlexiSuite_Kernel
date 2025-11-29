@@ -28,9 +28,7 @@ export default async function draftsRoutes(fastify: FastifyInstance) {
         kernel: { groupId: ctx.groupId, userId: ctx.userId, payload: body.payload, channel: 'draft' }
       });
 
-      // Store result in playground log (non-prod) for inspection
       await saveDraftResult(ctx.groupId, ctx.userId ?? null, { result });
-
       await prisma.auditLog.create({
         data: {
           actorUserId: ctx.userId,
@@ -44,17 +42,19 @@ export default async function draftsRoutes(fastify: FastifyInstance) {
 
       reply.send({ status: 'ok', result });
     } catch (err: any) {
+      const code = err?.name === 'OperationTimeoutError' ? 504 : 500;
+      const message = err?.message || 'sandbox_error';
       await prisma.auditLog.create({
         data: {
           actorUserId: ctx.userId,
           groupId: ctx.groupId,
           resource: 'sandbox.draft',
           action: 'run',
-          metadata: { success: false, error: err?.message },
+          metadata: { success: false, error: message },
           success: false
         }
       });
-      reply.code(500).send({ error: 'sandbox_error', message: err?.message });
+      reply.code(code).send({ error: 'sandbox_error', message });
     }
   });
 }

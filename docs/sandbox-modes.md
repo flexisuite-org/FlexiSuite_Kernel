@@ -13,7 +13,7 @@
 - stable: policy依存だが、ネットワークはデフォルト禁止。必要最小限だけ allowlist。
 
 ## データ書き込みポリシー
-- draft: プレイグラウンドスキーマ/一時テーブルへリダイレクト（現状は PlaygroundLog に保存）。RLSは保持。Prismaミドルウェアで draft モード時の書き込みをブロック（PlaygroundLog 以外）。
+- draft: プレイグラウンドスキーマ/一時テーブルへリダイレクト（現状は PlaygroundLog に保存）。RLSは保持。Prismaミドルウェア＋`default_transaction_read_only=on` で draft モード時の書き込みをブロック（PlaygroundLog 以外）。
 - staging: 本番スキーマだが限定的なエンティティのみ書き込み許可、またはシャドー書き込み＋比較。
 - stable: 通常の本番書き込み。RLSとAuditが必須。
 
