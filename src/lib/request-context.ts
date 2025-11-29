@@ -3,6 +3,7 @@ import { AsyncLocalStorage } from 'async_hooks';
 export interface RequestContextValue {
   groupId?: string | null;
   userId?: string | null;
+  mode?: 'draft' | 'stable';
 }
 
 export const requestContext = new AsyncLocalStorage<RequestContextValue>();

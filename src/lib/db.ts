@@ -39,6 +39,7 @@ const OWNER_SCOPED_FIELDS: Record<string, string> = {
 prisma.$use(async (params, next) => {
   const ctx = getRequestContext();
   const groupId = ctx?.groupId || null;
+  const mode = ctx?.mode || 'stable';
 
   const field = GROUP_SCOPED_FIELDS[params.model ?? ''] ?? OWNER_SCOPED_FIELDS[params.model ?? ''];
   if (field) {
@@ -47,6 +48,9 @@ prisma.$use(async (params, next) => {
 
     // Write operations should stamp the group
     if (['create', 'createMany', 'upsert'].includes(params.action)) {
+      if (mode === 'draft' && params.model !== 'PlaygroundLog') {
+        throw new Error('write_not_allowed_in_draft');
+      }
       const assign = (data: any) => {
         if (data && typeof data === 'object') data[field] = groupId;
       };
@@ -66,6 +70,9 @@ prisma.$use(async (params, next) => {
       'upsert'
     ];
     if (scopedActions.includes(params.action)) {
+      if (mode === 'draft' && ['update', 'updateMany', 'delete', 'deleteMany', 'upsert'].includes(params.action) && params.model !== 'PlaygroundLog') {
+        throw new Error('write_not_allowed_in_draft');
+      }
       params.args.where = { ...(params.args.where || {}), [field]: groupId };
     }
   }
