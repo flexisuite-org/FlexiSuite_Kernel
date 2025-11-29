@@ -27,7 +27,7 @@ export default async function registryRoutes(fastify: FastifyInstance) {
   });
 
   // register draft package
-  fastify.post('/packages', async (req: FastifyRequest, reply: FastifyReply) => {
+  fastify.post('/packages', { config: { rateLimit: { max: 20, timeWindow: '1 minute' } } }, async (req: FastifyRequest, reply: FastifyReply) => {
     const ctx = requestContext.getStore();
     if (!ctx?.groupId || !ctx?.userId) return reply.code(401).send({ error: 'unauthorized' });
     const body = req.body as PackageInput;

@@ -69,7 +69,7 @@ export default async function installRoutes(fastify: FastifyInstance) {
   }).refine((v) => v.packageId || (v.name && v.version), { message: 'packageId or (name+version) required' });
 
   // Install package for current group
-  fastify.post('/install', async (req: FastifyRequest, reply: FastifyReply) => {
+  fastify.post('/install', { config: { rateLimit: { max: 30, timeWindow: '1 minute' } } }, async (req: FastifyRequest, reply: FastifyReply) => {
     const ctx = requestContext.getStore();
     if (!ctx?.groupId || !ctx?.userId) return reply.code(401).send({ error: 'unauthorized' });
 

@@ -126,4 +126,28 @@ describe('install/run integration', () => {
     expect(res.status).toBe(200);
     expect(res.body.results['does.not.exist'].error).toBe('unsupported_capability');
   });
+
+  test('entity.list respects group isolation', async () => {
+    const manifest = { name: '@ga/list', version: '1.0.3', engine: '1.0.0', capabilities: ['data.entity.list'] };
+    const integrity = sha256Hex(JSON.stringify(manifest));
+    setRequestContext({ groupId: groupA, userId: userA });
+    const policyId = (await prisma.componentPolicy.findFirst())?.id || (await prisma.componentPolicy.create({ data: { name: 'p4' } })).id;
+    const pkg = await prisma.componentPackage.create({
+      data: { name: manifest.name, version: manifest.version, status: 'APPROVED', integrityHash: integrity, manifest, policyId, ownerGroupId: groupA }
+    });
+    setRequestContext({ groupId: groupA, userId: userA });
+    const install = await prisma.componentInstall.create({ data: { packageId: pkg.id, groupId: groupA, lockData: { integrity } } });
+
+    // seed records in groupA
+    const def = await prisma.entityDefinition.create({ data: { appId: (await prisma.app.create({ data: { name: 'a', version: '1' } })).id, name: 'n', version: 1, schema: {}, strict: false } });
+    await prisma.entityRecord.create({ data: { definitionId: def.id, groupId: groupA, data: { foo: 'bar' }, schemaVersion: 1 } });
+
+    // request as groupB should return empty due to RLS/middleware scoping
+    const res = await request(app.server)
+      .post(`/components/${install.id}/run`)
+      .set('authorization', 'Bearer ' + token(userA, groupB))
+      .send({ payload: { limit: 10 } });
+
+    expect(res.status).toBe(404); // install not found in groupB
+  });
 });
