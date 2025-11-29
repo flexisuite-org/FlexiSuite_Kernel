@@ -55,6 +55,7 @@ model User {
   auditLogs     AuditLog[]     @relation("AuditActor")
   createdPackages ComponentPackage[] @relation("ComponentCreator")
   componentInstalls ComponentInstall[]
+  playgroundLogs PlaygroundLog[]
 }
 
 model Group {
@@ -75,6 +76,7 @@ model Group {
   auditLogs   AuditLog[]     @relation("AuditGroup")
   componentPackages ComponentPackage[] @relation("ComponentOwner")
   componentInstalls ComponentInstall[]
+  playgroundLogs PlaygroundLog[]
 }
 
 model GroupMember {
@@ -225,6 +227,8 @@ model ComponentPackage {
   version       String
   status        ComponentStatus @default(DRAFT)
   integrityHash String
+  bundleIntegrity String?
+  bundleSignature String?
   manifest      Json
   policyId      String
   ownerGroupId  String
@@ -240,6 +244,17 @@ model ComponentPackage {
 
   @@unique([name, version])
   @@index([ownerGroupId])
+}
+
+model PlaygroundLog {
+  id        String   @id @default(cuid())
+  groupId   String
+  userId    String?
+  payload   Json
+  createdAt DateTime @default(now())
+
+  group Group @relation(fields: [groupId], references: [id])
+  user  User? @relation(fields: [userId], references: [id])
 }
 
 model ComponentDependency {

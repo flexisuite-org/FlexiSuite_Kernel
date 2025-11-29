@@ -1,18 +1,12 @@
 import { prisma } from './db';
 
-// Simple helper to route draft writes to a playground schema/table namespace.
-// For now, we just tag data with isPlayground=true; later we can move to separate schema.
-
+// Playground storage (non-prod). Writes go to PlaygroundLog with RLS enforced.
 export async function saveDraftResult(groupId: string, userId: string | null, payload: any) {
-  // For now we log into AuditLog with isPlayground flag; could be moved to a dedicated table/schema later.
-  return prisma.auditLog.create({
+  return prisma.playgroundLog.create({
     data: {
-      actorUserId: userId ?? undefined,
       groupId,
-      resource: 'sandbox.draft.write',
-      action: 'store',
-      metadata: { payload, isPlayground: true },
-      success: true
+      userId: userId ?? undefined,
+      payload
     }
   });
 }

@@ -86,6 +86,23 @@ export default async function componentsRoutes(fastify: FastifyInstance) {
       }
     }
 
+    if (install.package.bundleIntegrity && config.SIGNING_SECRET) {
+      const signingPayload = JSON.stringify({ manifestIntegrity: install.package.integrityHash, bundleIntegrity: install.package.bundleIntegrity });
+      if (!install.package.bundleSignature || !verifyHmac(signingPayload, install.package.bundleSignature, config.SIGNING_SECRET)) {
+        await prisma.auditLog.create({
+          data: {
+            actorUserId: ctx.userId,
+            groupId: ctx.groupId,
+            resource: 'component.run',
+            action: 'bundle_signature_mismatch',
+            metadata: { installId: install.id },
+            success: false
+          }
+        });
+        return reply.code(422).send({ error: 'bundle_signature_mismatch' });
+      }
+    }
+
     // APIモード: capabilities に基づき限定的な処理のみ実行
     const manifest = install.package.manifest as ComponentManifest;
     const requested = (manifest.capabilities ?? []);
