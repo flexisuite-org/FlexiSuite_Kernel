@@ -2,6 +2,7 @@ import { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { sandbox } from '../../kernel/runtime/sandbox';
 import { requestContext } from '../../lib/request-context';
 import { prisma } from '../../lib/db';
+import { saveDraftResult } from '../../lib/playground-db';
 
 interface DraftRunBody {
   script: string; // JS code to run inside sandbox
@@ -19,6 +20,9 @@ export default async function draftsRoutes(fastify: FastifyInstance) {
       const result = await sandbox.run(body.script, {
         kernel: { groupId: ctx.groupId, userId: ctx.userId, payload: body.payload, channel: 'draft' }
       });
+
+      // Store result in playground log (non-prod) for inspection
+      await saveDraftResult(ctx.groupId, ctx.userId ?? null, { result });
 
       await prisma.auditLog.create({
         data: {
