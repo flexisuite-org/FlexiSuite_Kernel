@@ -177,4 +177,23 @@ describe('install/run integration', () => {
 
     expect(res.status).toBe(404); // install not found in groupB
   });
+
+  test('listByDefinition and getDefinition work in own group', async () => {
+    const manifest = { name: '@ga/list-def', version: '1.0.6', engine: '1.0.0', capabilities: ['data.entity.listByDefinition', 'data.entity.getDefinition'] };
+    const integrity = sha256Hex(JSON.stringify(manifest));
+    setRequestContext({ groupId: groupA, userId: userA });
+    const policyId = (await prisma.componentPolicy.findFirst())?.id || (await prisma.componentPolicy.create({ data: { name: 'p7' } })).id;
+    const pkg = await prisma.componentPackage.create({ data: { name: manifest.name, version: manifest.version, status: 'APPROVED', integrityHash: integrity, manifest, policyId, ownerGroupId: groupA } });
+    const install = await prisma.componentInstall.create({ data: { packageId: pkg.id, groupId: groupA, lockData: { integrity } } });
+
+    const def = await prisma.entityDefinition.create({ data: { appId: (await prisma.app.create({ data: { name: 'a3', version: '1' } })).id, name: 'defx', version: 1, schema: {}, strict: false } });
+
+    const res = await request(app.server)
+      .post(`/components/${install.id}/run`)
+      .set('authorization', 'Bearer ' + token(userA, groupA))
+      .send({ payload: { definitionId: def.id, limit: 10 } });
+
+    expect(res.status).toBe(200);
+    expect(res.body.results['data.entity.getDefinition'].id).toBe(def.id);
+  });
 });

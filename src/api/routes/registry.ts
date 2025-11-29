@@ -14,6 +14,11 @@ interface PackageInput {
   dependencies?: { name: string; version: string; integrity?: string; kind?: string }[];
 }
 
+interface BundleUploadInput {
+  data: string; // base64
+  integrity: string;
+}
+
 export default async function registryRoutes(fastify: FastifyInstance) {
   // list packages for current group
   fastify.get('/packages', async (req: FastifyRequest, reply: FastifyReply) => {
@@ -110,5 +115,30 @@ export default async function registryRoutes(fastify: FastifyInstance) {
     });
     if (updated.count === 0) return reply.code(404).send({ error: 'not found' });
     reply.send({ id, status: 'REVOKED' });
+  });
+
+  // upload bundle as base64, store integrity/signature and local file
+  fastify.post('/packages/:id/bundleUpload', async (req: FastifyRequest, reply: FastifyReply) => {
+    const ctx = requestContext.getStore();
+    if (!ctx?.groupId) return reply.code(401).send({ error: 'unauthorized' });
+    const { id } = req.params as { id: string };
+    const body = req.body as BundleUploadInput;
+    if (!body?.data || !body?.integrity) return reply.code(400).send({ error: 'invalid_input' });
+
+    const buffer = Buffer.from(body.data, 'base64');
+    const actual = sha256Hex(buffer);
+    if (actual !== body.integrity) return reply.code(422).send({ error: 'integrity_mismatch', expected: body.integrity, got: actual });
+
+    const signingPayload = JSON.stringify({ manifestIntegrity: undefined, bundleIntegrity: body.integrity });
+    const signature = config.SIGNING_SECRET ? signHmac(signingPayload, config.SIGNING_SECRET) : undefined;
+
+    const updated = await prisma.componentPackage.updateMany({ where: { id, ownerGroupId: ctx.groupId }, data: { bundleIntegrity: body.integrity, bundleSignature: signature } });
+    if (updated.count === 0) return reply.code(404).send({ error: 'not found' });
+
+    const fs = await import('fs');
+    await fs.promises.mkdir('storage/bundles', { recursive: true });
+    await fs.promises.writeFile(`storage/bundles/${id}.bin`, buffer);
+
+    reply.code(201).send({ id, bundleIntegrity: body.integrity, bundleSignature: signature });
   });
 }

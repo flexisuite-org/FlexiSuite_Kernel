@@ -29,5 +29,10 @@ export const capabilityHandlers: Record<string, (payload: any) => Promise<any> |
     const def = await prisma.entityDefinition.findFirst({ where: { id: payload.definitionId } });
     if (!def) return { error: 'not_found' };
     return { id: def.id, name: def.name, version: def.version, schema: def.schema };
+  },
+  'data.entity.listDefinitions': async (payload) => {
+    const { limit = 50 } = payload || {};
+    const defs = await prisma.entityDefinition.findMany({ take: Math.min(200, limit) });
+    return { items: defs.map((d) => ({ id: d.id, name: d.name, version: d.version })) };
   }
 };
