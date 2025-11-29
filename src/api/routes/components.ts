@@ -105,7 +105,10 @@ export default async function componentsRoutes(fastify: FastifyInstance) {
 
     // APIモード: capabilities に基づき限定的な処理のみ実行
     const manifest = install.package.manifest as ComponentManifest;
-    const requested = (manifest.capabilities ?? []);
+    const allowed = (manifest.allowedCapabilities ?? manifest.capabilities ?? []).filter((cap) =>
+      config.capabilityAllowlist.includes(cap)
+    );
+    const requested = allowed;
     const payload = inputPayload;
     const results: Record<string, any> = {};
     for (const cap of requested) {

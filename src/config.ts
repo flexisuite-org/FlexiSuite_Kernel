@@ -15,7 +15,8 @@ const schema = z.object({
   RATE_LIMIT_WINDOW: z.string().default('60000'),
   SANDBOX_MEMORY_MB: z.string().default('128'),
   SANDBOX_TIMEOUT_MS: z.string().default('500'),
-  LOG_LEVEL: z.string().default('info')
+  LOG_LEVEL: z.string().default('info'),
+  CAPABILITY_ALLOWLIST: z.string().optional()
 });
 
 const parsed = schema.safeParse(process.env);
@@ -35,5 +36,6 @@ export const config = {
   sandbox: {
     memoryMb: parseInt(parsed.data.SANDBOX_MEMORY_MB, 10),
     timeoutMs: parseInt(parsed.data.SANDBOX_TIMEOUT_MS, 10)
-  }
+  },
+  capabilityAllowlist: (parsed.data.CAPABILITY_ALLOWLIST || 'echo,time.now,data.entity.get,data.entity.list,data.entity.listByDefinition,data.entity.getDefinition').split(',')
 };
