@@ -1,6 +1,9 @@
 import { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { prisma } from '../../lib/db';
 import { requestContext } from '../../lib/request-context';
+import { sha256Hex } from '../../lib/integrity';
+import { signHmac } from '../../lib/signature';
+import { config } from '../../config';
 
 interface PackageInput {
   name: string;
@@ -28,13 +31,19 @@ export default async function registryRoutes(fastify: FastifyInstance) {
     const ctx = requestContext.getStore();
     if (!ctx?.groupId || !ctx?.userId) return reply.code(401).send({ error: 'unauthorized' });
     const body = req.body as PackageInput;
+    const manifestBase = body.manifest;
+    const integrity = sha256Hex(JSON.stringify(manifestBase));
+    const signature = config.SIGNING_SECRET ? signHmac(JSON.stringify({ ...manifestBase, integrity }), config.SIGNING_SECRET) : undefined;
+
+    const manifestToStore = { ...manifestBase, integrity, signature };
+
     const result = await prisma.$transaction(async (tx) => {
       const pkg = await tx.componentPackage.create({
         data: {
           name: body.name,
           version: body.version,
-          integrityHash: body.integrityHash,
-          manifest: body.manifest,
+          integrityHash: integrity,
+          manifest: manifestToStore,
           policyId: body.policyId,
           ownerGroupId: ctx.groupId!,
           createdById: ctx.userId!
