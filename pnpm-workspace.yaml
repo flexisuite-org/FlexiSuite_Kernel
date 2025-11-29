@@ -1,0 +1,9 @@
+ignoredBuiltDependencies:
+  - isolated-vm
+  - msgpackr-extract
+
+onlyBuiltDependencies:
+  - '@prisma/client'
+  - '@prisma/engines'
+  - argon2
+  - prisma

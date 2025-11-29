@@ -1,0 +1,182 @@
+generator client {
+  provider = "prisma-client-js"
+  output = "../node_modules/.prisma/client"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum GroupType {
+  ORG
+  TEAM
+  PROJECT
+}
+
+enum PermissionScope {
+  GROUP
+  TENANT
+}
+
+model User {
+  id           String    @id @default(cuid())
+  email        String    @unique
+  passwordHash String
+  mfaSecret    String?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+  deletedAt    DateTime?
+
+  memberships   GroupMember[]
+  refreshTokens RefreshToken[]
+  auditLogs     AuditLog[]     @relation("AuditActor")
+}
+
+model Group {
+  id        String    @id @default(cuid())
+  parentId  String?
+  type      GroupType
+  name      String
+  settings  Json?
+  deletedAt DateTime?
+
+  parent      Group?         @relation("GroupHierarchy", fields: [parentId], references: [id])
+  children    Group[]        @relation("GroupHierarchy")
+  members     GroupMember[]
+  roles       Role[]
+  installs    AppInstall[]
+  records     EntityRecord[]
+  permissions Permission[]   @relation("PermissionGroup")
+  auditLogs   AuditLog[]     @relation("AuditGroup")
+}
+
+model GroupMember {
+  id      String @id @default(cuid())
+  userId  String
+  groupId String
+
+  user  User   @relation(fields: [userId], references: [id])
+  group Group  @relation(fields: [groupId], references: [id])
+  roles Role[] @relation("RoleAssignments")
+
+  @@unique([userId, groupId])
+}
+
+model Role {
+  id      String @id @default(cuid())
+  name    String
+  groupId String
+
+  group       Group            @relation(fields: [groupId], references: [id])
+  permissions RolePermission[]
+  members     GroupMember[]    @relation("RoleAssignments")
+}
+
+model Permission {
+  id       String          @id @default(cuid())
+  resource String
+  action   String
+  scope    PermissionScope
+  groupId  String?
+
+  group Group?           @relation("PermissionGroup", fields: [groupId], references: [id])
+  roles RolePermission[]
+}
+
+model RolePermission {
+  roleId       String
+  permissionId String
+
+  role       Role       @relation(fields: [roleId], references: [id])
+  permission Permission @relation(fields: [permissionId], references: [id])
+
+  @@id([roleId, permissionId])
+}
+
+model App {
+  id        String   @id @default(cuid())
+  name      String
+  version   String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  definitions EntityDefinition[]
+  installs    AppInstall[]
+}
+
+model AppInstall {
+  id      String @id @default(cuid())
+  appId   String
+  groupId String
+
+  app   App   @relation(fields: [appId], references: [id])
+  group Group @relation(fields: [groupId], references: [id])
+
+  @@unique([appId, groupId])
+}
+
+model EntityDefinition {
+  id      String  @id @default(cuid())
+  appId   String
+  name    String
+  version Int
+  schema  Json
+  strict  Boolean @default(true)
+
+  app     App            @relation(fields: [appId], references: [id])
+  records EntityRecord[]
+}
+
+model EntityRecord {
+  id            String    @id @default(cuid())
+  definitionId  String
+  groupId       String
+  data          Json
+  schemaVersion Int
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+  deletedAt     DateTime?
+
+  definition EntityDefinition @relation(fields: [definitionId], references: [id])
+  group      Group            @relation(fields: [groupId], references: [id])
+  history    EntityHistory[]
+}
+
+model EntityHistory {
+  id        String   @id @default(cuid())
+  entityId  String
+  data      Json
+  version   Int
+  createdAt DateTime @default(now())
+
+  record EntityRecord @relation(fields: [entityId], references: [id])
+}
+
+model RefreshToken {
+  id                String   @id @default(cuid())
+  userId            String
+  tokenHash         String
+  familyId          String
+  deviceFingerprint String?
+  ip                String?
+  expiresAt         DateTime
+  revoked           Boolean  @default(false)
+  createdAt         DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id])
+}
+
+model AuditLog {
+  id          String   @id @default(cuid())
+  actorUserId String?
+  groupId     String?
+  resource    String
+  action      String
+  metadata    Json?
+  success     Boolean  @default(true)
+  createdAt   DateTime @default(now())
+
+  actor User?  @relation("AuditActor", fields: [actorUserId], references: [id])
+  group Group? @relation("AuditGroup", fields: [groupId], references: [id])
+}
