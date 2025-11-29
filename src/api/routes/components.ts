@@ -1,8 +1,6 @@
 import { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { prisma } from '../../lib/db';
 import { requestContext } from '../../lib/request-context';
-import { sandbox } from '../../kernel/runtime/sandbox';
-import crypto from 'crypto';
 
 // Minimal run/bundle placeholders using install lock
 
@@ -29,7 +27,7 @@ export default async function componentsRoutes(fastify: FastifyInstance) {
     });
     if (!install) return reply.code(404).send({ error: 'not found' });
 
-    // integrity check: lock integrity vs stored hash
+    // integrity check: lock integrity vs stored hash (tamper detection)
     const lockIntegrity = (install.lockData as any)?.integrity;
     if (lockIntegrity && lockIntegrity !== install.package.integrityHash) {
       await prisma.auditLog.create({
@@ -45,43 +43,18 @@ export default async function componentsRoutes(fastify: FastifyInstance) {
       return reply.code(422).send({ error: 'integrity_mismatch' });
     }
 
-    const executionMode = install.package.policy.executionMode;
-    const payload = req.body ?? {};
-    let result: any;
-    let success = true;
-
-    if (executionMode === 'SANDBOX') {
-      const script = (install.package.manifest as any)?.entryScript as string | undefined;
-      if (!script) {
-        success = false;
-        result = { error: 'missing_entry_script' };
-      } else {
-        try {
-          result = await sandbox.run(script, {
-            kernel: { groupId: ctx.groupId, userId: ctx.userId, payload }
-          });
-        } catch (err: any) {
-          success = false;
-          result = { error: 'sandbox_error', message: err?.message };
-        }
-      }
-    } else {
-      // API mode: no user code execution, just echo and mark allowed
-      result = { status: 'ok', mode: 'API', payload };
-    }
-
+    // APIモード固定: ユーザーコードはここでは実行しない。本番コンポーネントはフロント/別プロセスで動く前提。
     await prisma.auditLog.create({
       data: {
         actorUserId: ctx.userId,
         groupId: ctx.groupId,
         resource: 'component.run',
-        action: executionMode?.toLowerCase() || 'api',
-        metadata: { installId: install.id, packageId: install.packageId, mode: executionMode, success },
-        success
+        action: 'api',
+        metadata: { installId: install.id, packageId: install.packageId, mode: 'API' },
+        success: true
       }
     });
 
-    if (!success) return reply.code(500).send(result);
-    reply.send(result);
+    reply.send({ status: 'ok', mode: 'API', manifest: install.package.manifest, lock: install.lockData });
   });
 }

@@ -28,9 +28,12 @@
 - `POST /install/:installId/rollback` – 直前ロックに戻す。
 - `GET /install` – インストール一覧（groupスコープ）。
 
-### Run / Bundle
-- `POST /components/:id/run` – サーバー実行。`channel` で draft/stable を切替。ポリシー適用＆監査必須。
+### Run / Bundle（本番パッケージのみ）
+- `POST /components/:id/run` – APIモードで実行メタを返す（ユーザーコードは実行しない）。署名/integrity検証と監査のみ。
 - `GET /components/:id/bundle` – クライアント用バンドル取得。`If-None-Match` 等でキャッシュ。
+
+### Draft Sandbox
+- `POST /sandbox/drafts/run` – ドラフト用サンドボックスでスクリプトを実行（isolated-vm）。本番データは書き込まない。監査必須。
 
 ### Rollout Control
 - `POST /rollout` – { lockId, percentage, allowlist?, blocklist? } を設定。
