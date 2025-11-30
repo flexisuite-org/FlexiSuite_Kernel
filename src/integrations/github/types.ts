@@ -1,4 +1,12 @@
-export type GithubBuildStep = 'queued' | 'cloning' | 'building' | 'bundling' | 'uploading' | 'done' | 'failed';
+export type GithubBuildStep =
+  | 'queued'
+  | 'cloning'
+  | 'building'
+  | 'bundling'
+  | 'downloading'
+  | 'uploading'
+  | 'done'
+  | 'failed';
 
 export interface GithubBuildJobData {
   jobId: string;
@@ -13,6 +21,9 @@ export interface GithubBuildJobData {
   policyId?: string;
   approve?: boolean;
   install?: boolean;
+  artifactUrl?: string;
+  artifactToken?: string;
+  manifest?: any;
 }
 
 export interface GithubBuildStatus {

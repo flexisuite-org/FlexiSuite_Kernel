@@ -1,6 +1,7 @@
-import { PrismaClient, Prisma } from '@prisma/client';
+import { PrismaClient } from '@prisma/client';
 import { logger } from './logger';
 import { getRequestContext } from './request-context';
+import type { PrismaMiddleware, PrismaAction } from './prisma-middleware-types';
 
 export const prisma = new PrismaClient({
   log: ['error', 'warn']
@@ -11,6 +12,7 @@ export async function setRlsContext(groupId: string | null, userId: string | nul
   const group = groupId ?? null;
   const user = userId ?? null;
   try {
+    // Keep RLS aware of the current tenant/user and make draft requests read-only at the Postgres level.
     await prisma.$executeRawUnsafe(
       "SELECT set_config('flexi.current_group', $1, true), set_config('flexi.current_user', $2, true), set_config('default_transaction_read_only', $3, true)",
       group,
@@ -37,11 +39,7 @@ const OWNER_SCOPED_FIELDS: Record<string, string> = {
   ComponentPackage: 'ownerGroupId'
 };
 
-prisma.$use(
-  async (
-    params: Prisma.MiddlewareParams,
-    next: (params: Prisma.MiddlewareParams) => Promise<unknown>
-  ) => {
+const multiTenantMiddleware: PrismaMiddleware = async (params, next) => {
     const ctx = getRequestContext();
     const groupId = ctx?.groupId || null;
     const mode = ctx?.mode || 'stable';
@@ -74,7 +72,7 @@ prisma.$use(
       }
 
       // Read/update/delete operations should be scoped
-      const scopedActions = [
+      const scopedActions: PrismaAction[] = [
         'findUnique',
         'findFirst',
         'findMany',
@@ -104,5 +102,8 @@ prisma.$use(
     }
 
     return next(params);
-  }
-);
+};
+
+// Cast to any to work around type incompatibility between our custom types
+// and Prisma's internal middleware types in version 5.9.0
+prisma.$use(multiTenantMiddleware as any);

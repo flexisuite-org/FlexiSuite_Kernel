@@ -20,6 +20,7 @@ export async function truncateAll() {
             "GroupMember",
             "RefreshToken",
             "AuditLog",
+            "SandboxSession",
             "Group",
             "User"
     RESTART IDENTITY CASCADE;

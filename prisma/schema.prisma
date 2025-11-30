@@ -77,6 +77,20 @@ model Group {
   componentPackages ComponentPackage[] @relation("ComponentOwner")
   componentInstalls ComponentInstall[]
   playgroundLogs PlaygroundLog[]
+  sandboxSessionsAsSource SandboxSession[] @relation("SandboxSourceSessions")
+  sandboxSessionsAsTarget SandboxSession[] @relation("SandboxTargetSessions")
+}
+
+model SandboxSession {
+  id              String   @id @default(cuid())
+  sourceGroupId   String
+  sandboxGroupId  String   @unique
+  appId           String?
+  createdAt       DateTime @default(now())
+  expiresAt       DateTime?
+
+  sourceGroup  Group @relation("SandboxSourceSessions", fields: [sourceGroupId], references: [id])
+  sandboxGroup Group @relation("SandboxTargetSessions", fields: [sandboxGroupId], references: [id])
 }
 
 model GroupMember {

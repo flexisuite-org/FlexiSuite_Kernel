@@ -12,6 +12,7 @@ import registryRoutes from './routes/registry';
 import installRoutes from './routes/install';
 import componentsRoutes from './routes/components';
 import draftsRoutes from './routes/drafts';
+import sandboxRoutes from './routes/sandbox';
 import { mapPrismaError } from '../lib/prisma-draft-guard';
 import { closeRedis } from '../lib/redis';
 import websocket from '../lib/websocket-compat';
@@ -56,6 +57,7 @@ export function buildServer() {
   app.register(installRoutes, { prefix: '/' });
   app.register(componentsRoutes, { prefix: '/' });
   app.register(draftsRoutes, { prefix: '/' });
+  app.register(sandboxRoutes, { prefix: '/sandbox' });
   app.register(aiRoutes, { prefix: '/ai' });
   app.register(websocket);
   app.register(wsRoutes, { prefix: '/ws' });

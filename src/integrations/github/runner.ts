@@ -10,10 +10,10 @@ import { updateStatus } from './status-store';
 import { logger } from '../../lib/logger';
 import { setRequestContext } from '../../lib/request-context';
 import { prisma, setRlsContext } from '../../lib/db';
-import { hashJson, sha256Hex, verifyIntegrity, stableStringify } from '../../lib/integrity';
-import { bundleStorage } from '../../kernel/components/storage';
+import { verifyIntegrity, stableStringify } from '../../lib/integrity';
 import { config } from '../../config';
-import { signHmac, verifyHmac } from '../../lib/signature';
+import { verifyHmac } from '../../lib/signature';
+import { downloadGithubArtifact, registerArtifactBundle } from './queue/artifact-job';
 import { resolveToLock, ManifestFetcher } from '../../kernel/components/resolver';
 
 const execAsync = promisify(exec);
@@ -61,72 +61,6 @@ function resolveRepoUrl(repo: string) {
     logger.warn({ err, repo }, 'failed to parse repo url, using as-is');
   }
   return repo;
-}
-
-async function ensurePolicy(policyId?: string) {
-  if (policyId) return policyId;
-  const existing = await prisma.componentPolicy.findFirst();
-  if (existing) return existing.id;
-  const created = await prisma.componentPolicy.create({
-    data: {
-      name: 'default-policy',
-      memoryMb: config.sandbox.memoryMb,
-      timeoutMs: config.sandbox.timeoutMs,
-      allowNetwork: false,
-      allowedModules: [],
-      executionMode: 'API'
-    }
-  });
-  return created.id;
-}
-
-async function ensurePackage(data: GithubBuildJobData) {
-  const existing = await prisma.componentPackage.findFirst({
-    where: { name: data.packageName, version: data.version, ownerGroupId: data.groupId }
-  });
-  if (existing) return existing;
-
-  const policyId = await ensurePolicy(data.policyId);
-  const manifest = {
-    name: data.packageName,
-    version: data.version,
-    engine: '1.0.0',
-    capabilities: []
-  };
-  const integrity = hashJson(manifest);
-
-  return prisma.componentPackage.create({
-    data: {
-      name: data.packageName,
-      version: data.version,
-      status: 'DRAFT',
-      integrityHash: integrity,
-      manifest,
-      policyId,
-      ownerGroupId: data.groupId,
-      createdById: data.userId ?? undefined
-    }
-  });
-}
-
-async function uploadBundle(pkgId: string, buffer: Buffer, groupId: string) {
-  const bundleIntegrity = sha256Hex(buffer);
-  const pkg = await prisma.componentPackage.findFirst({ where: { id: pkgId, ownerGroupId: groupId } });
-  if (!pkg) throw new Error('package_not_found');
-
-  const signingPayload = JSON.stringify({
-    manifestIntegrity: pkg.integrityHash,
-    bundleIntegrity
-  });
-  const signature = config.SIGNING_SECRET ? signHmac(signingPayload, config.SIGNING_SECRET) : undefined;
-
-  const updated = await prisma.componentPackage.updateMany({
-    where: { id: pkgId, ownerGroupId: groupId },
-    data: { bundleIntegrity, bundleSignature: signature }
-  });
-  if (updated.count === 0) throw new Error('package_update_failed');
-  await bundleStorage.save(pkgId, buffer);
-  return { bundleIntegrity, bundleSignature: signature };
 }
 
 async function maybeApprove(pkgId: string, groupId: string) {
@@ -224,71 +158,86 @@ export async function processGithubBuildJob(job: Job<GithubBuildJobData>) {
   setRequestContext({ groupId: data.groupId, userId: data.userId ?? null });
   await setRlsContext(data.groupId, data.userId ?? null, 'stable');
 
-  await updateStatus(data.jobId, {
-    status: 'cloning',
-    message: `cloning ${data.repo}#${data.branch}`,
-    repo: data.repo,
-    branch: data.branch,
-    artifactPath: data.artifactPath,
-    groupId: data.groupId,
-    userId: data.userId
-  });
-
   const workDir = await fs.mkdtemp(path.join(os.tmpdir(), 'github-build-'));
   try {
-    const repoUrl = resolveRepoUrl(data.repo);
-    const cloneDir = path.join(workDir, 'repo');
-    await runCommand(`git clone --depth 1 --branch ${data.branch} ${repoUrl} ${cloneDir}`, workDir);
+    let bundleBuffer: Buffer;
+    if (data.artifactUrl) {
+      await updateStatus(data.jobId, {
+        status: 'downloading',
+        message: 'downloading artifact from GitHub',
+        repo: data.repo,
+        branch: data.branch,
+        artifactPath: data.artifactUrl,
+        groupId: data.groupId,
+        userId: data.userId
+      });
+      bundleBuffer = await downloadGithubArtifact(data);
+    } else {
+      await updateStatus(data.jobId, {
+        status: 'cloning',
+        message: `cloning ${data.repo}#${data.branch}`,
+        repo: data.repo,
+        branch: data.branch,
+        artifactPath: data.artifactPath,
+        groupId: data.groupId,
+        userId: data.userId
+      });
 
-    await updateStatus(data.jobId, {
-      status: 'building',
-      message: 'running build command',
-      groupId: data.groupId,
-      userId: data.userId
-    });
-    await runCommand(data.buildCommand, cloneDir);
+      const repoUrl = resolveRepoUrl(data.repo);
+      const cloneDir = path.join(workDir, 'repo');
+      await runCommand(`git clone --depth 1 --branch ${data.branch} ${repoUrl} ${cloneDir}`, workDir);
 
-    await updateStatus(data.jobId, {
-      status: 'bundling',
-      message: `bundling from ${data.artifactPath}`,
-      groupId: data.groupId,
-      userId: data.userId
-    });
+      await updateStatus(data.jobId, {
+        status: 'building',
+        message: 'running build command',
+        groupId: data.groupId,
+        userId: data.userId
+      });
+      await runCommand(data.buildCommand, cloneDir);
 
-    const artifactPath = path.resolve(cloneDir, data.artifactPath);
-    if (!existsSync(artifactPath)) {
-      throw new Error(`artifact_path_not_found:${data.artifactPath}`);
+      await updateStatus(data.jobId, {
+        status: 'bundling',
+        message: `bundling from ${data.artifactPath}`,
+        groupId: data.groupId,
+        userId: data.userId
+      });
+
+      const artifactPath = path.resolve(cloneDir, data.artifactPath);
+      if (!existsSync(artifactPath)) {
+        throw new Error(`artifact_path_not_found:${data.artifactPath}`);
+      }
+      const zipPath = await zipArtifact(artifactPath, workDir);
+      bundleBuffer = await fs.readFile(zipPath);
     }
-    const zipPath = await zipArtifact(artifactPath, workDir);
-    const buffer = await fs.readFile(zipPath);
 
     await updateStatus(data.jobId, {
       status: 'uploading',
       message: 'uploading bundle',
+      artifactPath: data.artifactUrl ?? data.artifactPath,
       groupId: data.groupId,
       userId: data.userId
     });
 
-    const pkg = await ensurePackage(data);
-    const upload = await uploadBundle(pkg.id, buffer, data.groupId);
-    await recordAudit(data, 'upload', true, { jobId: data.jobId, packageId: pkg.id, bundleIntegrity: upload.bundleIntegrity });
+    const upload = await registerArtifactBundle(data, bundleBuffer);
+    const pkgId = upload.packageId;
+    await recordAudit(data, 'upload', true, { jobId: data.jobId, packageId: pkgId, bundleIntegrity: upload.bundleIntegrity });
 
     if (data.approve) {
-      await maybeApprove(pkg.id, data.groupId);
+      await maybeApprove(pkgId, data.groupId);
     }
     if (data.install) {
-      await maybeInstall(pkg.id, data.groupId, data.userId);
+      await maybeInstall(pkgId, data.groupId, data.userId);
     }
 
     await updateStatus(data.jobId, {
       status: 'done',
       message: 'completed',
-      packageId: pkg.id,
+      packageId: pkgId,
       groupId: data.groupId,
       userId: data.userId
     });
 
-    await recordAudit(data, 'done', true, { jobId: data.jobId, packageId: pkg.id, bundleIntegrity: upload.bundleIntegrity });
+    await recordAudit(data, 'done', true, { jobId: data.jobId, packageId: pkgId, bundleIntegrity: upload.bundleIntegrity });
   } catch (err: any) {
     const message = sanitizeMessage(err?.message || 'build_failed');
     logger.error({ err, jobId: data.jobId }, 'github build failed');
