@@ -2,11 +2,11 @@ import { PrismaClient } from '@prisma/client';
 import { logger } from './logger';
 import { getRequestContext } from './request-context';
 import type {
-  PrismaTransactionClient,
   PrismaMiddlewareFn,
   PrismaMiddlewareParams,
-  PrismaMiddlewareNext
-} from './prisma-types';
+  PrismaMiddlewareNext,
+  PrismaAction
+} from './prisma-middleware-types';
 
 export const prisma = new PrismaClient({
   log: ['error', 'warn']
@@ -34,9 +34,9 @@ export async function withRlsContext<T>(
   groupId: string | null,
   userId: string | null,
   mode: 'draft' | 'stable',
-  fn: (tx: PrismaTransactionClient) => Promise<T>
+  fn: (tx: any) => Promise<T>
 ): Promise<T> {
-  return prisma.$transaction(async (tx: PrismaTransactionClient) => {
+  return prisma.$transaction(async (tx: any) => {
     await tx.$executeRawUnsafe(
       "SELECT set_config('flexi.current_group', $1, true), set_config('flexi.current_user', $2, true), set_config('default_transaction_read_only', $3, true)",
       groupId ?? null,
@@ -153,4 +153,5 @@ const multiTenantMiddleware: PrismaMiddlewareFn = async (
     return next(params);
 };
 
-prisma.$use(multiTenantMiddleware);
+// Cast to any to work around type incompatibility with Prisma's internal Middleware type
+prisma.$use(multiTenantMiddleware as any);
