@@ -15,7 +15,7 @@
 ## データ書き込みポリシー
 - draft:
   - 理想モデル: サンドボックス作成時に、対象グループ/アプリで必要なデータを「サンドボックス用グループ」にコピーし、そのコピーに対して自由に書き込みを許可する。本番グループ側のデータは汚染されない。
-  - 現状実装: プレイグラウンドスキーマ/PlaygroundLog に書き込みを集約し、`setRlsContext(..., mode='draft')` ＋ Prismaミドルウェア（`write_not_allowed_in_draft`）で本番テーブルへの書き込みをブロックする。将来的にはグループ単位のデータコピー方式に移行する想定。
+  - 現状実装: `setRlsContext(..., mode='draft')` で `flexi.current_group`/`flexi.current_user` に加えて `default_transaction_read_only=on` を Postgres セッションにセットし、Prisma ミドルウェア（`write_not_allowed_in_draft`）により PlaygroundLog を除く本番テーブルへの create/update/delete/upsert を拒否する。PlaygroundLog だけが例外として書き込みを許可し、将来的にはグループ単位のデータコピー方式に移行する想定。
 - staging: 本番スキーマだが限定的なエンティティのみ書き込み許可、またはシャドー書き込み＋比較。
 - stable: 通常の本番書き込み。RLSとAuditが必須。
 
@@ -31,3 +31,12 @@
 - integrity/署名不一致: 即拒否し、stable ロックがあればそちらへフォールバック。
 - 依存解決失敗: インストールを中断し、既存ロックを維持。
 - リソース超過: sandbox 停止＋監査。必要ならポリシー再評価。
+
+## サンドボックス枝の作成フロー
+
+1. 認証済みユーザーが `POST /sandbox/groups` を叩き、任意の `appId`・`ttlHours`（省略時 24h）を渡す。
+2. `contextPlugin` 経由でリクエストコンテキストの `groupId`（元グループ）を取得し、`createSandboxForGroup` を呼び出す。
+   - 現行では元グループの `type`/`settings`/`parentId` を再利用し、名称に `[sandbox]` を付けた新しい `Group` を作る。
+   - `SandboxSession` レコード (`sourceGroupId`, `sandboxGroupId`, `appId`, `expiresAt`) を登録し、TTL で有効期限を管理。
+   - TODO: AppInstall や EntityRecord などのコピー処理は未実装（将来的にはアプリ単位のコピー対象選択フローを接続）。
+3. API は `{ sandboxGroupId, sessionId }` を返却し、`SandboxSession` から対応するコピー履歴を追跡できる。

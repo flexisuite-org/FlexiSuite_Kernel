@@ -24,7 +24,10 @@ const buildSchema = z.object({
   version: z.string().min(1).refine((v) => !!semver.valid(v), { message: 'invalid_semver' }),
   policyId: z.string().optional(),
   approve: z.boolean().optional(),
-  install: z.boolean().optional()
+  install: z.boolean().optional(),
+  artifactUrl: z.string().url().optional(),
+  artifactToken: z.string().optional(),
+  manifest: z.any().optional()
 });
 
 export default async function githubRoutes(fastify: FastifyInstance) {
@@ -83,7 +86,10 @@ export default async function githubRoutes(fastify: FastifyInstance) {
       userId,
       policyId: input.policyId,
       approve: input.approve,
-      install: input.install
+      install: input.install,
+      artifactUrl: input.artifactUrl,
+      artifactToken: input.artifactToken,
+      manifest: input.manifest
     };
 
     await writeStatus({
