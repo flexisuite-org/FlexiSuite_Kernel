@@ -1,7 +1,7 @@
 import { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { prisma } from '../../lib/db';
 import { requestContext } from '../../lib/request-context';
-import { sha256Hex } from '../../lib/integrity';
+import { sha256Hex, hashJson } from '../../lib/integrity';
 import { signHmac } from '../../lib/signature';
 import { config } from '../../config';
 import { bundleStorage } from '../../kernel/components/storage';
@@ -24,9 +24,11 @@ export default async function registryRoutes(fastify: FastifyInstance) {
   // list packages for current group
   fastify.get('/packages', async (req: FastifyRequest, reply: FastifyReply) => {
     const ctx = requestContext.getStore();
-    if (!ctx?.groupId) return reply.code(400).send({ error: 'groupId required' });
+    const user = (req as any).user;
+    const groupId = user?.groupId ?? ctx?.groupId;
+    if (!groupId) return reply.code(400).send({ error: 'groupId required' });
     const packages = await prisma.componentPackage.findMany({
-      where: { ownerGroupId: ctx.groupId },
+      where: { ownerGroupId: groupId },
       include: { dependencies: true }
     });
     reply.send(packages);
@@ -35,15 +37,18 @@ export default async function registryRoutes(fastify: FastifyInstance) {
   // register draft package
   fastify.post('/packages', { config: { rateLimit: { max: 20, timeWindow: '1 minute' } } }, async (req: FastifyRequest, reply: FastifyReply) => {
     const ctx = requestContext.getStore();
-    if (!ctx?.groupId || !ctx?.userId) return reply.code(401).send({ error: 'unauthorized' });
+    const user = (req as any).user;
+    const groupId = user?.groupId ?? ctx?.groupId;
+    const userId = user?.id ?? ctx?.userId;
+    if (!groupId || !userId) return reply.code(401).send({ error: 'unauthorized' });
     const body = req.body as PackageInput;
     const manifestBase = body.manifest;
-    const integrity = sha256Hex(JSON.stringify(manifestBase));
+    const integrity = hashJson(manifestBase);
     const bundleIntegrity = body.bundleIntegrity;
     const signingPayload = JSON.stringify({ manifestIntegrity: integrity, bundleIntegrity });
     const signature = config.SIGNING_SECRET ? signHmac(signingPayload, config.SIGNING_SECRET) : undefined;
 
-    const manifestToStore = { ...manifestBase, integrity, bundleIntegrity, signature };
+    const manifestToStore = manifestBase;
 
     const result = await prisma.$transaction(async (tx) => {
       const pkg = await tx.componentPackage.create({
@@ -55,8 +60,8 @@ export default async function registryRoutes(fastify: FastifyInstance) {
           bundleSignature: signature,
           manifest: manifestToStore,
           policyId: body.policyId,
-          ownerGroupId: ctx.groupId!,
-          createdById: ctx.userId!
+          ownerGroupId: groupId,
+          createdById: userId
         }
       });
 
@@ -78,16 +83,18 @@ export default async function registryRoutes(fastify: FastifyInstance) {
   });
 
   // update bundle integrity/signature after upload
-  fastify.post('/packages/:id/bundle', async (req: FastifyRequest, reply: FastifyReply) => {
+    fastify.post('/packages/:id/bundle', async (req: FastifyRequest, reply: FastifyReply) => {
     const ctx = requestContext.getStore();
-    if (!ctx?.groupId) return reply.code(401).send({ error: 'unauthorized' });
+    const user = (req as any).user;
+    const groupId = user?.groupId ?? ctx?.groupId;
+    if (!groupId) return reply.code(401).send({ error: 'unauthorized' });
     const { id } = req.params as { id: string };
     const { bundleIntegrity } = req.body as { bundleIntegrity: string };
     if (!bundleIntegrity) return reply.code(400).send({ error: 'bundleIntegrity_required' });
     const signingPayload = JSON.stringify({ manifestIntegrity: undefined, bundleIntegrity });
     const signature = config.SIGNING_SECRET ? signHmac(signingPayload, config.SIGNING_SECRET) : undefined;
     const updated = await prisma.componentPackage.updateMany({
-      where: { id, ownerGroupId: ctx.groupId },
+      where: { id, ownerGroupId: groupId },
       data: { bundleIntegrity, bundleSignature: signature }
     });
     if (updated.count === 0) return reply.code(404).send({ error: 'not found' });
@@ -96,10 +103,12 @@ export default async function registryRoutes(fastify: FastifyInstance) {
 
   fastify.post('/packages/:id/approve', async (req: FastifyRequest, reply: FastifyReply) => {
     const ctx = requestContext.getStore();
-    if (!ctx?.groupId) return reply.code(401).send({ error: 'unauthorized' });
+    const user = (req as any).user;
+    const groupId = user?.groupId ?? ctx?.groupId;
+    if (!groupId) return reply.code(401).send({ error: 'unauthorized' });
     const { id } = req.params as { id: string };
     const updated = await prisma.componentPackage.updateMany({
-      where: { id, ownerGroupId: ctx.groupId },
+      where: { id, ownerGroupId: groupId },
       data: { status: 'APPROVED', approvedAt: new Date() }
     });
     if (updated.count === 0) return reply.code(404).send({ error: 'not found' });
@@ -108,10 +117,12 @@ export default async function registryRoutes(fastify: FastifyInstance) {
 
   fastify.post('/packages/:id/revoke', async (req: FastifyRequest, reply: FastifyReply) => {
     const ctx = requestContext.getStore();
-    if (!ctx?.groupId) return reply.code(401).send({ error: 'unauthorized' });
+    const user = (req as any).user;
+    const groupId = user?.groupId ?? ctx?.groupId;
+    if (!groupId) return reply.code(401).send({ error: 'unauthorized' });
     const { id } = req.params as { id: string };
     const updated = await prisma.componentPackage.updateMany({
-      where: { id, ownerGroupId: ctx.groupId },
+      where: { id, ownerGroupId: groupId },
       data: { status: 'REVOKED' }
     });
     if (updated.count === 0) return reply.code(404).send({ error: 'not found' });
@@ -121,7 +132,9 @@ export default async function registryRoutes(fastify: FastifyInstance) {
   // upload bundle as base64, store integrity/signature and local file
   fastify.post('/packages/:id/bundleUpload', async (req: FastifyRequest, reply: FastifyReply) => {
     const ctx = requestContext.getStore();
-    if (!ctx?.groupId) return reply.code(401).send({ error: 'unauthorized' });
+    const user = (req as any).user;
+    const groupId = user?.groupId ?? ctx?.groupId;
+    if (!groupId) return reply.code(401).send({ error: 'unauthorized' });
     const { id } = req.params as { id: string };
     const body = req.body as BundleUploadInput;
     if (!body?.data || !body?.integrity) return reply.code(400).send({ error: 'invalid_input' });
@@ -133,7 +146,7 @@ export default async function registryRoutes(fastify: FastifyInstance) {
     const signingPayload = JSON.stringify({ manifestIntegrity: undefined, bundleIntegrity: body.integrity });
     const signature = config.SIGNING_SECRET ? signHmac(signingPayload, config.SIGNING_SECRET) : undefined;
 
-    const updated = await prisma.componentPackage.updateMany({ where: { id, ownerGroupId: ctx.groupId }, data: { bundleIntegrity: body.integrity, bundleSignature: signature } });
+    const updated = await prisma.componentPackage.updateMany({ where: { id, ownerGroupId: groupId }, data: { bundleIntegrity: body.integrity, bundleSignature: signature } });
     if (updated.count === 0) return reply.code(404).send({ error: 'not found' });
     await bundleStorage.save(id, buffer);
     reply.code(201).send({ id, bundleIntegrity: body.integrity, bundleSignature: signature });

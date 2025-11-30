@@ -1,4 +1,10 @@
-import ivm from 'isolated-vm';
+let ivm: any;
+try {
+  ivm = require('isolated-vm');
+} catch (err) {
+  // optional dependency may be absent in CI; sandbox.run will throw if ivm unavailable
+  ivm = null;
+}
 import { defaultPolicy, SandboxPolicy } from './policy';
 
 export class Sandbox {
@@ -9,6 +15,9 @@ export class Sandbox {
   }
 
   async run(script: string, sandboxGlobals: Record<string, unknown> = {}) {
+    if (!ivm) {
+      throw new Error('isolated-vm not available');
+    }
     const isolate = new ivm.Isolate({ memoryLimit: this.policy.memoryMb });
     const context = await isolate.createContext();
     const jail = context.global;

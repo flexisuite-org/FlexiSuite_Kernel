@@ -4,10 +4,11 @@ import request from 'supertest';
 import jwt from 'jsonwebtoken';
 import { buildServer } from '../src/api/server';
 import { prisma } from '../src/lib/db';
-import { sha256Hex } from '../src/lib/integrity';
+import { hashJson } from '../src/lib/integrity';
 import { signHmac } from '../src/lib/signature';
 import { config } from '../src/config';
 import { setRequestContext } from '../src/lib/request-context';
+import { truncateAll, createTenantSeed, createPolicy } from './helpers/seed';
 
 function token(userId: string, groupId: string) {
   return jwt.sign({ userId, groupId, roles: [] }, config.JWT_SECRET);
@@ -18,33 +19,51 @@ describe('install/run integration', () => {
   let groupA: string;
   let groupB: string;
   let userA: string;
+  let policyId: string;
 
-  beforeAll(async () => {
-    // seed groups/users with request context to satisfy middleware
-    groupA = (await prisma.group.create({ data: { name: 'GA', type: 'ORG' } })).id;
-    groupB = (await prisma.group.create({ data: { name: 'GB', type: 'ORG' } })).id;
-    userA = (await prisma.user.create({ data: { email: 'a@example.com', passwordHash: 'x' } })).id;
+  beforeEach(async () => {
+    jest.setTimeout(20000);
+    await app.ready();
+    await truncateAll();
+    const a = await createTenantSeed(`a-${Date.now()}`);
+    const b = await createTenantSeed(`b-${Date.now()}`);
+    groupA = a.groupId;
+    userA = a.userId;
+    groupB = b.groupId;
+    policyId = await createPolicy(`p-${Date.now()}`);
   });
 
   afterAll(async () => {
     await prisma.$disconnect();
+    await app.close();
+    const { closeRedis } = await import('../src/lib/redis');
+    await closeRedis();
   });
 
   test('stable install rejects non-approved package', async () => {
-    const manifest = { name: '@ga/demo', version: '1.0.0', engine: '1.0.0', capabilities: ['echo'] };
-    const integrity = sha256Hex(JSON.stringify(manifest));
+    const manifest = { name: `@ga/demo-${Date.now()}`, version: '1.0.0', engine: '1.0.0', capabilities: ['echo'] };
+    const integrity = hashJson(manifest);
 
     // create package with status DRAFT under groupA
     setRequestContext({ groupId: groupA, userId: userA });
-    await prisma.componentPackage.create({
+    const pkg = await prisma.componentPackage.create({
       data: {
         name: manifest.name,
         version: manifest.version,
         status: 'DRAFT',
         integrityHash: integrity,
         manifest,
-        policyId: (await prisma.componentPolicy.create({ data: { name: 'default' } })).id,
+        policyId,
         ownerGroupId: groupA
+      }
+    });
+
+    await prisma.componentInstall.create({
+      data: {
+        packageId: pkg.id,
+        groupId: groupA,
+        channel: 'DRAFT',
+        lockData: { integrity: integrity }
       }
     });
 
@@ -57,13 +76,12 @@ describe('install/run integration', () => {
   });
 
   test('signature mismatch returns 422 on run', async () => {
-    const manifest = { name: '@ga/signed', version: '1.0.0', engine: '1.0.0', capabilities: ['echo'] };
-    const integrity = sha256Hex(JSON.stringify(manifest));
+    const manifest = { name: `@ga/signed-${Date.now()}`, version: '1.0.0', engine: '1.0.0', capabilities: ['echo'] };
+    const integrity = hashJson(manifest);
     const badSignature = signHmac('tampered', config.SIGNING_SECRET || 'testsecret');
     const manifestSigned = { ...manifest, signature: badSignature };
 
     setRequestContext({ groupId: groupA, userId: userA });
-    const policyId = (await prisma.componentPolicy.findFirst())?.id || (await prisma.componentPolicy.create({ data: { name: 'p' } })).id;
     const pkg = await prisma.componentPackage.create({
       data: {
         name: manifest.name,
@@ -75,7 +93,6 @@ describe('install/run integration', () => {
         ownerGroupId: groupA
       }
     });
-    setRequestContext({ groupId: groupA, userId: userA });
     const install = await prisma.componentInstall.create({
       data: { packageId: pkg.id, groupId: groupA, lockData: { integrity } }
     });
@@ -89,11 +106,10 @@ describe('install/run integration', () => {
   });
 
   test('bundle signature mismatch blocks install', async () => {
-    const manifest = { name: '@ga/bundle', version: '1.0.5', engine: '1.0.0', capabilities: ['echo'] };
-    const integrity = sha256Hex(JSON.stringify(manifest));
-    const policyId = (await prisma.componentPolicy.findFirst())?.id || (await prisma.componentPolicy.create({ data: { name: 'p6' } })).id;
+    const manifest = { name: `@ga/bundle-${Date.now()}`, version: '1.0.5', engine: '1.0.0', capabilities: ['echo'] };
+    const integrity = hashJson(manifest);
     setRequestContext({ groupId: groupA, userId: userA });
-    await prisma.componentPackage.create({
+    const pkg = await prisma.componentPackage.create({
       data: {
         name: manifest.name,
         version: manifest.version,
@@ -106,6 +122,7 @@ describe('install/run integration', () => {
         ownerGroupId: groupA
       }
     });
+    await prisma.componentInstall.create({ data: { packageId: pkg.id, groupId: groupA, lockData: { integrity } } });
 
     const res = await request(app.server)
       .post('/install')
@@ -116,10 +133,9 @@ describe('install/run integration', () => {
   });
 
   test('cross-group run is not found', async () => {
-    const manifest = { name: '@ga/echo', version: '1.0.1', engine: '1.0.0', capabilities: ['echo'] };
-    const integrity = sha256Hex(JSON.stringify(manifest));
+    const manifest = { name: `@ga/echo-${Date.now()}`, version: '1.0.1', engine: '1.0.0', capabilities: ['echo'] };
+    const integrity = hashJson(manifest);
     setRequestContext({ groupId: groupA, userId: userA });
-    const policyId = (await prisma.componentPolicy.findFirst())?.id || (await prisma.componentPolicy.create({ data: { name: 'p2' } })).id;
     const pkg = await prisma.componentPackage.create({
       data: { name: manifest.name, version: manifest.version, status: 'APPROVED', integrityHash: integrity, manifest, policyId, ownerGroupId: groupA }
     });
@@ -135,10 +151,9 @@ describe('install/run integration', () => {
   });
 
   test('unsupported capability returns error but 200', async () => {
-    const manifest = { name: '@ga/unknown-cap', version: '1.0.2', engine: '1.0.0', capabilities: ['does.not.exist'] };
-    const integrity = sha256Hex(JSON.stringify(manifest));
+    const manifest = { name: `@ga/unknown-cap-${Date.now()}`, version: '1.0.2', engine: '1.0.0', capabilities: ['does.not.exist'] };
+    const integrity = hashJson(manifest);
     setRequestContext({ groupId: groupA, userId: userA });
-    const policyId = (await prisma.componentPolicy.findFirst())?.id || (await prisma.componentPolicy.create({ data: { name: 'p3' } })).id;
     const pkg = await prisma.componentPackage.create({
       data: { name: manifest.name, version: manifest.version, status: 'APPROVED', integrityHash: integrity, manifest, policyId, ownerGroupId: groupA }
     });
@@ -155,10 +170,9 @@ describe('install/run integration', () => {
   });
 
   test('entity.list respects group isolation', async () => {
-    const manifest = { name: '@ga/list', version: '1.0.3', engine: '1.0.0', capabilities: ['data.entity.list'] };
-    const integrity = sha256Hex(JSON.stringify(manifest));
+    const manifest = { name: `@ga/list-${Date.now()}`, version: '1.0.3', engine: '1.0.0', capabilities: ['data.entity.list'] };
+    const integrity = hashJson(manifest);
     setRequestContext({ groupId: groupA, userId: userA });
-    const policyId = (await prisma.componentPolicy.findFirst())?.id || (await prisma.componentPolicy.create({ data: { name: 'p4' } })).id;
     const pkg = await prisma.componentPackage.create({
       data: { name: manifest.name, version: manifest.version, status: 'APPROVED', integrityHash: integrity, manifest, policyId, ownerGroupId: groupA }
     });
@@ -179,10 +193,9 @@ describe('install/run integration', () => {
   });
 
   test('listByDefinition and getDefinition work in own group', async () => {
-    const manifest = { name: '@ga/list-def', version: '1.0.6', engine: '1.0.0', capabilities: ['data.entity.listByDefinition', 'data.entity.getDefinition'] };
-    const integrity = sha256Hex(JSON.stringify(manifest));
+    const manifest = { name: `@ga/list-def-${Date.now()}`, version: '1.0.6', engine: '1.0.0', capabilities: ['data.entity.listByDefinition', 'data.entity.getDefinition'] };
+    const integrity = hashJson(manifest);
     setRequestContext({ groupId: groupA, userId: userA });
-    const policyId = (await prisma.componentPolicy.findFirst())?.id || (await prisma.componentPolicy.create({ data: { name: 'p7' } })).id;
     const pkg = await prisma.componentPackage.create({ data: { name: manifest.name, version: manifest.version, status: 'APPROVED', integrityHash: integrity, manifest, policyId, ownerGroupId: groupA } });
     const install = await prisma.componentInstall.create({ data: { packageId: pkg.id, groupId: groupA, lockData: { integrity } } });
 

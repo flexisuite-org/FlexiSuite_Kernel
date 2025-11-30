@@ -2,9 +2,10 @@ import request from 'supertest';
 import jwt from 'jsonwebtoken';
 import { buildServer } from '../src/api/server';
 import { prisma } from '../src/lib/db';
-import { sha256Hex } from '../src/lib/integrity';
+import { hashJson } from '../src/lib/integrity';
 import { config } from '../src/config';
 import { setRequestContext } from '../src/lib/request-context';
+import { truncateAll, createTenantSeed, createPolicy } from './helpers/seed';
 
 process.env.SIGNING_SECRET = process.env.SIGNING_SECRET || 'testsecret';
 
@@ -16,20 +17,27 @@ describe('capability allowlist', () => {
   const app = buildServer();
   let groupId: string;
   let userId: string;
+  let policyId: string;
 
-  beforeAll(async () => {
-    groupId = (await prisma.group.create({ data: { name: 'Gcap', type: 'ORG' } })).id;
-    userId = (await prisma.user.create({ data: { email: 'c@c.com', passwordHash: 'x' } })).id;
+  beforeEach(async () => {
+    await app.ready();
+    await truncateAll();
+    const seed = await createTenantSeed(`cap-${Date.now()}`);
+    groupId = seed.groupId;
+    userId = seed.userId;
+    policyId = await createPolicy(`pcap-${Date.now()}`);
   });
 
   afterAll(async () => {
     await prisma.$disconnect();
+    await app.close();
+    const { closeRedis } = await import('../src/lib/redis');
+    await closeRedis();
   });
 
   it('filters capabilities not in allowlist', async () => {
-    const manifest = { name: '@gcap/pkg', version: '1.0.0', engine: '1.0.0', capabilities: ['echo', 'does.not.exist'] };
-    const integrity = sha256Hex(JSON.stringify(manifest));
-    const policyId = (await prisma.componentPolicy.create({ data: { name: 'pcap' } })).id;
+    const manifest = { name: `@gcap/pkg-${Date.now()}`, version: '1.0.0', engine: '1.0.0', capabilities: ['echo', 'does.not.exist'] };
+    const integrity = hashJson(manifest);
     setRequestContext({ groupId, userId });
     const pkg = await prisma.componentPackage.create({ data: { name: manifest.name, version: manifest.version, status: 'APPROVED', integrityHash: integrity, manifest, policyId, ownerGroupId: groupId } });
     const install = await prisma.componentInstall.create({ data: { packageId: pkg.id, groupId, lockData: { integrity } } });

@@ -1,6 +1,12 @@
 # Ops (Runbook)
 
 Env vars (see .env.example): DATABASE_URL, REDIS_URL, JWT_SECRET, REFRESH_TOKEN_SECRET, PORT, RATE_LIMIT_*, SANDBOX_*, LOG_LEVEL.
+Signing: SIGNING_SECRET（本番必須）。test 環境は未指定なら `testsecret` を自動使用する。
+Storage:
+- `STORAGE_DRIVER=local|s3`（default local）
+- local: `BUNDLE_STORAGE_LOCAL_DIR=storage/bundles`
+- s3: `S3_BUCKET`, `S3_REGION`, `S3_ENDPOINT` (optional), `S3_FORCE_PATH_STYLE` (true/false), `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY`（未設定なら環境のクレデンシャルを利用）
+ - S3 利用時は依存を追加: `pnpm add @aws-sdk/client-s3`
 
 Start (local dev):
 1) docker compose up -d postgres redis
