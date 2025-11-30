@@ -1,11 +1,14 @@
 import { PrismaClient } from '@prisma/client';
 import { logger } from './logger';
 import { getRequestContext } from './request-context';
-import type { PrismaMiddleware, PrismaAction } from './prisma-middleware-types';
 
 export const prisma = new PrismaClient({
   log: ['error', 'warn']
 });
+
+// Infer middleware types directly from PrismaClient.$use signature
+// This approach is version-agnostic and doesn't depend on internal Prisma types
+type PrismaMiddlewareFn = Parameters<typeof prisma.$use>[0];
 
 // Set Postgres session variables for RLS per request.
 export async function setRlsContext(groupId: string | null, userId: string | null, mode: 'draft' | 'stable' = 'stable') {
@@ -39,7 +42,7 @@ const OWNER_SCOPED_FIELDS: Record<string, string> = {
   ComponentPackage: 'ownerGroupId'
 };
 
-const multiTenantMiddleware: PrismaMiddleware = async (params, next) => {
+const multiTenantMiddleware: PrismaMiddlewareFn = async (params, next) => {
     const ctx = getRequestContext();
     const groupId = ctx?.groupId || null;
     const mode = ctx?.mode || 'stable';
@@ -53,7 +56,7 @@ const multiTenantMiddleware: PrismaMiddleware = async (params, next) => {
       params.args ??= {};
 
       // Write operations should stamp the group
-      if (['create', 'createMany', 'upsert'].includes(params.action)) {
+      if (['create', 'createMany', 'upsert'].includes(params.action as string)) {
         if (mode === 'draft' && params.model !== 'PlaygroundLog') {
           throw new Error('write_not_allowed_in_draft');
         }
@@ -72,7 +75,7 @@ const multiTenantMiddleware: PrismaMiddleware = async (params, next) => {
       }
 
       // Read/update/delete operations should be scoped
-      const scopedActions: PrismaAction[] = [
+      const scopedActions = [
         'findUnique',
         'findFirst',
         'findMany',
@@ -83,11 +86,11 @@ const multiTenantMiddleware: PrismaMiddleware = async (params, next) => {
         'upsert'
       ];
 
-      if (scopedActions.includes(params.action)) {
+      if (scopedActions.includes(params.action as string)) {
         if (
           mode === 'draft' &&
           ['update', 'updateMany', 'delete', 'deleteMany', 'upsert'].includes(
-            params.action
+            params.action as string
           ) &&
           params.model !== 'PlaygroundLog'
         ) {
@@ -104,6 +107,4 @@ const multiTenantMiddleware: PrismaMiddleware = async (params, next) => {
     return next(params);
 };
 
-// Cast to any to work around type incompatibility between our custom types
-// and Prisma's internal middleware types in version 5.9.0
-prisma.$use(multiTenantMiddleware as any);
+prisma.$use(multiTenantMiddleware);

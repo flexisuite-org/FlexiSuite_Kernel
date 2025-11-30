@@ -48,3 +48,76 @@ export async function createSandboxForGroup(options: CreateSandboxOptions): Prom
 
   return { sandboxGroup, session };
 }
+
+export type CloneableModel = 'EntityRecord' | 'AppInstall';
+
+export interface CloneEntitySpec {
+  model: CloneableModel;
+  ids?: string[];
+  whereJson?: unknown;
+}
+
+export interface CloneEntitiesResultItem {
+  model: CloneableModel;
+  requested: number;
+  cloned: number;
+  skipped: number;
+}
+
+export interface CloneEntitiesSummary {
+  sessionId: string;
+  sourceGroupId: string;
+  sandboxGroupId: string;
+  results: CloneEntitiesResultItem[];
+}
+
+export async function cloneEntitiesForSandboxSession(
+  sessionId: string,
+  specs: CloneEntitySpec[]
+): Promise<CloneEntitiesSummary> {
+  if (!Array.isArray(specs) || specs.length === 0) {
+    throw new Error('no_specs');
+  }
+
+  const session = await prisma.sandboxSession.findUnique({
+    where: { id: sessionId }
+  });
+  if (!session) {
+    throw new Error('sandbox_session_not_found');
+  }
+
+  if (session.expiresAt && session.expiresAt.getTime() < Date.now()) {
+    throw new Error('sandbox_session_expired');
+  }
+
+  const results = specs.map((spec) => {
+    const requested = Array.isArray(spec.ids) ? spec.ids.length : 0;
+    // TODO: implement actual copy logic per model and replace the placeholder tally.
+    return {
+      model: spec.model,
+      requested,
+      cloned: 0,
+      skipped: requested
+    };
+  });
+
+  return {
+    sessionId: session.id,
+    sourceGroupId: session.sourceGroupId,
+    sandboxGroupId: session.sandboxGroupId,
+    results
+  };
+}
+
+export interface EnsureEntitiesRequest {
+  sessionId: string;
+  specs: CloneEntitySpec[];
+}
+
+export interface EnsureEntitiesResult extends CloneEntitiesSummary {}
+
+export async function ensureEntitiesForSandboxSession(
+  req: EnsureEntitiesRequest
+): Promise<EnsureEntitiesResult> {
+  return cloneEntitiesForSandboxSession(req.sessionId, req.specs);
+}
