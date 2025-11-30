@@ -1,14 +1,16 @@
-import { PrismaClient, Prisma } from '@prisma/client';
+import { PrismaClient } from '@prisma/client';
 import { logger } from './logger';
 import { getRequestContext } from './request-context';
+import type {
+  PrismaTransactionClient,
+  PrismaMiddlewareFn,
+  PrismaMiddlewareParams,
+  PrismaMiddlewareNext
+} from './prisma-types';
 
 export const prisma = new PrismaClient({
   log: ['error', 'warn']
 });
-
-// Infer middleware types directly from PrismaClient.$use signature
-// This approach is version-agnostic and doesn't depend on internal Prisma types
-type PrismaMiddlewareFn = Parameters<typeof prisma.$use>[0];
 
 // Set Postgres session variables for RLS per request.
 export async function setRlsContext(groupId: string | null, userId: string | null, mode: 'draft' | 'stable' = 'stable') {
@@ -32,9 +34,9 @@ export async function withRlsContext<T>(
   groupId: string | null,
   userId: string | null,
   mode: 'draft' | 'stable',
-  fn: (tx: Prisma.TransactionClient) => Promise<T>
+  fn: (tx: PrismaTransactionClient) => Promise<T>
 ): Promise<T> {
-  return prisma.$transaction(async (tx) => {
+  return prisma.$transaction(async (tx: PrismaTransactionClient) => {
     await tx.$executeRawUnsafe(
       "SELECT set_config('flexi.current_group', $1, true), set_config('flexi.current_user', $2, true), set_config('default_transaction_read_only', $3, true)",
       groupId ?? null,
@@ -60,7 +62,10 @@ const OWNER_SCOPED_FIELDS: Record<string, string> = {
   ComponentPackage: 'ownerGroupId'
 };
 
-const multiTenantMiddleware: PrismaMiddlewareFn = async (params, next) => {
+const multiTenantMiddleware: PrismaMiddlewareFn = async (
+  params: PrismaMiddlewareParams,
+  next: PrismaMiddlewareNext
+) => {
     const ctx = getRequestContext();
     const groupId = ctx?.groupId || null;
     const mode = ctx?.mode || 'stable';
