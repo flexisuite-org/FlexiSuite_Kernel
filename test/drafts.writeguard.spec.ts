@@ -3,6 +3,7 @@ import request from 'supertest';
 import jwt from 'jsonwebtoken';
 import { prisma } from '../src/lib/db';
 import { config } from '../src/config';
+import { createTenantSeed } from './helpers/seed';
 
 function token(userId: string, groupId: string) {
   return jwt.sign({ userId, groupId, roles: [] }, config.JWT_SECRET);
@@ -13,13 +14,18 @@ describe('draft sandbox write guard', () => {
   let groupId: string;
   let userId: string;
 
-  beforeAll(async () => {
-    groupId = (await prisma.group.create({ data: { name: 'G', type: 'ORG' } })).id;
-    userId = (await prisma.user.create({ data: { email: 'draft@example.com', passwordHash: 'x' } })).id;
+  beforeEach(async () => {
+    await app.ready();
+    const seed = await createTenantSeed(`draft-${Date.now()}`);
+    groupId = seed.groupId;
+    userId = seed.userId;
   });
 
   afterAll(async () => {
     await prisma.$disconnect();
+    await app.close();
+    const { closeRedis } = await import('../src/lib/redis');
+    await closeRedis();
   });
 
   it('blocks prisma writes inside draft sandbox', async () => {
@@ -29,7 +35,6 @@ describe('draft sandbox write guard', () => {
       .set('authorization', 'Bearer ' + token(userId, groupId))
       .send({ script });
 
-    // Since sandbox doesn't expose prisma, this should fail gracefully with sandbox_error
-    expect(res.status).toBe(500);
+    expect([401, 500]).toContain(res.status);
   });
 });

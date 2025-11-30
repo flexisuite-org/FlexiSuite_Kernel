@@ -4,6 +4,7 @@ import { requestContext } from '../../lib/request-context';
 import { prisma } from '../../lib/db';
 import { saveDraftResult } from '../../lib/playground-db';
 import { z } from 'zod';
+import { closeRedis } from '../../lib/redis';
 
 const draftRunSchema = z.object({
   script: z.string().min(1),
@@ -56,5 +57,9 @@ export default async function draftsRoutes(fastify: FastifyInstance) {
       });
       reply.code(code).send({ error: 'sandbox_error', message });
     }
+  });
+
+  fastify.addHook('onClose', async () => {
+    await closeRedis().catch(() => {});
   });
 }

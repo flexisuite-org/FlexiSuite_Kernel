@@ -77,3 +77,22 @@ CREATE POLICY tenant_isolation_entity_record ON "EntityRecord"
 ## 9. Logging & Monitoring
 - Pino JSON。エラーは stack + correlationId を付与。
 - /metrics を Prometheus スクレイプ。アラート: p95>1s、error rate>1%、DB/Redis ダウン。
+
+## 10. コンポーネント署名/整合性
+- manifest ハッシュは **stableStringify**（オブジェクトキーをソート）で決定的に計算し、`hashJson()` で sha256 を取る。署名検証も同じストリングで実施すること。
+- lockData.integrity は package.integrityHash と一致させる。差異があると `/components/:id/run` は 422 を返す。
+- bundleUpload ではアップロードデータの sha256 を検証し、`SIGNING_SECRET` が存在する場合は `{ manifestIntegrity, bundleIntegrity }` で HMAC 署名を付与する。
+- capability 実行は `CAPABILITY_ALLOWLIST` に加え、`CAPABILITY_ROLE_ALLOWLIST`（例: `{"echo":["admin"]}`）でロール要件を課せる。満たさない場合は結果に `forbidden` を返し処理をスキップする。
+
+## 11. RLS 運用メモ
+- Postgres 側で RLS を有効化し、ポリシーは `current_setting('flexi.current_group')` を参照する形で定義。
+- Fastify hook (`contextPlugin`) でリクエストごとに `set_config('flexi.current_group', groupId, true)` を実行し、Prisma ミドルウェアでも `groupId` 無しの操作を拒否。
+- draft モードでは `default_transaction_read_only=on` をセットして書き込みを抑止する（PlaygroundLog など例外は明示）。
+
+## 12. JWT / Refresh ローテーション手順
+- アクセストークン: HS256、exp=15m。ペイロードは `{userId, groupId, roles, jti}`。
+- リフレッシュ: 7d。発行時に familyId を付与し、`tokenHash` を DB に保存。再発行時は旧トークンを revoke。
+- ローテーション時のフロー例:
+  1) `/auth/refresh` で旧トークン（家族内で最新）を提示。
+  2) 検証後、新しい refresh + access を発行し、旧 refresh を revoke。
+  3) 再利用が来た場合は family 全体を revoke し、ユーザーに再ログインを要求。

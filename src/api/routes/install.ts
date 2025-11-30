@@ -5,7 +5,7 @@ import { resolveToLock, ManifestFetcher } from '../../kernel/components/resolver
 import { ComponentManifest } from '../../kernel/components/types';
 import semver from 'semver';
 import { z } from 'zod';
-import { verifyIntegrity } from '../../lib/integrity';
+import { verifyIntegrity, stableStringify } from '../../lib/integrity';
 import { verifyHmac } from '../../lib/signature';
 import { config } from '../../config';
 
@@ -26,23 +26,30 @@ async function makeFetcher(groupId: string, allowDraft: boolean): Promise<Manife
     if (!pkg) throw new Error(`package not found ${name}@${range}`);
 
     const deps = await prisma.componentDependency.findMany({ where: { packageId: pkg.id } });
+    const baseManifest = pkg.manifest as any;
     const manifest: ComponentManifest = {
-      ...(pkg.manifest as any),
+      ...baseManifest,
       name: pkg.name,
       version: pkg.version,
       policyId: pkg.policyId,
       integrity: pkg.integrityHash,
-      dependencies: deps.filter((d) => d.kind === 'RUNTIME').map((d) => ({ name: d.depName, version: d.depVersion, integrity: d.integrity || undefined })),
-      peerDependencies: deps.filter((d) => d.kind === 'PEER').map((d) => ({ name: d.depName, version: d.depVersion, integrity: d.integrity || undefined })),
-      optionalDependencies: deps.filter((d) => d.kind === 'OPTIONAL').map((d) => ({ name: d.depName, version: d.depVersion, integrity: d.integrity || undefined }))
+      dependencies: deps
+        .filter((d) => d.kind === 'RUNTIME')
+        .map((d) => ({ name: d.depName, version: d.depVersion, integrity: d.integrity || undefined })),
+      peerDependencies: deps
+        .filter((d) => d.kind === 'PEER')
+        .map((d) => ({ name: d.depName, version: d.depVersion, integrity: d.integrity || undefined })),
+      optionalDependencies: deps
+        .filter((d) => d.kind === 'OPTIONAL')
+        .map((d) => ({ name: d.depName, version: d.depVersion, integrity: d.integrity || undefined }))
     };
 
     // integrity check against stored hash of manifest JSON
-    const manifestStr = JSON.stringify(manifest);
-    if (!verifyIntegrity(pkg.integrityHash, manifestStr)) {
+    if (!verifyIntegrity(pkg.integrityHash, baseManifest)) {
       throw new Error(`integrity mismatch for ${name}@${pkg.version}`);
     }
 
+    const manifestStr = stableStringify(baseManifest);
     if (manifest.signature && config.SIGNING_SECRET) {
       if (!verifyHmac(manifestStr, manifest.signature, config.SIGNING_SECRET)) {
         throw new Error(`signature mismatch for ${name}@${pkg.version}`);
@@ -100,7 +107,7 @@ export default async function installRoutes(fastify: FastifyInstance) {
         packageId: target.id,
         groupId: ctx.groupId,
         channel,
-        lockData: lock,
+        lockData: lock as any,
         installedBy: ctx.userId
       }
     });

@@ -1,11 +1,13 @@
+process.env.SIGNING_SECRET = process.env.SIGNING_SECRET || 'testsecret';
+
 import request from 'supertest';
 import { buildServer } from '../src/api/server';
 import { prisma } from '../src/lib/db';
-import { sha256Hex } from '../src/lib/integrity';
+import { sha256Hex, hashJson } from '../src/lib/integrity';
 import { config } from '../src/config';
+import { setRequestContext } from '../src/lib/request-context';
+import { truncateAll, createTenantSeed, createPolicy } from './helpers/seed';
 import jwt from 'jsonwebtoken';
-
-process.env.SIGNING_SECRET = process.env.SIGNING_SECRET || 'testsecret';
 
 function token(userId: string, groupId: string) {
   return jwt.sign({ userId, groupId, roles: [] }, config.JWT_SECRET);
@@ -16,18 +18,26 @@ describe('bundle upload', () => {
   let groupId: string;
   let userId: string;
   let pkgId: string;
+  let policyId: string;
 
-  beforeAll(async () => {
-    groupId = (await prisma.group.create({ data: { name: 'GUP', type: 'ORG' } })).id;
-    userId = (await prisma.user.create({ data: { email: 'u@u.com', passwordHash: 'x' } })).id;
-    const manifest = { name: '@gup/pkg', version: '1.0.0', engine: '1.0.0', capabilities: [] };
-    const integrity = sha256Hex(JSON.stringify(manifest));
-    const policyId = (await prisma.componentPolicy.create({ data: { name: 'pb' } })).id;
+  beforeEach(async () => {
+    await app.ready();
+    await truncateAll();
+    const seed = await createTenantSeed(`bundle-${Date.now()}`);
+    groupId = seed.groupId;
+    userId = seed.userId;
+    policyId = await createPolicy(`pb-${Date.now()}`);
+    const manifest = { name: `@gup/pkg-${Date.now()}`, version: '1.0.0', engine: '1.0.0', capabilities: [] };
+    const integrity = hashJson(manifest);
+    setRequestContext({ groupId, userId });
     pkgId = (await prisma.componentPackage.create({ data: { name: manifest.name, version: manifest.version, status: 'DRAFT', integrityHash: integrity, manifest, policyId, ownerGroupId: groupId, createdById: userId } })).id;
   });
 
   afterAll(async () => {
     await prisma.$disconnect();
+    await app.close();
+    const { closeRedis } = await import('../src/lib/redis');
+    await closeRedis();
   });
 
   it('uploads bundle, verifies integrity, sets signature', async () => {
