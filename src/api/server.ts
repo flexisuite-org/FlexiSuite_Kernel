@@ -14,6 +14,9 @@ import componentsRoutes from './routes/components';
 import draftsRoutes from './routes/drafts';
 import { mapPrismaError } from '../lib/prisma-draft-guard';
 import { closeRedis } from '../lib/redis';
+import websocket from '@fastify/websocket';
+import githubRoutes from './routes/github';
+import wsRoutes from './routes/ws';
 
 export function buildServer() {
   // Fastify v5 requires logger to be passed as a configuration object or boolean
@@ -39,6 +42,9 @@ export function buildServer() {
   app.register(installRoutes, { prefix: '/' });
   app.register(componentsRoutes, { prefix: '/' });
   app.register(draftsRoutes, { prefix: '/' });
+  app.register(websocket);
+  app.register(wsRoutes, { prefix: '/ws' });
+  app.register(githubRoutes, { prefix: '/integrations/github' });
   app.register(metricsRoutes, { prefix: '/metrics' });
 
   app.setErrorHandler((error: any, _req, reply) => {

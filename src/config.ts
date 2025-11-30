@@ -11,6 +11,7 @@ const schema = z.object({
   REFRESH_TOKEN_SECRET: z.string().min(16),
   REFRESH_TOKEN_EXPIRES_IN: z.string().default('7d'),
   SIGNING_SECRET: z.string().optional(),
+  GITHUB_WEBHOOK_SECRET: z.string().optional(),
   STORAGE_DRIVER: z.enum(['local', 's3']).default('local'),
   BUNDLE_STORAGE_LOCAL_DIR: z.string().default('storage/bundles'),
   S3_BUCKET: z.string().optional(),
