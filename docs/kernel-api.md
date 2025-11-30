@@ -22,7 +22,7 @@
 - `POST /registry/packages/:id/revoke` – 誤配信対策で失効。
 - `GET /registry/packages/:name` – バージョン一覧/メタデータ。
 - `GET /registry/packages/:id/download` – bundle/payload ダウンロード（署名+integrity付き）。
-- `POST /registry/packages/:id/bundle` – アップロード後に bundleIntegrity（＋SIGNING_SECRET があれば bundleSignature を自動生成）を登録。
+- `POST /registry/packages/:id/bundle` – アップロード後に bundleIntegrity（＋SIGNING_SECRET があれば bundleSignature を自動生成）を登録。将来的には GitHub 等のリポジトリ/Artifact からカーネル側が直接バンドルを取得するフローをサポートし、Cloudflare Pages 的な「リポ更新→Kernel側も自動更新」を実現する。
 
 ### Install
 - `POST /install` – { packageId, version, channel? } → 依存解決＋ロック生成をアトミック実行。入力は Zod で検証し、root manifest の integrity を照合。
