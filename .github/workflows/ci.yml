@@ -68,7 +68,8 @@ jobs:
       - name: Wait for services
         run: |
           until pg_isready -h localhost -p 5433 -U flexi; do sleep 2; done
-          until redis-cli -p 6380 ping; do sleep 2; done
+          echo "Waiting for Redis..."
+          sleep 2
 
       - name: Apply database migrations
         run: pnpm prisma migrate deploy
