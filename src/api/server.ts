@@ -14,15 +14,29 @@ import componentsRoutes from './routes/components';
 import draftsRoutes from './routes/drafts';
 import { mapPrismaError } from '../lib/prisma-draft-guard';
 import { closeRedis } from '../lib/redis';
-import websocket from '@fastify/websocket';
+import websocket from '../lib/websocket-compat';
 import githubRoutes from './routes/github';
 import wsRoutes from './routes/ws';
+import aiRoutes from './routes/ai';
+import { shutdownWs } from '../lib/ws-bus';
+import { ensureGithubBuildWorker, shutdownGithubBuildQueue } from '../integrations/github/queue';
 
 export function buildServer() {
   // Fastify v5 requires logger to be passed as a configuration object or boolean
   const app = Fastify({
     logger: {
-      level: config.NODE_ENV === 'development' ? 'info' : 'error'
+      level: config.LOG_LEVEL || 'info'
+    }
+  });
+
+  // Capture raw JSON bodies (needed for HMAC verification) while still parsing into objects.
+  app.addContentTypeParser('application/json', { parseAs: 'buffer' }, (req, body, done) => {
+    try {
+      (req as any).rawBody = body;
+      const json = body.length ? JSON.parse(body.toString()) : {};
+      done(null, json);
+    } catch (err) {
+      done(err as Error);
     }
   });
 
@@ -42,10 +56,17 @@ export function buildServer() {
   app.register(installRoutes, { prefix: '/' });
   app.register(componentsRoutes, { prefix: '/' });
   app.register(draftsRoutes, { prefix: '/' });
+  app.register(aiRoutes, { prefix: '/ai' });
   app.register(websocket);
   app.register(wsRoutes, { prefix: '/ws' });
   app.register(githubRoutes, { prefix: '/integrations/github' });
   app.register(metricsRoutes, { prefix: '/metrics' });
+
+  app.addHook('onReady', async () => {
+    if (config.NODE_ENV !== 'test') {
+      ensureGithubBuildWorker();
+    }
+  });
 
   app.setErrorHandler((error: any, _req, reply) => {
     const mapped = mapPrismaError(error);
@@ -54,7 +75,9 @@ export function buildServer() {
   });
 
   app.addHook('onClose', async () => {
+    await shutdownGithubBuildQueue().catch(() => {});
     await closeRedis().catch(() => {});
+    shutdownWs();
   });
 
   return app;
