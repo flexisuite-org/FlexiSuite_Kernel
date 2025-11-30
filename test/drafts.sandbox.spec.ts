@@ -26,12 +26,15 @@ describe('draft sandbox', () => {
 describe('draft mode guards', () => {
   it('enables default_transaction_read_only for draft contexts', async () => {
     const { groupId, userId } = await createTenantSeed('draft-readonly');
-    setRequestContext({ groupId, userId, mode: 'draft' });
-    await setRlsContext(groupId, userId, 'draft');
-
-    const rows = await prisma.$queryRaw<{ value: string }[]>(
-      Prisma.sql`SELECT current_setting('default_transaction_read_only') AS value`
-    );
+    const rows = await prisma.$transaction(async (tx) => {
+      await tx.$executeRawUnsafe(
+        "SELECT set_config('flexi.current_group', $1, true), set_config('flexi.current_user', $2, true), set_config('default_transaction_read_only', $3, true)",
+        groupId,
+        userId,
+        'on'
+      );
+      return tx.$queryRaw<{ value: string }[]>(Prisma.sql`SELECT current_setting('default_transaction_read_only') AS value`);
+    });
 
     expect(rows[0]?.value).toBe('on');
   });

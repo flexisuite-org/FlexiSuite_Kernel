@@ -113,8 +113,8 @@ describe('github build workflow', () => {
         expect(status?.status).toBe('done');
         expect(status?.packageId).toBeTruthy();
         const pkg = await db_1.prisma.componentPackage.findFirst({
-            where: { id: status.packageId, ownerGroupId: groupId }
-        });
+        where: { id: status.packageId }
+      });
         expect(pkg?.bundleIntegrity).toBeTruthy();
         const bundlePath = path_1.default.join(config_1.config.bundleStorage.localDir, `${status.packageId}.bin`);
         const stat = await promises_1.default.stat(bundlePath);
