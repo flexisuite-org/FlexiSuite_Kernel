@@ -1,3 +1,6 @@
+packages:
+  - '.'
+
 ignoredBuiltDependencies:
   - isolated-vm
   - msgpackr-extract
