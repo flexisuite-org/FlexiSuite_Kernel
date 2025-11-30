@@ -26,7 +26,19 @@ const schema = z.object({
   SANDBOX_TIMEOUT_MS: z.string().default('500'),
   LOG_LEVEL: z.string().default('info'),
   CAPABILITY_ALLOWLIST: z.string().optional(),
-  CAPABILITY_ROLE_ALLOWLIST: z.string().optional()
+  CAPABILITY_ROLE_ALLOWLIST: z.string().optional(),
+
+  // LLM providers
+  OPENAI_API_KEY: z.string().optional(),
+  OPENAI_API_BASE: z.string().optional(),
+  OPENAI_DEFAULT_MODEL: z.string().default('gpt-4o-mini'),
+  GEMINI_API_KEY: z.string().optional(),
+  GEMINI_API_BASE: z.string().default('https://generativelanguage.googleapis.com'),
+  GEMINI_DEFAULT_MODEL: z.string().default('gemini-1.5-flash'),
+
+  // AI specific rate limit (per group/user)
+  AI_RATE_LIMIT_MAX: z.string().default('60'),
+  AI_RATE_LIMIT_WINDOW: z.string().default('300000')
 });
 
 const parsed = schema.safeParse(process.env);
@@ -38,6 +50,8 @@ if (!parsed.success) {
 
 const signingSecret =
   parsed.data.SIGNING_SECRET || (parsed.data.NODE_ENV === 'test' ? 'testsecret' : undefined);
+const webhookSecret =
+  parsed.data.GITHUB_WEBHOOK_SECRET || (parsed.data.NODE_ENV === 'test' ? 'testhooksecret' : undefined);
 
 let capabilityRoleAllowlist: Record<string, string[]> = {};
 if (parsed.data.CAPABILITY_ROLE_ALLOWLIST) {
@@ -56,10 +70,25 @@ if (parsed.data.CAPABILITY_ROLE_ALLOWLIST) {
 export const config = {
   ...parsed.data,
   SIGNING_SECRET: signingSecret,
+  GITHUB_WEBHOOK_SECRET: webhookSecret,
   port: parseInt(parsed.data.PORT, 10),
   rateLimit: {
     max: parseInt(parsed.data.RATE_LIMIT_MAX, 10),
     windowMs: parseInt(parsed.data.RATE_LIMIT_WINDOW, 10)
+  },
+  aiRateLimit: {
+    max: parseInt(parsed.data.AI_RATE_LIMIT_MAX, 10),
+    windowMs: parseInt(parsed.data.AI_RATE_LIMIT_WINDOW, 10)
+  },
+  openai: {
+    apiKey: parsed.data.OPENAI_API_KEY,
+    apiBase: parsed.data.OPENAI_API_BASE,
+    defaultModel: parsed.data.OPENAI_DEFAULT_MODEL
+  },
+  gemini: {
+    apiKey: parsed.data.GEMINI_API_KEY,
+    apiBase: parsed.data.GEMINI_API_BASE,
+    defaultModel: parsed.data.GEMINI_DEFAULT_MODEL
   },
   sandbox: {
     memoryMb: parseInt(parsed.data.SANDBOX_MEMORY_MB, 10),
