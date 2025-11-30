@@ -84,6 +84,9 @@ importers:
       '@types/uuid':
         specifier: ^9.0.6
         version: 9.0.8
+      '@types/ws':
+        specifier: ^8.5.10
+        version: 8.18.1
       jest:
         specifier: ^29.7.0
         version: 29.7.0(@types/node@20.19.25)(ts-node@10.9.2(@types/node@20.19.25)(typescript@5.9.3))
@@ -108,6 +111,9 @@ importers:
       typescript:
         specifier: ^5.3.3
         version: 5.9.3
+      ws:
+        specifier: ^8.16.0
+        version: 8.18.3
 
 packages:
 
@@ -940,6 +946,9 @@ packages:
 
   '@types/uuid@9.0.8':
     resolution: {integrity: sha512-jg+97EGIcY9AGHJJRaaPVgetKDsrTgbRjQ5Msgjh/DQKEFl0DtyRr/VCOyD1T2R1MNeWPK/u7JoGhlDZnKBAfA==}
+
+  '@types/ws@8.18.1':
+    resolution: {integrity: sha512-ThVF6DCVhA8kUGy+aazFQ4kXQ7E1Ty7A3ypFOe0IcJV8O/M511G99AW24irKrW56Wt44yG9+ij8FaqoBGkuBXg==}
 
   '@types/yargs-parser@21.0.3':
     resolution: {integrity: sha512-I4q9QU9MQv4oEOz4tAHJtNz1cwuLxn2F3xcc2iV5WdqLPpUnj30aUuxt1mAxYTG+oe8CZMV/+6rU4S4gRDzqtQ==}
@@ -3935,6 +3944,10 @@ snapshots:
       '@types/superagent': 8.1.9
 
   '@types/uuid@9.0.8': {}
+
+  '@types/ws@8.18.1':
+    dependencies:
+      '@types/node': 20.19.25
 
   '@types/yargs-parser@21.0.3': {}
 
