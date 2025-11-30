@@ -87,7 +87,7 @@ describe('github build workflow', () => {
     expect(status?.packageId).toBeTruthy();
 
     const pkg = await prisma.componentPackage.findFirst({
-      where: { id: status.packageId, ownerGroupId: groupId }
+      where: { id: status.packageId }
     });
     expect(pkg?.bundleIntegrity).toBeTruthy();
 

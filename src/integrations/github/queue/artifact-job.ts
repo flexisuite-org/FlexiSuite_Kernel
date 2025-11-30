@@ -1,7 +1,8 @@
 import http from 'http';
 import https from 'https';
 import { URL } from 'url';
-import { GithubBuildJobData } from '../../types';
+import { GithubBuildJobData } from '../types';
+import { Prisma } from '@prisma/client';
 import { prisma } from '../../../lib/db';
 import { hashJson, sha256Hex } from '../../../lib/integrity';
 import { signHmac } from '../../../lib/signature';
@@ -12,7 +13,7 @@ import { logger } from '../../../lib/logger';
 const ARTIFACT_REDIRECT_LIMIT = 3;
 
 interface PreparedManifest {
-  manifest: Record<string, unknown>;
+  manifest: Prisma.InputJsonValue;
   integrity: string;
 }
 
@@ -36,10 +37,12 @@ function prepareManifest(data: GithubBuildJobData): PreparedManifest {
     (manifest as any).capabilities = [];
   }
   const integrity = hashJson(manifest);
-  return { manifest, integrity };
+  return { manifest: manifest as Prisma.InputJsonValue, integrity };
 }
 
-function collectDependencies(manifest: Record<string, unknown>): DependencyEntry[] {
+function collectDependencies(manifest: Prisma.InputJsonValue): DependencyEntry[] {
+  if (!manifest || typeof manifest !== 'object' || Array.isArray(manifest)) return [];
+  const manifestObj = manifest as Record<string, any>;
   const groups: Array<[string, DependencyEntry['kind']]> = [
     ['dependencies', 'RUNTIME'],
     ['peerDependencies', 'PEER'],
@@ -47,7 +50,7 @@ function collectDependencies(manifest: Record<string, unknown>): DependencyEntry
   ];
   const entries: DependencyEntry[] = [];
   for (const [key, kind] of groups) {
-    const list = manifest[key];
+    const list = manifestObj[key];
     if (!Array.isArray(list)) continue;
     for (const item of list as any[]) {
       if (!item || typeof item !== 'object') continue;
