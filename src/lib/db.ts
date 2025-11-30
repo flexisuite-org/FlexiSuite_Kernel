@@ -1,4 +1,3 @@
-import type { Prisma } from '@prisma/client';
 import { PrismaClient } from '@prisma/client';
 import { logger } from './logger';
 import { getRequestContext } from './request-context';
@@ -38,7 +37,7 @@ const OWNER_SCOPED_FIELDS: Record<string, string> = {
   ComponentPackage: 'ownerGroupId'
 };
 
-prisma.$use(async (params: Prisma.MiddlewareParams, next: (params: Prisma.MiddlewareParams) => Promise<any>) => {
+prisma.$use(async (params: any, next: any) => {
   const ctx = getRequestContext();
   const groupId = ctx?.groupId || null;
   const mode = ctx?.mode || 'stable';
