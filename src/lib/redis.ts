@@ -22,3 +22,5 @@ export async function closeRedis() {
   }
   redisInstance = null;
 }
+
+export const redis = getRedis();

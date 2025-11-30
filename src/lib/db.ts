@@ -37,7 +37,7 @@ const OWNER_SCOPED_FIELDS: Record<string, string> = {
   ComponentPackage: 'ownerGroupId'
 };
 
-prisma.$use(async (params: any, next: any) => {
+prisma.$use(async (params, next) => {
   const ctx = getRequestContext();
   const groupId = ctx?.groupId || null;
   const mode = ctx?.mode || 'stable';

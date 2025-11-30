@@ -1,8 +1,9 @@
+import { Prisma } from '@prisma/client';
 import { prisma } from '../../lib/db';
 import { getValidator } from './validator';
 
 export class EntityRepository {
-  async create(definitionId: string, groupId: string, schema: object, data: any) {
+  async create(definitionId: string, groupId: string, schema: object, data: Prisma.InputJsonValue) {
     const validator = getValidator(definitionId, schema);
     if (!validator(data)) {
       const msg = validator.errors?.map((e) => `${e.instancePath} ${e.message}`).join(', ');
@@ -24,7 +25,7 @@ export class EntityRepository {
     return prisma.entityRecord.findFirst({ where: { id, groupId } });
   }
 
-  async update(id: string, groupId: string, schema: object, data: any) {
+  async update(id: string, groupId: string, schema: object, data: Prisma.InputJsonValue) {
     const validator = getValidator(id, schema);
     if (!validator(data)) {
       const msg = validator.errors?.map((e) => `${e.instancePath} ${e.message}`).join(', ');
