@@ -1,0 +1,77 @@
+@import "tailwindcss";
+
+@theme {
+  --color-primary: #c2255d;
+  --color-primary-foreground: #ffffff;
+
+  --color-surface-alt: #f8f9fa;
+
+  --font-sans: ui-sans-serif, system-ui, sans-serif;
+
+  --animate-fade-in: fade-in 0.3s ease-out;
+  --animate-slide-up: slide-up 0.4s ease-out;
+  --animate-scale-in: scale-in 0.2s ease-out;
+
+  @keyframes fade-in {
+    from {
+      opacity: 0;
+    }
+
+    to {
+      opacity: 1;
+    }
+  }
+
+  @keyframes slide-up {
+    from {
+      opacity: 0;
+      transform: translateY(10px);
+    }
+
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
+  }
+
+  @keyframes scale-in {
+    from {
+      opacity: 0;
+      transform: scale(0.95);
+    }
+
+    to {
+      opacity: 1;
+      transform: scale(1);
+    }
+  }
+}
+
+/* Custom Utilities */
+@layer utilities {
+  .glass {
+    @apply bg-white/80 backdrop-blur-md border border-white/20;
+  }
+
+  .glass-card {
+    @apply bg-white/60 backdrop-blur-sm border border-white/50 shadow-sm hover:shadow-md transition-all duration-300;
+  }
+
+  .text-balance {
+    text-wrap: balance;
+  }
+
+  .shadow-soft {
+    box-shadow: 0 4px 20px -2px rgba(0, 0, 0, 0.05);
+  }
+
+  .shadow-glow {
+    box-shadow: 0 0 15px rgba(194, 37, 93, 0.15);
+  }
+}
+
+body {
+  @apply bg-slate-50 text-slate-800 font-sans antialiased;
+  background-image: radial-gradient(circle at 50% 0%, rgba(194, 37, 93, 0.03) 0%, transparent 50%);
+  background-attachment: fixed;
+}
