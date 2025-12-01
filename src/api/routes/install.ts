@@ -1,5 +1,5 @@
 import { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
-import { prisma } from '../../lib/db';
+import { prisma, withRlsContext } from '../../lib/db';
 import { requestContext } from '../../lib/request-context';
 import { resolveToLock, ManifestFetcher } from '../../kernel/components/resolver';
 import { ComponentManifest } from '../../kernel/components/types';
@@ -134,5 +134,53 @@ export default async function installRoutes(fastify: FastifyInstance) {
     const deleted = await prisma.componentInstall.deleteMany({ where: { id, groupId: ctx.groupId } });
     if (deleted.count === 0) return reply.code(404).send({ error: 'not found' });
     reply.send({ id, deleted: true });
+  });
+
+  fastify.get('/groups/:groupId/installs', async (req: FastifyRequest, reply: FastifyReply) => {
+    const ctx = requestContext.getStore();
+    const userId = (req as any).user?.id;
+    if (!userId) return reply.code(401).send({ error: 'unauthorized' });
+    const { groupId } = req.params as { groupId: string };
+
+    try {
+      const installs = await withRlsContext(groupId, userId, ctx?.mode ?? 'stable', async (tx) => {
+        const membership = await tx.groupMember.findFirst({ where: { groupId, userId } });
+        if (!membership) throw new Error('not_member');
+        return tx.componentInstall.findMany({
+          where: { groupId },
+          include: {
+            package: {
+              select: {
+                id: true,
+                name: true,
+                version: true,
+                status: true,
+                ownerGroupId: true
+              }
+            }
+          }
+        });
+      });
+
+      reply.send(
+        installs.map((install: any) => ({
+          installId: install.id,
+          channel: install.channel,
+          lockData: install.lockData,
+          package: {
+            id: install.package?.id ?? null,
+            name: install.package?.name ?? null,
+            version: install.package?.version ?? null,
+            status: install.package?.status ?? null,
+            ownerGroupId: install.package?.ownerGroupId ?? null
+          }
+        }))
+      );
+    } catch (err: any) {
+      if (err?.message === 'not_member') {
+        return reply.code(403).send({ error: 'forbidden' });
+      }
+      throw err;
+    }
   });
 }

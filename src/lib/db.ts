@@ -55,7 +55,8 @@ const GROUP_SCOPED_FIELDS: Record<string, string> = {
   AppInstall: 'groupId',
   EntityRecord: 'groupId',
   ComponentInstall: 'groupId',
-  PlaygroundLog: 'groupId'
+  PlaygroundLog: 'groupId',
+  GroupInvite: 'groupId'
 };
 
 const OWNER_SCOPED_FIELDS: Record<string, string> = {

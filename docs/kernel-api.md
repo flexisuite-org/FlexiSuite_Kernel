@@ -3,7 +3,7 @@
 目的: カーネルが提供する安定インターフェイスを定義し、フロント/ストア/生成サービスが安心して連携できるようにする。
 
 ## 共通事項
-- すべてのリクエストで `groupId` コンテキストが必須（JWT ペイロード or ヘッダ）。
+- 原則すべてのリクエストで `groupId` コンテキストが必須（JWT ペイロード or ヘッダ）。Auth/Invite など一部のエンドポイントは例外として group コンテキスト無しで呼び出せる。
 - チャンネル: `channel=stable|draft` をクエリ/ヘッダで指定。指定なしは `stable`。
 - レスポンスには `correlationId` を含め、AuditLog と紐づける。
 - 認証: JWT (15m) + Refresh(7d)、デバイス/IPバインド、再利用検知。Auth系は厳しめのIPレートリミット。
@@ -11,9 +11,29 @@
 ## エンドポイント概要
 
 ### Auth
+- `POST /auth/signup` – （α版では）`accountInviteCode` 必須。`email/password` とコードを受け取り、AccountInvite を検証して User を作成し、必要に応じて初期グループに紐づけつつ access+refresh を返す。
 - `POST /auth/login` – email/password → access + refresh。
 - `POST /auth/refresh` – 再利用検知あり。family 無効化と監査を実施。
 - `POST /auth/logout` – refresh revoke。
+- `GET /auth/me` – 認証済みユーザーのプロフィールと memberships を返す。例: `{ userId, email, roles, memberships: [{ groupId, name, type, role }] }`。
+
+### Invites / Onboarding
+
+#### AccountInvite（アカウント作成用招待）
+- `POST /auth/account-invites` – Kernel Admin 限定。body: `{ email, expiresAt?, initialGroupId? }`。AccountInvite を作成し `{ code, expiresAt }` を返す。メール送信は別サービス/ジョブ。
+- `GET /account-invites/:code` – サインアップ前にコードの有効性を検証し、対応する `email` と `initialGroupId`（あれば）を返す。
+
+#### GroupInvite（グループ参加招待）
+- `POST /group-invites` – グループ管理者向け。body: `{ groupId, kind: "LINK" | "EMAIL", email?, expiresAt? }`。GroupInvite を作成し `{ id, code }` を返す。
+- `GET /group-invites/pending?email=…` – ログイン中ユーザーの email に紐づく未承諾招待（kind=EMAIL, acceptedAt=null, expiresAt>now）一覧を返す。
+- `GET /group-invites/link/:code` – 汎用招待リンク用。対象グループ情報・期限・既に受諾済みかどうかを返す（未認証でも参照可）。
+- `POST /group-invites/:code/accept` – 認証済みユーザーが招待を受諾し、GroupMember を作成する。レスポンスは `{ accepted: true, groupId, roles[] }` など。
+- `POST /group-invites/:code/decline` – 招待を辞退し、今後の一覧から除外する。
+
+### Launcher / User Home
+- `GET /launcher/groups` – ログインユーザーが所属するグループと、その各グループにインストール済みのアプリ/コンポーネントのサマリを返す。例: `[{ groupId, name, type, installs: [...] }]`。
+- `GET /groups/:groupId/installs` – 特定グループのインストール詳細を返す。`set_config('flexi.current_group')` により RLS を守りつつ、ComponentInstall + ComponentPackage のメタ情報を返却。
+- `GET /invites/pending` – ログインユーザー自身に紐づく GroupInvite 一覧を返す（email はサーバ側で User.email から解決）。ランチャーで「招待中グループ」カードを描画する際に利用。
 
 ### Registry / Package
 - `POST /registry/packages` – 署名対象の manifest+payload を登録（承認ステータス: draft）。
@@ -31,6 +51,18 @@
 - `POST /install/:installId/rollback` – 直前ロックに戻す。
 - `GET /install` – インストール一覧（groupスコープ）。
 
+### Admin – Tenants / Users / Roles
+- `POST /groups` – 新しいテナント/グループを作成。
+- `GET /groups` – 全テナント/グループ（またはフィルタ済み）の一覧を取得。
+- `PATCH /groups/:id` – グループ名や設定（plan, flags, hierarchy など）を更新。
+- `POST /groups/:id/deactivate` – グループを論理停止し、新規ログイン/書き込みを抑止。
+- `GET /users` – 条件付きでユーザー一覧検索（email, group, status など）。
+- `GET /users/:id` – 特定ユーザーの詳細と memberships を取得。
+- `PATCH /users/:id` – ロールやステータスの更新。
+- `POST /users/:id/force-logout` – 該当ユーザーの refresh token family を revoke し、強制ログアウト。
+- `GET /roles` / `POST /roles` – RBAC の Role 一覧取得/作成。
+- `POST /roles/:id/permissions` – Role に対する Permission セットを付け替える。
+
 ### Run / Bundle（本番パッケージのみ）
 - `POST /components/:id/run` – APIモードで capabilities を実行（カーネル側の安全ハンドラのみ）。署名/integrity検証と監査を実施。ユーザーコードは走らせない。
 - `GET /components/:id/bundle` – クライアント用バンドル取得。`If-None-Match` 等でキャッシュ。
@@ -41,6 +73,11 @@
 ### Rollout Control
 - `POST /rollout` – { lockId, percentage, allowlist?, blocklist? } を設定。
 - `GET /rollout/:lockId` – 現在のロールアウト設定を取得。
+
+### Audit / Logs
+- `GET /audit-logs` – AuditLog テーブルに対する検索インターフェイス。フィルタ（期間, groupId, userId, resource, action, success など）を受け取り、ページングされた結果を返す。
+- `GET /metrics` – 既存の Prometheus エンドポイント。Kernel Admin UI からグラフに利用。
+- `GET /health` – 基本的なヘルスチェック（DB, Redis など）。
 
 ## エラーハンドリング（要約）
 - 認証失効/再利用: 401 + family revoke, AuditLog。
