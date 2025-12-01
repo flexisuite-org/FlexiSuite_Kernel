@@ -7,12 +7,14 @@ import { contextPlugin } from '../kernel/iam/context.plugin';
 import healthRoutes from './routes/health';
 import authRoutes from './routes/auth';
 import metricsRoutes from './routes/metrics';
+import adminRoutes from './routes/admin';
 import { authHook } from './hooks/auth';
 import registryRoutes from './routes/registry';
 import installRoutes from './routes/install';
 import componentsRoutes from './routes/components';
 import draftsRoutes from './routes/drafts';
 import sandboxRoutes from './routes/sandbox';
+import launcherRoutes from './routes/launcher';
 import { mapPrismaError } from '../lib/prisma-draft-guard';
 import { closeRedis } from '../lib/redis';
 import websocket from '../lib/websocket-compat';
@@ -21,6 +23,7 @@ import wsRoutes from './routes/ws';
 import aiRoutes from './routes/ai';
 import { shutdownWs } from '../lib/ws-bus';
 import { ensureGithubBuildWorker, shutdownGithubBuildQueue } from '../integrations/github/queue';
+import invitesRoutes from './routes/invites';
 
 export function buildServer() {
   // Fastify v5 requires logger to be passed as a configuration object or boolean
@@ -53,15 +56,18 @@ export function buildServer() {
   contextPlugin(app);
   app.register(healthRoutes, { prefix: '/health' });
   app.register(authRoutes, { prefix: '/auth' });
+  app.register(adminRoutes, { prefix: '/admin' });
   app.register(registryRoutes, { prefix: '/registry' });
   app.register(installRoutes, { prefix: '/' });
   app.register(componentsRoutes, { prefix: '/' });
+  app.register(launcherRoutes, { prefix: '/launcher' });
   app.register(draftsRoutes, { prefix: '/' });
   app.register(sandboxRoutes, { prefix: '/sandbox' });
   app.register(aiRoutes, { prefix: '/ai' });
   app.register(websocket);
   app.register(wsRoutes, { prefix: '/ws' });
   app.register(githubRoutes, { prefix: '/integrations/github' });
+  app.register(invitesRoutes, { prefix: '/invites' });
   app.register(metricsRoutes, { prefix: '/metrics' });
 
   app.addHook('onReady', async () => {

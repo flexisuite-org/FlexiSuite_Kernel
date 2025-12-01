@@ -40,6 +40,11 @@ enum ExecutionMode {
   SANDBOX
 }
 
+enum GroupInviteKind {
+  LINK
+  EMAIL
+}
+
 model User {
   id           String    @id @default(cuid())
   email        String    @unique
@@ -55,6 +60,10 @@ model User {
   createdPackages ComponentPackage[] @relation("ComponentCreator")
   componentInstalls ComponentInstall[]
   playgroundLogs PlaygroundLog[]
+  accountInvitesCreated AccountInvite[] @relation("AccountInviteCreatedBy")
+  groupInvitesCreated GroupInvite[] @relation("GroupInviteCreatedBy")
+  groupInvitesAccepted GroupInvite[] @relation("GroupInviteAcceptedBy")
+  groupInvitesDeclined GroupInvite[] @relation("GroupInviteDeclinedBy")
 }
 
 model Group {
@@ -64,6 +73,8 @@ model Group {
   name      String
   settings  Json?
   deletedAt DateTime?
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
 
   parent      Group?         @relation("GroupHierarchy", fields: [parentId], references: [id])
   children    Group[]        @relation("GroupHierarchy")
@@ -78,6 +89,42 @@ model Group {
   playgroundLogs PlaygroundLog[]
   sandboxSessionsAsSource SandboxSession[] @relation("SandboxSourceSessions")
   sandboxSessionsAsTarget SandboxSession[] @relation("SandboxTargetSessions")
+  groupInvites GroupInvite[]
+  accountInvites AccountInvite[] @relation("AccountInviteInitialGroup")
+}
+
+model AccountInvite {
+  id             String    @id @default(cuid())
+  email          String    @unique
+  code           String    @unique
+  createdAt      DateTime  @default(now())
+  createdBy      String?
+  expiresAt      DateTime?
+  usedAt         DateTime?
+  initialGroupId String?
+  initialGroup   Group? @relation("AccountInviteInitialGroup", fields: [initialGroupId], references: [id])
+
+  createdByUser User? @relation("AccountInviteCreatedBy", fields: [createdBy], references: [id])
+}
+
+model GroupInvite {
+  id         String         @id @default(cuid())
+  groupId    String
+  kind       GroupInviteKind
+  email      String?
+  code       String         @unique
+  createdAt  DateTime       @default(now())
+  createdBy  String?
+  expiresAt  DateTime?
+  acceptedAt DateTime?
+  acceptedBy String?
+  declinedAt DateTime?
+  declinedBy String?
+
+  group           Group @relation(fields: [groupId], references: [id])
+  createdByUser   User?  @relation("GroupInviteCreatedBy", fields: [createdBy], references: [id])
+  acceptedByUser  User?  @relation("GroupInviteAcceptedBy", fields: [acceptedBy], references: [id])
+  declinedByUser  User?  @relation("GroupInviteDeclinedBy", fields: [declinedBy], references: [id])
 }
 
 model SandboxSession {
