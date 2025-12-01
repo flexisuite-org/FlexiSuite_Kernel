@@ -63,11 +63,22 @@ export default async function invitesRoutes(fastify: FastifyInstance) {
 
     const { groupId, kind, email, expiresAt } = parsed.data;
 
+    const targetGroup = await prisma.group.findUnique({ where: { id: groupId } });
+    if (!targetGroup) return reply.code(404).send({ error: 'group_not_found' });
+
     // Verify user has access to the group
     const membership = await prisma.groupMember.findFirst({
       where: { userId: user.id, groupId }
     });
-    if (!membership) return reply.code(404).send({ error: 'group_not_found' });
+    if (!membership) {
+      // In early bootstrap cases the caller may hold a tenant-scoped token but lack an explicit membership record.
+      // If the JWT already scopes the caller to this group, treat them as the initial member so they can issue invites.
+      if (user.groupId === groupId) {
+        await prisma.groupMember.create({ data: { userId: user.id, groupId } });
+      } else {
+        return reply.code(403).send({ error: 'forbidden' });
+      }
+    }
 
     if (kind === 'EMAIL' && !email) {
       return reply.code(400).send({ error: 'email_required_for_email_kind' });

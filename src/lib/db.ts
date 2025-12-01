@@ -55,8 +55,8 @@ const GROUP_SCOPED_FIELDS: Record<string, string> = {
   AppInstall: 'groupId',
   EntityRecord: 'groupId',
   ComponentInstall: 'groupId',
-  PlaygroundLog: 'groupId',
-  GroupInvite: 'groupId'
+  PlaygroundLog: 'groupId'
+  // Note: GroupInvite is intentionally excluded as users can receive invites from multiple groups
 };
 
 const OWNER_SCOPED_FIELDS: Record<string, string> = {
@@ -67,91 +67,98 @@ const multiTenantMiddleware: PrismaMiddlewareFn = async (
   params: PrismaMiddlewareParams,
   next: PrismaMiddlewareNext
 ) => {
-    const ctx = getRequestContext();
-    const groupId = ctx?.groupId || null;
-    const mode = ctx?.mode || 'stable';
+  const ctx = getRequestContext();
+  const groupId = ctx?.groupId || null;
+  const userId = ctx?.userId || null;
+  const mode = ctx?.mode || 'stable';
 
-    const field =
-      GROUP_SCOPED_FIELDS[params.model ?? ''] ??
-      OWNER_SCOPED_FIELDS[params.model ?? ''];
+  const field =
+    GROUP_SCOPED_FIELDS[params.model ?? ''] ??
+    OWNER_SCOPED_FIELDS[params.model ?? ''];
 
-    if (field) {
-      const isOwnerScoped = OWNER_SCOPED_FIELDS[params.model ?? ''] === field;
-      const isReadAction =
-        params.action === 'findUnique' ||
-        params.action === 'findFirst' ||
-        params.action === 'findMany';
+  if (field) {
+    const isOwnerScoped = OWNER_SCOPED_FIELDS[params.model ?? ''] === field;
+    const isReadAction =
+      params.action === 'findUnique' ||
+      params.action === 'findFirst' ||
+      params.action === 'findMany';
 
-      let effectiveGroupId = groupId || null;
+    let effectiveGroupId = groupId || null;
 
-      // Fallback: derive groupId from args when context is missing (e.g., background jobs).
-      if (!effectiveGroupId) {
-        const data = (params.args as any)?.data;
-        const fromData = Array.isArray(data) ? data[0]?.[field] : data?.[field];
-        const fromWhere = (params.args as any)?.where?.[field];
-        effectiveGroupId = (fromData as string | null) || (fromWhere as string | null) || effectiveGroupId;
-      }
+    // Fallback: derive groupId from args when context is missing (e.g., background jobs).
+    if (!effectiveGroupId) {
+      const data = (params.args as any)?.data;
+      const fromData = Array.isArray(data) ? data[0]?.[field] : data?.[field];
+      const fromWhere = (params.args as any)?.where?.[field];
+      effectiveGroupId = (fromData as string | null) || (fromWhere as string | null) || effectiveGroupId;
+    }
 
-      // If still missing, allow owner-scoped reads to proceed without scoping; otherwise block.
-      if (!effectiveGroupId) {
-        if (!(isOwnerScoped && isReadAction)) {
-          throw new Error('missing groupId in request context');
-        }
-      }
+    // If still missing, allow owner-scoped reads to proceed without scoping; otherwise block.
+    if (!effectiveGroupId) {
+      const readingOwnMemberships =
+        params.model === 'GroupMember' &&
+        isReadAction &&
+        userId &&
+        (params.args as any)?.where?.userId === userId;
 
-      params.args ??= {};
-
-      // Write operations should stamp the group (requires a resolved groupId)
-      if (['create', 'createMany', 'upsert'].includes(params.action as string)) {
-        if (mode === 'draft' && params.model !== 'PlaygroundLog') {
-          throw new Error('write_not_allowed_in_draft');
-        }
-        if (!effectiveGroupId) throw new Error('missing groupId in request context');
-
-        const assign = (data: unknown) => {
-          if (data && typeof data === 'object') {
-            (data as Record<string, unknown>)[field] = effectiveGroupId;
-          }
-        };
-
-        if (Array.isArray(params.args.data)) {
-          params.args.data.forEach(assign);
-        } else {
-          assign(params.args.data);
-        }
-      }
-
-      // Read/update/delete operations should be scoped when we have a groupId.
-      const scopedActions = [
-        'findUnique',
-        'findFirst',
-        'findMany',
-        'update',
-        'updateMany',
-        'delete',
-        'deleteMany',
-        'upsert'
-      ];
-
-      if (scopedActions.includes(params.action as string) && effectiveGroupId) {
-        if (
-          mode === 'draft' &&
-          ['update', 'updateMany', 'delete', 'deleteMany', 'upsert'].includes(
-            params.action as string
-          ) &&
-          params.model !== 'PlaygroundLog'
-        ) {
-          throw new Error('write_not_allowed_in_draft');
-        }
-
-        params.args.where = {
-          ...(params.args.where || {}),
-          [field]: effectiveGroupId
-        };
+      if (!readingOwnMemberships && !(isOwnerScoped && isReadAction)) {
+        throw new Error('missing groupId in request context');
       }
     }
 
-    return next(params);
+    params.args ??= {};
+
+    // Write operations should stamp the group (requires a resolved groupId)
+    if (['create', 'createMany', 'upsert'].includes(params.action as string)) {
+      if (mode === 'draft' && params.model !== 'PlaygroundLog') {
+        throw new Error('write_not_allowed_in_draft');
+      }
+      if (!effectiveGroupId) throw new Error('missing groupId in request context');
+
+      const assign = (data: unknown) => {
+        if (data && typeof data === 'object') {
+          (data as Record<string, unknown>)[field] = effectiveGroupId;
+        }
+      };
+
+      if (Array.isArray(params.args.data)) {
+        params.args.data.forEach(assign);
+      } else {
+        assign(params.args.data);
+      }
+    }
+
+    // Read/update/delete operations should be scoped when we have a groupId.
+    const scopedActions = [
+      'findUnique',
+      'findFirst',
+      'findMany',
+      'update',
+      'updateMany',
+      'delete',
+      'deleteMany',
+      'upsert'
+    ];
+
+    if (scopedActions.includes(params.action as string) && effectiveGroupId) {
+      if (
+        mode === 'draft' &&
+        ['update', 'updateMany', 'delete', 'deleteMany', 'upsert'].includes(
+          params.action as string
+        ) &&
+        params.model !== 'PlaygroundLog'
+      ) {
+        throw new Error('write_not_allowed_in_draft');
+      }
+
+      params.args.where = {
+        ...(params.args.where || {}),
+        [field]: effectiveGroupId
+      };
+    }
+  }
+
+  return next(params);
 };
 
 // Cast to any to work around type incompatibility with Prisma's internal Middleware type
