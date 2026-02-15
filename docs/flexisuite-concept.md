@@ -29,6 +29,9 @@ FlexiStudy（勉強管理アプリ）でAIがUI/UXを自己書き換えする「
 ### Mission
 **「AI共生時代のアプリケーション開発を、民主化する。」**
 
+> **MDP (Minimal Desirable Product) という考え方**
+> FlexiSuiteはMVP（実用最小限）ではなく、**MDP（魅力的最小限）** を目指す。「とりあえず動く」プロトタイプではなく、OSとしての品格（堅牢性、セキュリティ、拡張性）を備えた **"Desirable"** な基盤を最初から構築する。
+
 ### Vision
 **「The Safe & Seamless Vibe Coding OS」**
 
@@ -57,12 +60,13 @@ FlexiStudy（勉強管理アプリ）でAIがUI/UXを自己書き換えする「
 │                  Universal Player                     │
 │              (Next.js - 単一インスタンス)                │
 │                                                       │
-│  ┌──────────┐  ┌───────────┐  ┌───────────────────┐  │
-│  │ Kernel   │  │  Store    │  │  User Component   │  │
-│  │Provided  │  │ Verified  │  │ (iframe sandbox)  │  │
-│  │ (直接)   │  │ (iframe※) │  │                   │  │
-│  └──────────┘  └───────────┘  └───────────────────┘  │
-│                 ※高信頼スコア時のみ直接昇格              │
+│  ┌──────────┐  ┌───────────────────────────────────┐  │
+│  │ Kernel   │  │        Worker Isolation           │  │
+│  │Provided  │  │  ┌────────────┐   ┌────────────┐  │  │
+│  │ (Direct) │  │  │Store Comp. │   │ User Comp. │  │  │
+│  │          │  │  │ (Worker)   │   │ (Worker)   │  │  │
+│  └──────────┘  └───────────────────────────────────┘  │
+│                 ※全User/StoreコンポーネントはWorker隔離      │
 └────────────────────────┬─────────────────────────────┘
                          │ REST / WebSocket
 ┌────────────────────────┴─────────────────────────────┐
@@ -87,8 +91,9 @@ FlexiStudy（勉強管理アプリ）でAIがUI/UXを自己書き換えする「
 | Backend | **Rust** (Axum + SeaORM + Tokio) | 安全性・並行性・サンドボックス制御 |
 | Frontend | **Next.js** (Universal Player) | コストスケーラビリティ |
 | Auth | **PASETO v4** (public) | 暗号選択ミスのリスク排除 |
+| UI Isolation | **Worker + OffscreenCanvas** | OSとしての堅牢性・安全な拡張 |
 | Component Build | **SWC** → CDN配信 → Dynamic Import | per-userコンテナ回避 |
-| Sandbox (Logic) | **Deno Core + Wasmtime** ハイブリッド | JS/TS互換 + 高性能バイナリ |
+| Sandbox (Logic) | **Deno Core** (Logic) / **Worker** (UI) | JS/TS互換 + 完全な隔離 |
 | npm依存解決 | **esm.sh** CDN解決 | サーバー側node_modules不要 |
 | App Model | **App is Data** (JSON定義) | スケーラビリティの核 |
 | Event Bus | **Redis Streams**（抽象化層あり） | 将来NATS/Kafka移行可能 |
@@ -100,35 +105,41 @@ FlexiStudy（勉強管理アプリ）でAIがUI/UXを自己書き換えする「
 
 ## 4. コアコンセプト
 
-### 4.1 App is Data
-アプリケーションはコードではなく**JSON定義**である。単一のUniversal Playerがこの定義を動的にレンダリングする。
+### 4.1 Everything is Components
+アプリは「コード」でも「単なるJSON定義」でもなく、**コンポーネントの集合と設定**である。
 
-- ユーザーごとのコンテナは不要
-- コストはDB容量とAPIコール数に比例（線形増加を回避）
-- AIはJSON定義を編集するだけでアプリを構築可能
+- 1アプリ = 1ルートコンポーネント（+ 依存する子コンポーネント群）
+- **構成（Composition）**: コンポーネントの入れ子構造とProps設定が「アプリ」の実体
+- AIは隔離環境でコンポーネントを作成・修正し、それを組み合わせてアプリを構築する
 
-### 4.2 3層信頼モデル
+### 4.2 3層信頼モデル (Worker-based Isolation)
+OSの堅牢性を保証するため、すべてのサードパーティUIは **Web Worker** 内で実行される（Remote Rendering）。Main Threadへの直接アクセスは一切許可されない。
 
 | 層 | 実行方式 | セキュリティ | Kernel API |
 |---|---|---|---|
-| **Kernel Provided** | 直接実行 | Host CSP準拠 | 全API |
-| **Store Verified** | iframe（高信頼時のみ直接昇格） | sandbox CSP | `data.read/write`, `event.emit` |
-| **User Imported** | `sandbox="allow-scripts"` | 最小権限 | `data.read` のみ |
+| **Kernel Provided** | **Main Thread** (React) | Host CSP準拠 | 全API |
+| **Store Verified** | **Web Worker** (Reconciler) | Worker Sandbox | `data.read/write`, `event.emit` |
+| **User Imported** | **Web Worker** (Reconciler) | Worker Sandbox (Network制限) | `data.read` のみ |
+
+- **DOM操作**: 不可。React Reconciler経由でUI記述のみをHostへ送信
+- **Canvas**: `OffscreenCanvas` によりWorker内で直接描画
+- **DOM計測**: 非同期プロキシAPI経由で取得
 
 ### 4.3 テナント隔離
 テナント境界は3層で強制される:
 
 1. **コンパイル時** — `TenantScoped<T>` ラッパー型により、tenant_idなしのDB操作はコンパイルエラー
-2. **ランタイム** — per-requestトランザクション + `SET LOCAL`（`set_config()` parameterized）
+2. **ランタイム** — `HMAC署名` 付きトークン + `authorize_tenant()` による安全なコンテキスト設定
 3. **DB層** — PostgreSQL RLS `DEFAULT DENY`（未設定時は全行不可視）
 
+
 ### 4.4 コンポーネントライフサイクル
-1. **生成**: AI/開発者がコンポーネントを作成
-2. **ビルド**: SWCコンパイル + esm.sh依存解決 + ハッシュ記録（`component.lock`）
-3. **審査**: 自動審査（脆弱性・AST解析・バンドルサイズ）+ 条件付き手動レビュー
-4. **登録**: 署名付きパッケージとしてKernel Registryに登録
-5. **インストール**: テナント単位でインストール。依存解決・ロック生成はKernelが実行
-6. **実行**: Universal PlayerがUI配信 / Sandboxがサーバー実行。署名・ポリシー検証は必須
+1. **開発/テスト**: 隔離環境（Sandbox）でAIがコンポーネントを作成・即時プレビュー
+2. **コンポーネント化**: 動作確認済みのものをライブラリに保存（バージョン管理）
+3. **ビルド**: SWCコンパイル + 依存解決 + ロックファイル生成
+4. **登録/配布**: ストアまたはプライベートレポジトリに登録
+5. **本番適用**: アプリ構成（Manifest）を更新し、検証済みコンポーネントをロード
+6. **実行**: Universal PlayerがWorker内で実行。署名・ポリシー検証は必須
 
 ### 4.5 イベントシステム
 - **At-least-once配信** + Consumer側べき等
@@ -144,8 +155,8 @@ FlexiStudy（勉強管理アプリ）でAIがUI/UXを自己書き換えする「
 |---|---|
 | 認証 | PASETO v4 + Argon2id + Refresh Token Rotation |
 | テナント隔離 | コンパイル時型強制 + RLS DEFAULT DENY + DBロール分離 |
-| UI隔離 | iframe sandbox + nonce handshake + COOP/COEP |
-| ロジック隔離 | Deno Core (128MB/5s) + Wasmtime (64MB/2s) |
+| UI隔離 | **Web Worker** + React Reconciler + OffscreenCanvas |
+| ロジック隔離 | Deno Core (Server) + Web Worker (Client) |
 | コンポーネント改竄防止 | lockfileハッシュ検証 + 署名付きマニフェスト |
 | 特権操作 | SECURITY DEFINER関数 + 専用DBロール + 監査ログ |
 
