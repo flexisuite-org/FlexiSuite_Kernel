@@ -1,36 +1,36 @@
 # /.coderabbit.yaml
-# FlexiSuite Kernel - CodeRabbit config (minimal, low-noise)
-
-# 目的:
-# - “好み/抽象論”を抑制
-# - “契約/セキュリティ/後方互換/運用影響”に集中
-# - docs変更は原則ノイズになりやすいのでレビュー対象から外す（必要なら後で戻す）
+# FlexiSuite Kernel — CodeRabbit config (docs excluded)
 
 reviews:
-  auto_review:
-    enabled: true
+  # レビュー対象ファイルの制御
+  path_filters:
+    - "**/*"
 
-  # レビューの観点（AIに“見るべき軸”を固定）
-  focus_areas:
-    - "contract consistency (REQ-* / verification matrix / CI gates)"
-    - "security implications (auth, tenant isolation, supply chain)"
-    - "backward compatibility"
-    - "observability impact (metrics/logs/traces)"
-    - "performance regressions (hot paths, allocations, async)"
+    # --- exclude noise / non-code ---
+    - "!**/*.md"
+    - "!docs/**"
+    - "!**/*.png"
+    - "!**/*.jpg"
+    - "!**/*.jpeg"
+    - "!**/*.svg"
+    - "!**/*.lock"
+    - "!**/*.min.*"
 
-  # “好み”レビューを抑制（コメントがうるさくなりがちな領域）
-  style_guidelines:
-    enabled: false
+  # コードレビュー時の観点を注入
+  path_instructions:
+    - path: "**/*"
+      instructions: |
+        You are reviewing a security- and contract-critical OS-kernel-like codebase.
+        Prioritize:
+        1) Security boundaries (tenant isolation, authn/z, permissions, supply chain)
+        2) Contract correctness enforced by CI (REQ-* assumptions in code)
+        3) Backward compatibility and migration safety
+        4) Observability (metrics, logs, traces, debuggability)
+        5) Performance regressions on hot paths
 
-  # 具体案を必須化（抽象コメントを減らす）
-  request_changes:
-    require_code_suggestions: true
+        Avoid:
+        - Style-only comments
+        - Subjective refactors
+        - Rewriting code without reducing risk
 
-  # まずはドキュメント系を対象外（必要になったら外す）
-  ignore:
-    - "**/*.md"
-    - "docs/**"
-    - "**/*.lock"
-    - "**/*.png"
-    - "**/*.jpg"
-    - "**/*.svg"
+        Suggest changes only when they clearly reduce risk or improve correctness.
