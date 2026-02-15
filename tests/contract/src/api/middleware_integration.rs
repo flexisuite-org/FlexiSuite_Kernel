@@ -12,14 +12,13 @@ fn setup_app() -> axum::Router {
     build_app(store)
 }
 
-fn build_idempotent_post(auth: &str, key: &str, body_hash: &str) -> Request<Body> {
+fn build_idempotent_post(auth: &str, key: &str, body: &str) -> Request<Body> {
     Request::builder()
         .method("POST")
         .uri("/test")
         .header("Authorization", auth)
         .header("Idempotency-Key", key)
-        .header("X-Mock-Body-Hash", body_hash)
-        .body(Body::empty())
+        .body(Body::from(body.to_owned()))
         .unwrap()
 }
 
@@ -74,15 +73,15 @@ async fn test_idempotency_conflict_and_scope() {
     let auth = "Bearer tenant-1";
 
     // 1. Success first call
-    let req = build_idempotent_post(auth, "key-1", "hash-a");
+    let req = build_idempotent_post(auth, "key-1", "payload-a");
     let res = app.clone().oneshot(req).await.unwrap();
     assert_eq!(res.status(), StatusCode::CREATED);
     assert_eq!(res.headers().get("X-Action-Id").unwrap(), "act-live");
     let first_body = to_bytes(res.into_body(), usize::MAX).await.unwrap();
     assert_eq!(first_body.as_ref(), b"OK");
 
-    // 2. Replay with same hash -> 200 with replay header
-    let req = build_idempotent_post(auth, "key-1", "hash-a");
+    // 2. Replay with same body -> 201 with replay header
+    let req = build_idempotent_post(auth, "key-1", "payload-a");
     let res = app.clone().oneshot(req).await.unwrap();
     assert_eq!(res.status(), StatusCode::CREATED);
     assert_eq!(res.headers().get("X-Action-Id").unwrap(), "act-live");
@@ -90,8 +89,8 @@ async fn test_idempotency_conflict_and_scope() {
     let replay_body = to_bytes(res.into_body(), usize::MAX).await.unwrap();
     assert_eq!(replay_body.as_ref(), b"OK");
 
-    // 3. Conflict with different hash -> 409
-    let req = build_idempotent_post(auth, "key-1", "hash-different");
+    // 3. Conflict with different body -> 409
+    let req = build_idempotent_post(auth, "key-1", "payload-b");
     let res = app.clone().oneshot(req).await.unwrap();
     assert_eq!(res.status(), StatusCode::CONFLICT);
 
@@ -101,8 +100,7 @@ async fn test_idempotency_conflict_and_scope() {
         .uri("/test")
         .header("Authorization", auth)
         .header("Idempotency-Key", "key-1")
-        .header("X-Mock-Body-Hash", "hash-a")
-        .body(Body::empty())
+        .body(Body::from("payload-a".to_string()))
         .unwrap();
     let res = app.clone().oneshot(req).await.unwrap();
     assert_eq!(res.status(), StatusCode::OK);
@@ -113,8 +111,8 @@ async fn test_idempotency_serializes_same_key_concurrently() {
     let app = setup_app();
     let auth = "Bearer tenant-1";
 
-    let req1 = build_idempotent_post(auth, "key-concurrent", "hash-a");
-    let req2 = build_idempotent_post(auth, "key-concurrent", "hash-a");
+    let req1 = build_idempotent_post(auth, "key-concurrent", "payload-a");
+    let req2 = build_idempotent_post(auth, "key-concurrent", "payload-a");
 
     let fut1 = app.clone().oneshot(req1);
     let fut2 = app.clone().oneshot(req2);

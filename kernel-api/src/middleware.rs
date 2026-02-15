@@ -31,7 +31,15 @@ pub enum IdempotencyEntry {
     Completed(IdempotencyRecord),
 }
 
-pub type IdempotencyStore = Arc<Mutex<HashMap<String, IdempotencyEntry>>>;
+#[derive(Clone, Debug, Eq, PartialEq, Hash)]
+pub struct IdempotencyScopeKey {
+    tenant_id: String,
+    method: String,
+    canonical_target: String,
+    idempotency_key: String,
+}
+
+pub type IdempotencyStore = Arc<Mutex<HashMap<IdempotencyScopeKey, IdempotencyEntry>>>;
 
 /// REQ-IDEMPOTENCY-HEADER: Middleware logic
 pub async fn idempotency_middleware(req: Request<Body>, next: Next) -> Result<Response, StatusCode> {
@@ -59,16 +67,18 @@ pub async fn idempotency_middleware(req: Request<Body>, next: Next) -> Result<Re
     let canonical_target = canonicalize_request_target(path, query);
 
     // Uniqueness Scope: (tenant_id, method, canonical_target, key)
-    let scope_key = format!("{}:{}:{}:{}", tenant_ctx.tenant_id, method, canonical_target, idempotency_key);
+    let scope_key = IdempotencyScopeKey {
+        tenant_id: tenant_ctx.tenant_id.clone(),
+        method: method.as_str().to_string(),
+        canonical_target: canonical_target.clone(),
+        idempotency_key,
+    };
 
     // Body hash MUST be derived from the actual request body.
     let body_bytes = to_bytes(body, usize::MAX)
         .await
         .map_err(|_| StatusCode::BAD_REQUEST)?;
-    let body_hash = parts.headers.get("X-Mock-Body-Hash")
-        .and_then(|v| v.to_str().ok())
-        .map(ToString::to_string)
-        .unwrap_or_else(|| compute_body_hash(&body_bytes));
+    let body_hash = compute_body_hash(&body_bytes);
     let req = Request::from_parts(parts, Body::from(body_bytes));
 
     // Check Store
@@ -157,7 +167,7 @@ fn compute_body_hash(body: &[u8]) -> String {
     format!("{:016x}", hasher.finish())
 }
 
-async fn release_inflight(store: &IdempotencyStore, scope_key: &str) {
+async fn release_inflight(store: &IdempotencyStore, scope_key: &IdempotencyScopeKey) {
     let mut write_lock = store.lock().await;
     if let Some(IdempotencyEntry::InFlight { notify, .. }) = write_lock.remove(scope_key) {
         notify.notify_waiters();
