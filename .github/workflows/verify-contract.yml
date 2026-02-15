@@ -1,0 +1,72 @@
+name: verify-contract
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: verify-contract-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint-traceability:
+    name: ci:lint-traceability
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run traceability lint
+        run: bash scripts/ci/ci-lint-traceability.sh
+
+  lint-slo-profile:
+    name: ci:lint-slo-profile
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run SLO profile lint
+        run: bash scripts/ci/ci-lint-slo-profile.sh
+
+  test-contract:
+    name: ci:test-contract (${{ matrix.suite }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        suite: [auth, quota, idempotency, worker, diagnostics, supplychain]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run contract suite
+        run: bash scripts/ci/ci-test-contract-suite.sh "${{ matrix.suite }}"
+
+  e2e-frontend-security:
+    name: ci:e2e-frontend-security
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run frontend security e2e stub
+        run: bash scripts/ci/ci-e2e-frontend-security.sh
+
+  e2e-worker-protocol-fallback-a11y:
+    name: ci:e2e-worker-protocol-fallback-a11y
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run worker fallback a11y e2e stub
+        run: bash scripts/ci/ci-e2e-worker-protocol-fallback-a11y.sh
+
+  e2e-canvas-fallback-metrics:
+    name: ci:e2e-canvas-fallback-metrics
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run canvas fallback metrics e2e stub
+        run: bash scripts/ci/ci-e2e-canvas-fallback-metrics.sh
+
+  test-observability:
+    name: ci:test-observability
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run observability contract checks
+        run: bash scripts/ci/ci-test-observability.sh
