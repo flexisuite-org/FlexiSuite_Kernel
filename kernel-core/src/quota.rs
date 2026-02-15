@@ -39,5 +39,4 @@ impl QuotaViolation {
         headers.push(("Retry-After".to_string(), value.to_string()));
         headers
     }
-
 }

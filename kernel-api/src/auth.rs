@@ -4,8 +4,8 @@ use axum::{
     middleware::Next,
     response::Response,
 };
-use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
-use ring::signature::{UnparsedPublicKey, ED25519};
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+use ring::signature::{ED25519, UnparsedPublicKey};
 use serde::Deserialize;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -65,41 +65,58 @@ pub async fn auth_middleware(mut req: Request<Body>, next: Next) -> Result<Respo
     Ok(next.run(req).await)
 }
 
-fn verify_paseto_v4_public_from_env(auth_header: &str) -> Result<TenantContext, AuthError> {
-    const PREFIX: &str = "Bearer ";
-    if !auth_header.starts_with(PREFIX) {
-        return Err(AuthError::Unauthorized);
+use std::sync::OnceLock;
+
+static PASETO_PUBLIC_KEY: OnceLock<Vec<u8>> = OnceLock::new();
+
+pub fn init_auth_config() -> Result<(), String> {
+    let key = std::env::var("FLEXI_PASETO_V4_PUBLIC_KEY_B64URL")
+        .map_err(|_| "FLEXI_PASETO_V4_PUBLIC_KEY_B64URL is not set".to_string())?;
+    let decoded = URL_SAFE_NO_PAD.decode(key).map_err(|_| {
+        "FLEXI_PASETO_V4_PUBLIC_KEY_B64URL must be base64url (no padding)".to_string()
+    })?;
+
+    if decoded.len() != 32 {
+        return Err(
+            "FLEXI_PASETO_V4_PUBLIC_KEY_B64URL must decode to 32-byte Ed25519 public key"
+                .to_string(),
+        );
     }
 
-    let token = &auth_header[PREFIX.len()..];
-    let public_key_b64 = std::env::var("FLEXI_PASETO_V4_PUBLIC_KEY_B64URL")
-        .map_err(|_| AuthError::Unauthorized)?;
-    let public_key = URL_SAFE_NO_PAD
-        .decode(public_key_b64)
-        .map_err(|_| AuthError::Unauthorized)?;
-    if public_key.len() != 32 {
-        return Err(AuthError::Unauthorized);
-    }
-
-    verify_paseto_v4_public_token(token, &public_key)
+    PASETO_PUBLIC_KEY
+        .set(decoded)
+        .map_err(|_| "Auth config already initialized".to_string())
 }
 
-fn verify_paseto_v4_public_token(token: &str, public_key: &[u8]) -> Result<TenantContext, AuthError> {
+fn verify_paseto_v4_public_from_env(auth_header: &str) -> Result<TenantContext, AuthError> {
+    let token = extract_bearer_token(auth_header).ok_or(AuthError::Unauthorized)?;
+    let public_key = PASETO_PUBLIC_KEY.get().ok_or(AuthError::Unauthorized)?;
+
+    verify_paseto_v4_public_token(token, public_key)
+}
+
+fn verify_paseto_v4_public_token(
+    token: &str,
+    public_key: &[u8],
+) -> Result<TenantContext, AuthError> {
     // Supports v4.public with optional footer (implicit assertion is not used in this API layer).
     let parts: Vec<&str> = token.split('.').collect();
-    if !(parts.len() == 4 || parts.len() == 5) || parts[0] != "v4" || parts[1] != "public" {
+    if !(parts.len() == 3 || parts.len() == 4) || parts[0] != "v4" || parts[1] != "public" {
         return Err(AuthError::Unauthorized);
     }
 
-    let payload = URL_SAFE_NO_PAD
+    let payload_and_sig = URL_SAFE_NO_PAD
         .decode(parts[2])
         .map_err(|_| AuthError::Unauthorized)?;
-    let signature = URL_SAFE_NO_PAD
-        .decode(parts[3])
-        .map_err(|_| AuthError::Unauthorized)?;
-    let footer = if parts.len() == 5 {
+    if payload_and_sig.len() < 64 {
+        return Err(AuthError::Unauthorized);
+    }
+    let split_at = payload_and_sig.len() - 64;
+    let payload = payload_and_sig[..split_at].to_vec();
+    let signature = payload_and_sig[split_at..].to_vec();
+    let footer = if parts.len() == 4 {
         URL_SAFE_NO_PAD
-            .decode(parts[4])
+            .decode(parts[3])
             .map_err(|_| AuthError::Unauthorized)?
     } else {
         Vec::new()
@@ -111,7 +128,8 @@ fn verify_paseto_v4_public_token(token: &str, public_key: &[u8]) -> Result<Tenan
         .verify(&msg, &signature)
         .map_err(|_| AuthError::Unauthorized)?;
 
-    let claims: PasetoClaims = serde_json::from_slice(&payload).map_err(|_| AuthError::Unauthorized)?;
+    let claims: PasetoClaims =
+        serde_json::from_slice(&payload).map_err(|_| AuthError::Unauthorized)?;
     validate_claims(claims)
 }
 
@@ -147,9 +165,9 @@ fn is_valid_principal(value: &str) -> bool {
     let bytes = value.as_bytes();
     !bytes.is_empty()
         && bytes.len() <= 128
-        && bytes
-            .iter()
-            .all(|b| matches!(*b, b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'-' | b'_' | b':' | b'.'))
+        && bytes.iter().all(
+            |b| matches!(*b, b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'-' | b'_' | b':' | b'.'),
+        )
 }
 
 fn unix_now() -> u64 {
@@ -167,4 +185,31 @@ fn pae(pieces: &[&[u8]]) -> Vec<u8> {
         out.extend_from_slice(piece);
     }
     out
+}
+
+fn extract_bearer_token(auth_header: &str) -> Option<&str> {
+    let (scheme, token) = auth_header.split_once(' ')?;
+    if !scheme.eq_ignore_ascii_case("Bearer") || token.is_empty() {
+        return None;
+    }
+    Some(token)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::extract_bearer_token;
+
+    #[test]
+    fn extract_bearer_token_accepts_case_insensitive_scheme() {
+        assert_eq!(extract_bearer_token("Bearer abc"), Some("abc"));
+        assert_eq!(extract_bearer_token("bearer abc"), Some("abc"));
+        assert_eq!(extract_bearer_token("BEARER abc"), Some("abc"));
+    }
+
+    #[test]
+    fn extract_bearer_token_rejects_invalid_formats() {
+        assert_eq!(extract_bearer_token("Token abc"), None);
+        assert_eq!(extract_bearer_token("Bearer "), None);
+        assert_eq!(extract_bearer_token("Bearer"), None);
+    }
 }
