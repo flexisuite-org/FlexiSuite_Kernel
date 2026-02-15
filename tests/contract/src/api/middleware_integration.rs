@@ -198,3 +198,44 @@ async fn test_quota_evaluation_priority_and_clipping() {
         assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
     }
 }
+
+#[tokio::test]
+#[cfg(debug_assertions)]
+async fn test_idempotency_inflight_concurrency() {
+    let app = setup_app();
+
+    let t1 = tokio::spawn({
+        let app = app.clone();
+        async move {
+            let req = build_idempotent_post("key-concurrent", "payload-c");
+            app.oneshot(req).await.unwrap()
+        }
+    });
+
+    let t2 = tokio::spawn({
+        let app = app.clone();
+        async move {
+            // Ensure t1 starts first to trigger InFlight state
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            let req = build_idempotent_post("key-concurrent", "payload-c");
+            app.oneshot(req).await.unwrap()
+        }
+    });
+
+    let (res1, res2) = tokio::join!(t1, t2);
+    let res1 = res1.unwrap();
+    let res2 = res2.unwrap();
+
+    assert_eq!(res1.status(), StatusCode::CREATED);
+    assert_eq!(res2.status(), StatusCode::CREATED);
+
+    let id1 = res1.headers().get("X-Action-Id").unwrap().to_str().unwrap().to_string();
+    let id2 = res2.headers().get("X-Action-Id").unwrap().to_str().unwrap().to_string();
+    assert_eq!(id1, id2);
+
+    let replay_count = 
+        (if res1.headers().contains_key("X-Idempotency-Replay") { 1 } else { 0 }) +
+        (if res2.headers().contains_key("X-Idempotency-Replay") { 1 } else { 0 });
+    
+    assert_eq!(replay_count, 1, "Exactly one request should be a replay");
+}

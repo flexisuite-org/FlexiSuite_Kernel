@@ -31,6 +31,7 @@ struct ActionStatusResponse {
 
 pub fn build_app() -> Router {
     let state = MiddlewareState::new();
+    state.start_cleanup_task();
 
     let public_router = Router::new().route("/health", get(|| async { "OK" }));
 
