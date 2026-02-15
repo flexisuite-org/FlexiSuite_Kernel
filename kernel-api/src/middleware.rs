@@ -2,16 +2,22 @@ use axum::{
     body::{to_bytes, Body},
     http::{HeaderMap, HeaderName, HeaderValue, Method, Request, StatusCode},
     middleware::Next,
-    response::{Response, IntoResponse},
+    response::{IntoResponse, Response},
 };
-use crate::auth::TenantContext;
 use kernel_core::idempotency::{canonicalize_request_target, check_idempotency_conflict};
+use kernel_core::quota::{QuotaLayer, QuotaViolation};
+use ring::digest::{digest, SHA256};
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, Notify};
 
-// REQ-IDEMPOTENCY-STORE: Simulation of 24h storage
+use crate::auth::TenantContext;
+
+const IDEMPOTENCY_TTL: Duration = Duration::from_secs(24 * 60 * 60);
+const ACTION_TTL: Duration = Duration::from_secs(24 * 60 * 60);
+
 #[derive(Clone, Debug)]
 pub struct IdempotencyRecord {
     pub body_hash: String,
@@ -19,7 +25,7 @@ pub struct IdempotencyRecord {
     pub status: StatusCode,
     pub headers: Vec<(String, String)>,
     pub body: Vec<u8>,
-    // ttl etc omitted for simulation
+    pub expires_at: Instant,
 }
 
 #[derive(Clone, Debug)]
@@ -27,6 +33,7 @@ pub enum IdempotencyEntry {
     InFlight {
         body_hash: String,
         notify: Arc<Notify>,
+        expires_at: Instant,
     },
     Completed(IdempotencyRecord),
 }
@@ -41,6 +48,73 @@ pub struct IdempotencyScopeKey {
 
 pub type IdempotencyStore = Arc<Mutex<HashMap<IdempotencyScopeKey, IdempotencyEntry>>>;
 
+#[derive(Clone, Debug, Eq, PartialEq, Hash)]
+pub struct ActionScopeKey {
+    tenant_id: String,
+    action_id: String,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum ActionStatus {
+    Pending,
+    Completed,
+    Failed,
+}
+
+#[derive(Clone, Debug)]
+pub struct ActionRecord {
+    pub status: ActionStatus,
+    pub expires_at: Instant,
+}
+
+pub type ActionStore = Arc<Mutex<HashMap<ActionScopeKey, ActionRecord>>>;
+
+#[derive(Clone, Debug)]
+pub struct MiddlewareState {
+    pub idempotency_store: IdempotencyStore,
+    pub action_store: ActionStore,
+}
+
+impl MiddlewareState {
+    pub fn new() -> Self {
+        Self {
+            idempotency_store: Arc::new(Mutex::new(HashMap::new())),
+            action_store: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+}
+
+pub async fn record_action(
+    store: &ActionStore,
+    tenant_id: &str,
+    action_id: &str,
+    status: ActionStatus,
+) {
+    let mut lock = store.lock().await;
+    cleanup_expired_actions(&mut lock);
+    lock.insert(
+        ActionScopeKey {
+            tenant_id: tenant_id.to_string(),
+            action_id: action_id.to_string(),
+        },
+        ActionRecord {
+            status,
+            expires_at: Instant::now() + ACTION_TTL,
+        },
+    );
+}
+
+pub async fn get_action(store: &ActionStore, tenant_id: &str, action_id: &str) -> Option<ActionRecord> {
+    let mut lock = store.lock().await;
+    cleanup_expired_actions(&mut lock);
+    lock.get(&ActionScopeKey {
+        tenant_id: tenant_id.to_string(),
+        action_id: action_id.to_string(),
+    })
+    .cloned()
+}
+
 /// REQ-IDEMPOTENCY-HEADER: Middleware logic
 pub async fn idempotency_middleware(req: Request<Body>, next: Next) -> Result<Response, StatusCode> {
     let (parts, body) = req.into_parts();
@@ -52,15 +126,19 @@ pub async fn idempotency_middleware(req: Request<Body>, next: Next) -> Result<Re
     }
 
     let idempotency_key = match parts.headers.get("Idempotency-Key") {
-        Some(val) => val.to_str().map_err(|_| StatusCode::BAD_REQUEST)?.to_string(),
-        None => return Ok(next.run(Request::from_parts(parts, body)).await), // Optional header
+        Some(val) => {
+            let key = val.to_str().map_err(|_| StatusCode::BAD_REQUEST)?;
+            validate_idempotency_key(key)?;
+            key.to_string()
+        }
+        None => return Ok(next.run(Request::from_parts(parts, body)).await),
     };
 
     let tenant_ctx = parts
         .extensions
         .get::<TenantContext>()
         .ok_or(StatusCode::UNAUTHORIZED)?;
-    
+
     // Canonicalize
     let path = parts.uri.path();
     let query = parts.uri.query();
@@ -82,17 +160,25 @@ pub async fn idempotency_middleware(req: Request<Body>, next: Next) -> Result<Re
     let req = Request::from_parts(parts, Body::from(body_bytes));
 
     // Check Store
-    let store = req.extensions().get::<IdempotencyStore>()
-        .cloned() // Clone Arc to release borrow of req
+    let state = req
+        .extensions()
+        .get::<MiddlewareState>()
+        .cloned()
         .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
-    
+
     loop {
-        let mut lock = store.lock().await;
+        let mut lock = state.idempotency_store.lock().await;
+        cleanup_expired_idempotency_entries(&mut lock);
+
         let waiter = if let Some(existing) = lock.get(&scope_key) {
             match existing {
                 IdempotencyEntry::Completed(record) => {
-                    // REQ-IDEMPOTENCY-CONFLICT: Conflict Guard logic
-                    if check_idempotency_conflict(&canonical_target, &body_hash, &canonical_target, &record.body_hash) {
+                    if check_idempotency_conflict(
+                        &canonical_target,
+                        &body_hash,
+                        &canonical_target,
+                        &record.body_hash,
+                    ) {
                         return Err(StatusCode::CONFLICT);
                     }
                     return Ok(build_replay_response(record));
@@ -100,8 +186,14 @@ pub async fn idempotency_middleware(req: Request<Body>, next: Next) -> Result<Re
                 IdempotencyEntry::InFlight {
                     body_hash: existing_hash,
                     notify,
+                    ..
                 } => {
-                    if check_idempotency_conflict(&canonical_target, &body_hash, &canonical_target, existing_hash) {
+                    if check_idempotency_conflict(
+                        &canonical_target,
+                        &body_hash,
+                        &canonical_target,
+                        existing_hash,
+                    ) {
                         return Err(StatusCode::CONFLICT);
                     }
                     notify.clone()
@@ -113,6 +205,7 @@ pub async fn idempotency_middleware(req: Request<Body>, next: Next) -> Result<Re
                 IdempotencyEntry::InFlight {
                     body_hash: body_hash.clone(),
                     notify: Arc::new(Notify::new()),
+                    expires_at: Instant::now() + IDEMPOTENCY_TTL,
                 },
             );
             break;
@@ -124,19 +217,21 @@ pub async fn idempotency_middleware(req: Request<Body>, next: Next) -> Result<Re
     // Process request
     let response = next.run(req).await;
 
-    // Store successful result (Atomic Upsert simulation)
+    // Store successful result
     if response.status().is_success() {
         let (parts, body) = response.into_parts();
         let body_bytes = match to_bytes(body, usize::MAX).await {
             Ok(bytes) => bytes,
             Err(_) => {
-                release_inflight(&store, &scope_key).await;
+                release_inflight(&state.idempotency_store, &scope_key).await;
                 return Err(StatusCode::INTERNAL_SERVER_ERROR);
             }
         };
-        let action_id = parts.headers.get("X-Action-Id")
+        let action_id = parts
+            .headers
+            .get("X-Action-Id")
             .and_then(|v| v.to_str().ok())
-            .unwrap_or("act-new")
+            .unwrap_or("")
             .to_string();
         let stored = IdempotencyRecord {
             body_hash,
@@ -144,9 +239,10 @@ pub async fn idempotency_middleware(req: Request<Body>, next: Next) -> Result<Re
             status: parts.status,
             headers: snapshot_headers(&parts.headers),
             body: body_bytes.to_vec(),
+            expires_at: Instant::now() + IDEMPOTENCY_TTL,
         };
         {
-            let mut write_lock = store.lock().await;
+            let mut write_lock = state.idempotency_store.lock().await;
             let notify = match write_lock.remove(&scope_key) {
                 Some(IdempotencyEntry::InFlight { notify, .. }) => notify,
                 _ => Arc::new(Notify::new()),
@@ -156,15 +252,28 @@ pub async fn idempotency_middleware(req: Request<Body>, next: Next) -> Result<Re
         }
         return Ok(Response::from_parts(parts, Body::from(body_bytes)));
     }
-    release_inflight(&store, &scope_key).await;
 
+    release_inflight(&state.idempotency_store, &scope_key).await;
     Ok(response)
 }
 
 fn compute_body_hash(body: &[u8]) -> String {
-    let mut hasher = DefaultHasher::new();
-    body.hash(&mut hasher);
-    format!("{:016x}", hasher.finish())
+    let result = digest(&SHA256, body);
+    let mut hex = String::with_capacity(result.as_ref().len() * 2);
+    for b in result.as_ref() {
+        hex.push_str(&format!("{b:02x}"));
+    }
+    hex
+}
+
+fn validate_idempotency_key(key: &str) -> Result<(), StatusCode> {
+    if key.is_empty() || key.len() > 128 {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    if !key.as_bytes().iter().all(|b| (0x21..=0x7e).contains(b)) {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    Ok(())
 }
 
 async fn release_inflight(store: &IdempotencyStore, scope_key: &IdempotencyScopeKey) {
@@ -172,6 +281,19 @@ async fn release_inflight(store: &IdempotencyStore, scope_key: &IdempotencyScope
     if let Some(IdempotencyEntry::InFlight { notify, .. }) = write_lock.remove(scope_key) {
         notify.notify_waiters();
     }
+}
+
+fn cleanup_expired_idempotency_entries(store: &mut HashMap<IdempotencyScopeKey, IdempotencyEntry>) {
+    let now = Instant::now();
+    store.retain(|_, entry| match entry {
+        IdempotencyEntry::InFlight { expires_at, .. } => *expires_at > now,
+        IdempotencyEntry::Completed(record) => record.expires_at > now,
+    });
+}
+
+fn cleanup_expired_actions(store: &mut HashMap<ActionScopeKey, ActionRecord>) {
+    let now = Instant::now();
+    store.retain(|_, record| record.expires_at > now);
 }
 
 fn snapshot_headers(headers: &HeaderMap) -> Vec<(String, String)> {
@@ -206,14 +328,12 @@ fn build_replay_response(record: &IdempotencyRecord) -> Response {
     res
 }
 
-use kernel_core::quota::{QuotaLayer, QuotaViolation};
-
 fn violation_to_response(v: &QuotaViolation) -> Response {
     let mut res = violation_to_status(v).into_response();
     for (name, val) in v.headers() {
         res.headers_mut().insert(
-            axum::http::HeaderName::from_bytes(name.as_bytes()).unwrap(),
-            val.parse().unwrap()
+            HeaderName::from_bytes(name.as_bytes()).unwrap_or(HeaderName::from_static("retry-after")),
+            val.parse().unwrap_or_else(|_| HeaderValue::from_static("1")),
         );
     }
     res
@@ -223,19 +343,28 @@ fn violation_to_response(v: &QuotaViolation) -> Response {
 pub async fn quota_middleware(req: Request<Body>, next: Next) -> Result<Response, Response> {
     // 1. System Hard Limit (Critical Protection)
     if req.headers().contains_key("X-Mock-Quota-System") {
-        let violation = QuotaViolation { layer: QuotaLayer::SystemHardLimit, retry_after_s: 100 }; 
+        let violation = QuotaViolation {
+            layer: QuotaLayer::SystemHardLimit,
+            retry_after_s: 100,
+        };
         return Err(violation_to_response(&violation));
     }
 
     // 2. Tenant Budget
     if req.headers().contains_key("X-Mock-Quota-Tenant") {
-        let violation = QuotaViolation { layer: QuotaLayer::TenantBudget, retry_after_s: 5 };
+        let violation = QuotaViolation {
+            layer: QuotaLayer::TenantBudget,
+            retry_after_s: 5,
+        };
         return Err(violation_to_response(&violation));
     }
 
     // 3. API Rate Limit
     if req.headers().contains_key("X-Mock-Quota-Api") {
-        let violation = QuotaViolation { layer: QuotaLayer::ApiRateLimit, retry_after_s: 60 };
+        let violation = QuotaViolation {
+            layer: QuotaLayer::ApiRateLimit,
+            retry_after_s: 60,
+        };
         return Err(violation_to_response(&violation));
     }
 
@@ -244,7 +373,7 @@ pub async fn quota_middleware(req: Request<Body>, next: Next) -> Result<Response
 
 fn violation_to_status(v: &QuotaViolation) -> StatusCode {
     match v.layer {
-        QuotaLayer::SystemHardLimit => StatusCode::SERVICE_UNAVAILABLE, // 503
-        _ => StatusCode::TOO_MANY_REQUESTS, // 429
+        QuotaLayer::SystemHardLimit => StatusCode::SERVICE_UNAVAILABLE,
+        _ => StatusCode::TOO_MANY_REQUESTS,
     }
 }
