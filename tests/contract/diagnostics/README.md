@@ -1,0 +1,8 @@
+# diagnostics suite
+
+- test_diagnostics_scrub
+- test_diagnostics_image_url_minimization
+- test_diagnostics_payload_limit
+- test_diagnostics_opt_out_default
+- test_diagnostics_policy_revocation
+- test_diagnostics_report_query_contract

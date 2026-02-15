@@ -1,0 +1,8 @@
+# supplychain suite
+
+- test_manifest_signature_trust_root
+- test_manifest_retired_acceptance_window
+- test_manifest_break_glass_scope_and_ttl
+- test_sideloading_warning_contract
+- test_coop_coep_headers
+- test_cdn_proxy_corp_fallback
