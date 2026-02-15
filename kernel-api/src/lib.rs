@@ -1,16 +1,17 @@
 use axum::{
+    Json, Router,
     extract::{Extension, Path},
     http::StatusCode,
     middleware::from_fn,
     routing::{get, post},
-    Json, Router,
 };
 use serde::Serialize;
 use uuid::Uuid;
 
-use crate::auth::{auth_middleware, TenantContext};
+use crate::auth::{TenantContext, auth_middleware};
 use crate::middleware::{
-    get_action, idempotency_middleware, quota_middleware, record_action, ActionStatus, MiddlewareState,
+    ActionStatus, MiddlewareState, get_action, idempotency_middleware, quota_middleware,
+    record_action,
 };
 
 pub mod auth;
@@ -54,7 +55,13 @@ async fn write_test(
     Extension(ctx): Extension<TenantContext>,
 ) -> (StatusCode, [(String, String); 2], Json<TestWriteResponse>) {
     let action_id = Uuid::now_v7().to_string();
-    record_action(&state.action_store, &ctx.tenant_id, &action_id, ActionStatus::Completed).await;
+    record_action(
+        &state.action_store,
+        &ctx.tenant_id,
+        &action_id,
+        ActionStatus::Completed,
+    )
+    .await;
 
     let body = TestWriteResponse {
         action_id: action_id.clone(),

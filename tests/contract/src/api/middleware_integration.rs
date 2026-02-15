@@ -1,12 +1,15 @@
-use axum::{body::Body, http::{Request, StatusCode}};
 #[cfg(debug_assertions)]
 use axum::body::to_bytes;
 #[cfg(debug_assertions)]
 use axum::http::HeaderValue;
+use axum::{
+    body::Body,
+    http::{Request, StatusCode},
+};
 use kernel_api::build_app;
-use tower::ServiceExt;
 #[cfg(debug_assertions)]
 use serde_json::Value;
+use tower::ServiceExt;
 
 fn setup_app() -> axum::Router {
     build_app()
@@ -35,7 +38,10 @@ fn build_idempotent_post(key: &str, body: &str) -> Request<Body> {
 async fn test_health_is_public() {
     let app = setup_app();
 
-    let req = Request::builder().uri("/health").body(Body::empty()).unwrap();
+    let req = Request::builder()
+        .uri("/health")
+        .body(Body::empty())
+        .unwrap();
     let res = app.clone().oneshot(req).await.unwrap();
     assert_eq!(res.status(), StatusCode::OK);
 }
@@ -45,7 +51,11 @@ async fn test_auth_logic_401_403() {
     let app = setup_app();
 
     // 1. Missing auth context on protected endpoint -> 401
-    let req = Request::builder().uri("/test").method("POST").body(Body::empty()).unwrap();
+    let req = Request::builder()
+        .uri("/test")
+        .method("POST")
+        .body(Body::empty())
+        .unwrap();
     let res = app.clone().oneshot(req).await.unwrap();
     assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
 
@@ -95,7 +105,13 @@ async fn test_idempotency_conflict_scope_and_action_lookup() {
     let req = build_idempotent_post("key-1", "payload-a");
     let res = app.clone().oneshot(req).await.unwrap();
     assert_eq!(res.status(), StatusCode::CREATED);
-    let first_action_id = res.headers().get("X-Action-Id").unwrap().to_str().unwrap().to_string();
+    let first_action_id = res
+        .headers()
+        .get("X-Action-Id")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
     let first_body = to_bytes(res.into_body(), usize::MAX).await.unwrap();
     let first_json: Value = serde_json::from_slice(&first_body).unwrap();
     assert_eq!(first_json["action_id"], first_action_id);
@@ -104,7 +120,10 @@ async fn test_idempotency_conflict_scope_and_action_lookup() {
     let req = build_idempotent_post("key-1", "payload-a");
     let res = app.clone().oneshot(req).await.unwrap();
     assert_eq!(res.status(), StatusCode::CREATED);
-    assert_eq!(res.headers().get("X-Action-Id").unwrap(), first_action_id.as_str());
+    assert_eq!(
+        res.headers().get("X-Action-Id").unwrap(),
+        first_action_id.as_str()
+    );
     assert_eq!(res.headers().get("X-Idempotency-Replay").unwrap(), "true");
     let replay_body = to_bytes(res.into_body(), usize::MAX).await.unwrap();
     let replay_json: Value = serde_json::from_slice(&replay_body).unwrap();
@@ -229,13 +248,31 @@ async fn test_idempotency_inflight_concurrency() {
     assert_eq!(res1.status(), StatusCode::CREATED);
     assert_eq!(res2.status(), StatusCode::CREATED);
 
-    let id1 = res1.headers().get("X-Action-Id").unwrap().to_str().unwrap().to_string();
-    let id2 = res2.headers().get("X-Action-Id").unwrap().to_str().unwrap().to_string();
+    let id1 = res1
+        .headers()
+        .get("X-Action-Id")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
+    let id2 = res2
+        .headers()
+        .get("X-Action-Id")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
     assert_eq!(id1, id2);
 
-    let replay_count = 
-        (if res1.headers().contains_key("X-Idempotency-Replay") { 1 } else { 0 }) +
-        (if res2.headers().contains_key("X-Idempotency-Replay") { 1 } else { 0 });
-    
+    let replay_count = (if res1.headers().contains_key("X-Idempotency-Replay") {
+        1
+    } else {
+        0
+    }) + (if res2.headers().contains_key("X-Idempotency-Replay") {
+        1
+    } else {
+        0
+    });
+
     assert_eq!(replay_count, 1, "Exactly one request should be a replay");
 }
