@@ -1,0 +1,50 @@
+version: "1"
+updated_at: "2026-02-15"
+region:
+  mode: single_region
+  intra_region_only: true
+network:
+  client_server_rtt_ms_excluded: true
+api_node:
+  cpu_vcpu: 4
+  memory_gb: 8
+  nic_gbps: 1
+worker_node:
+  cpu_vcpu: 8
+  memory_gb: 16
+postgresql:
+  cpu_vcpu: 8
+  memory_gb: 32
+  storage: nvme
+  baseline_iops: 6000
+redis:
+  cpu_vcpu: 4
+  memory_gb: 8
+object_storage:
+  type: s3_compatible
+  same_region: true
+  tls_termination: true
+workload:
+  concurrent_connections: 100
+  sustained_rps: 1000
+  traffic_mix:
+    read_percent: 70
+    write_percent: 25
+    diagnostics_percent: 5
+  endpoint_mix:
+    get_entities_percent: 40
+    get_entity_by_id_percent: 30
+    write_entities_percent: 20
+    event_emit_percent: 5
+    diagnostics_percent: 5
+  payload_median_kb: 4
+  tenants: 50
+  rows_per_tenant: 1000000
+  warmup_minutes: 2
+  duration_minutes: 5
+  iterations: 5
+  required_passing_iterations: 4
+tools:
+  allowed:
+    - k6
+    - wrk2
