@@ -1,6 +1,6 @@
 # FlexiSuite 検証マトリクス (CI/CD・Runtime・Drill)
 
-本ドキュメントは、`docs/implementation_plan.md` の **MUST/SHOULD** 要件を、`PR-Blocking` / `Nightly` / `Operational Drill` の3層で強制する方法を定義する。
+本ドキュメントは、`docs/implementation_plan.md` の要件のうち、特に高リスク `REQ-*` を中心に、`PR-Blocking` / `Nightly` / `Operational Drill` の3層で強制する方法を定義する。`REQ-*` 未付与の `MUST/SHOULD` については、第1-4章の領域別テーブルで検証責務を明示し、仕様変更時に追随更新する。
 
 ## 0. トレーサビリティ原則
 
@@ -8,16 +8,17 @@
 - 実地演習が本質の要件（DR、鍵緊急失効）は、`Operational Drill` に加え、`PR-Blocking` の Readiness 検証を必須にする。
 - `Nightly` は非PRブロッキングだが運用上必須とし、失敗時は24時間以内にインシデントを起票する。
 - `REQ-*` が `implementation_plan` に追加・変更されたPRは、本ファイルの追随更新がない場合にFailさせる。
+- `REQ-*` 未付与の `MUST/SHOULD` が追加・変更された場合も、本ファイルの該当領域（第1-4章）の更新を必須とする。
 
 | REQ-ID | 検証ゲート | 主検証ジョブ/手段 | 失敗条件 |
 |---|---|---|---|
 | `REQ-TENANT-TOKEN-V2` | PR-Blocking + Nightly | `ci:test-auth-contract`, `nightly:test-token-compat`, `nightly:test-token-version-usage` | v2発行不備、`kid` 欠落受理、互換期限超過受理、14日連続ゼロ未達でv1停止 |
 | `REQ-KEY-REVOCATION-SLO` | PR-Blocking + Nightly + Drill | `ci:lint-drill-readiness`, `nightly:test-key-revocation-chaos`, 月次失効演習 | Readiness欠落、失効伝播 `p95 > 60s`、失効鍵で検証成功 |
-| `REQ-QUOTA-HTTP-CONTRACT` | PR-Blocking | `ci:test-quota-contract` | 判定表と異なるHTTPコード、`Retry-After` 欠落/異常 |
-| `REQ-IDEMPOTENCY-HEADER` | PR-Blocking | `ci:test-idempotency-contract` | `Idempotency-Key` 契約逸脱、衝突時 `409` 不履行 |
-| `REQ-PROTOCOL-FALLBACK-UX` | PR-Blocking | `ci:e2e-worker-protocol-fallback`, `ci:e2e-worker-protocol-fallback-a11y` | `protocol.error` 時に標準フォールバック/A11y要件未達 |
-| `REQ-DIAG-CONSENT` | PR-Blocking + Nightly | `ci:test-diagnostics-consent`, `nightly:test-diagnostics-revocation-lag` | 同意なし送信、撤回後5分超で送信継続 |
-| `REQ-MANIFEST-TRUST-ROOT` | PR-Blocking + Nightly | `ci:lint-manifest-trust-root`, `ci:test-manifest-signature-contract`, `nightly:test-manifest-revocation-propagation` | 署名検証順序違反、`revoked kid` 受理、信頼ルート署名不一致 |
+| `REQ-QUOTA-HTTP-CONTRACT` | PR-Blocking | `ci:test-contract`（quota suite） | 判定表と異なるHTTPコード、`Retry-After` 欠落/異常 |
+| `REQ-IDEMPOTENCY-HEADER` | PR-Blocking | `ci:test-contract`（idempotency suite） | `Idempotency-Key` 契約逸脱、衝突時 `409` 不履行 |
+| `REQ-PROTOCOL-FALLBACK-UX` | PR-Blocking | `ci:e2e-frontend-security`, `ci:e2e-worker-protocol-fallback-a11y` | `protocol.error` 時に標準フォールバック/A11y要件未達 |
+| `REQ-DIAG-CONSENT` | PR-Blocking + Nightly | `ci:test-contract`（diagnostics consent suite）, `nightly:test-diagnostics-revocation-lag` | 同意なし送信、撤回後5分超で送信継続 |
+| `REQ-MANIFEST-TRUST-ROOT` | PR-Blocking + Nightly | `ci:lint-manifest-trust-root`, `ci:test-manifest-signature-contract`, `ci:test-manifest-break-glass`, `nightly:test-manifest-revocation-propagation`, `nightly:test-manifest-retired-window` | 署名検証順序違反、`revoked kid` 受理、`retired` 窓外受理、信頼ルート署名不一致、break-glassの時限/スコープ違反 |
 | `REQ-SIDELOADING-WARNING` | PR-Blocking | `ci:e2e-sideloading-warning` | Developer Mode時の警告・同意フロー欠落 |
 | `REQ-SLO-ENV-PROFILE` | PR-Blocking + Nightly | `ci:lint-slo-profile`, `nightly:test-slo-smoke` | `ops/slo_profile.yaml` 未一致でSLO判定 |
 | `REQ-DR-REHEARSAL` | PR-Blocking + Drill | `ci:lint-drill-readiness`, 月次ステージング/四半期本番相当演習 | Readiness欠落、RPO/RTO未達、演習記録欠落 |
@@ -34,6 +35,7 @@
 | 特権SQL | `flexi.kernel_mode` 利用禁止 | SQL AST lint (migration対象限定) | マイグレーションSQL内に検出 |
 | マニフェスト | 配布時は `DistManifest` のみ受理 | `manifest-validator` | `^`/`~` などRange残存、`digest` 欠落、未解決バージョン |
 | 信頼ルート | `manifest_trust_root` 構造・署名 | trust-root lint + signature lint | `kid/status/not_after` 欠落、ルート署名不一致 |
+| 署名バイパス | break-glass制約（時限・スコープ・監査） | config lint + policy lint | 既定有効、TTL未設定、`(tenant_id, manifest_digest)` 非限定、必須監査項目欠落 |
 | CDN整合性 | lockfileのハッシュ固定と署名 | `component.lock` validator + signature lint | hash/sig不一致を許容 |
 | イベント契約 | `order_mode` の明示必須 | Rust型検証 + JSON Schema検証 | `order_mode` 欠落または不正値 |
 | 冪等性契約 | `Idempotency-Key` と `X-Action-Id` 契約 | OpenAPI lint + handler contract test | ヘッダ仕様違反、`X-Action-Id` 欠落 |
@@ -42,6 +44,7 @@
 | 診断PII | payload上限とサニタイズ要件 | スキーマ検証 + 静的ルール | `truncated` 欠落、機密属性許可、画像URLのpath生値 |
 | 診断同意 | 既定 `opt-out` | policy default test | 初期状態が `enabled=true` |
 | SLO | 測定環境固定 | `ops/slo_profile.yaml` lint | 必須項目欠落、無効値、トラフィックミックス欠落 |
+| SLO再現性 | ベンチ入力の固定化（seed/データ分布） | benchmark profile lint | `dataset_seed` / `dataset_version` / `distribution_profile` 欠落、実行時プロファイル不一致 |
 | Drill Readiness | DR実演習の準備情報固定 | runbook metadata lint | `runbook_updated_at` / `owner` / `next_drill_at` / `last_drill_report` 欠落 |
 
 ## 2. 契約テスト (PR-Blocking: Integration/E2E)
@@ -55,6 +58,8 @@
 | 冪等性 | `test_idempotency_conflict` | 同一キー・異なる本文 | `409 Conflict` |
 | 冪等性 | `test_action_id_reuse` | 同一キー・同一本文の再送 | 既存 `action_id` を返却 |
 | 冪等性 | `test_action_status_lookup` | `GET /actions/{action_id}` | `PENDING/COMPLETED/FAILED` が整合 |
+| 冪等性 | `test_idempotency_canonical_request_target` | canonical化仕様（path/query） | 並び順差/重複キー/末尾スラッシュ差異を正規化して同一判定 |
+| 冪等性 | `test_idempotency_query_order_conflict_guard` | canonical化後の本文不一致検知 | query順序差のみでは衝突とせず、本文差異時のみ `409` |
 | クォータ | `test_quota_http_matrix` | 429/503判定表 | レイヤ別に規定コード返却 |
 | クォータ | `test_retry_after_contract` | `Retry-After` 算出 | 欠落なく非負秒で返却 |
 | イベント順序 | `test_event_ordering_entity` | `order_mode=entity` | `entity_seq` 順に処理 |
@@ -66,6 +71,8 @@
 | Worker Protocol | `test_worker_protocol_mismatch` | 互換性不一致時の失敗動作 | `protocol.error` 送信後 `terminate` |
 | Worker UX | `test_protocol_fallback_screen` | 互換性不一致時の表示 | 標準フォールバック画面を表示 |
 | Worker UX | `test_protocol_fallback_a11y_i18n` | A11y + locale fallback | `aria-live` 通知、キーボード操作、locale順序を満たす |
+| Worker UX | `test_canvas_fallback_accessibility_floor` | OffscreenCanvas非対応時のUX下限 | 再読込/戻る/サポート導線にキーボード到達可能、状態説明が読み上げ可能 |
+| Worker UX | `test_canvas_fallback_metric_emission` | 互換性劣化メトリクス | `worker_canvas_fallback_total` が増分される |
 | 診断PII | `test_diagnostics_scrub` | URL/トークン/属性サニタイズ | 機密値が伏字化される |
 | 診断PII | `test_diagnostics_image_url_minimization` | 画像URL最小化 | `origin` のみ保持、pathはハッシュ化 |
 | 診断PII | `test_diagnostics_payload_limit` | 512KB超過時挙動 | 安全に切り詰め + `truncated=true` |
@@ -73,6 +80,8 @@
 | 診断同意 | `test_diagnostics_policy_revocation` | 同意撤回反映 | 5分以内に送信停止 |
 | 診断API | `test_diagnostics_report_query_contract` | `report/query` 責務分離 | `report` は登録、`query` は取得のみ許可 |
 | サプライチェーン | `test_manifest_signature_trust_root` | 署名検証順序 | digest一致後に署名検証、`revoked kid` 拒否 |
+| サプライチェーン | `test_manifest_retired_acceptance_window` | `retired` 受理窓の厳格化 | `retired` はgrace window内のみ受理し、窓外は拒否 |
+| サプライチェーン | `test_manifest_break_glass_scope_and_ttl` | break-glass制約 | 60分超過で自動無効化、`(tenant_id, manifest_digest)` 外利用を拒否、監査ログ必須項目を記録 |
 | サプライチェーン | `test_sideloading_warning_contract` | Developer Mode挙動 | 未署名受理時の警告表示とIsolation強制の維持 |
 | フロント配信 | `test_coop_coep_headers` | COOP/COEP契約 | 必須ヘッダを返却 |
 | フロント配信 | `test_cdn_proxy_corp_fallback` | CORP不足時プロキシ経由 | 直接配信を拒否しプロキシへ迂回 |
@@ -85,11 +94,13 @@
 | 認証トークン | `nightly:test-token-compat` | v1/v2互換窓検証 | 2リリース/60日規約に一致 |
 | 認証トークン | `nightly:test-token-version-usage` | v1/v2利用率可視化 | 14日連続ゼロ判定に必要な時系列を保持 |
 | SLO | `nightly:test-slo-smoke` | Warm/Cold分離計測 | 逸脱時アラート発報 |
+| SLO | `nightly:test-slo-reproducibility` | 再現性（seed/分布/反復） | 同一 `dataset_seed` / `dataset_version` で結果の許容分散内再現、プロファイル不一致時Fail |
 | イベント耐障害 | `nightly:test-claim-pending-failover` | `claim_pending` 再配分 | 順序維持で回復 |
 | イベント耐障害 | `nightly:test-hot-shard-detection` | ホットシャード検知 | 閾値超過で制御動作 + アラート |
 | 診断同意 | `nightly:test-diagnostics-revocation-lag` | 撤回反映遅延 | 5分以内で収束 |
 | サプライチェーン | `nightly:test-lockfile-integrity` | lockfile整合性再検証 | 不一致時Fail |
 | サプライチェーン | `nightly:test-manifest-revocation-propagation` | trust root失効伝播 | `revoked kid` 拒否が `p95 <= 60秒` で反映 |
+| サプライチェーン | `nightly:test-manifest-retired-window` | `retired` 鍵受理窓 | grace window終了後の受理が0件であること |
 | Runtime制限 | `nightly:test-sandbox-cpu-vs-wallclock` | CPU/Time分離検証 | CPU 5s超過でKill, Sleep 20sはPass |
 
 ## 4. 運用強制と監視 (Runtime Enforcement)
@@ -107,8 +118,10 @@
 | 診断データ | 24h以内削除 | TTLジョブ | `diagnostics_retention_violation_total` |
 | 診断同意 | 同意ポリシー遵守 | Policy cache + deny guard | `diagnostics_consent_violation_total` |
 | Worker互換性 | `protocol.error` 監視 | error telemetry | `worker_protocol_mismatch_total` |
+| Worker互換性 | Canvasフォールバック監視 | fallback telemetry | `worker_canvas_fallback_total` |
 | SLO | Warm/Cold 分離計測 | メトリクスラベル分離 | `sandbox_duration_seconds{kind=warm|cold}` |
 | trust root | 失効反映監視 | keyset配布監視 | `manifest_trust_root_propagation_seconds` |
+| trust root | break-glass運用監視 | policy telemetry + audit | `manifest_signature_bypass_active_total`, `manifest_signature_bypass_expired_total` |
 | 信頼スコア | 係数固定 + 監査可能性 | バッチ計算 + 監査ログ | 再計算差分アラート |
 
 ## 5. CI ジョブ構成 (推奨)
@@ -119,12 +132,14 @@
 | `ci:lint-sql-security` | `SECURITY DEFINER` テンプレート検証、`flexi.kernel_mode` 検出（AST） | 必須 |
 | `ci:lint-manifest` | `DevManifest`/`DistManifest` ルール検証 | 必須 |
 | `ci:lint-manifest-trust-root` | `manifest_trust_root` 構造・署名・有効期限検証 | 必須 |
+| `ci:test-manifest-break-glass` | break-glassの時限無効化、スコープ限定、監査ログ必須項目の契約テスト | 必須 |
 | `ci:lint-slo-profile` | `ops/slo_profile.yaml` の妥当性検証 | 必須 |
 | `ci:lint-drill-readiness` | DR/失効演習の Readiness メタデータ検証 | 必須 |
 | `ci:test-compile-guards` | `trybuild` による型安全ガード検証 | 必須 |
 | `ci:test-contract` | 認証・冪等性・クォータ・イベント順序・診断・署名の契約テスト | 必須 |
 | `ci:e2e-frontend-security` | COOP/COEP、CDNプロキシ、protocol fallback UI のE2E | 必須 |
 | `ci:e2e-worker-protocol-fallback-a11y` | fallback のA11y/i18n E2E検証 | 必須 |
+| `ci:e2e-canvas-fallback-metrics` | OffscreenCanvas非対応時のUX下限 + `worker_canvas_fallback_total` 計測検証 | 必須 |
 | `ci:test-observability` | メトリクス名/ラベル/アラートルール整合チェック | 必須 |
 | `nightly:test-reliability` | 鍵失効・token互換・claim_pending・SLO・整合性の長時間検証 | 必須（非PRブロック） |
 
@@ -159,6 +174,7 @@
 ### Phase 5 (Component System)
 - [ ] `component.lock` のハッシュ検証と `manifest.json.sig` 検証をCIに組み込む。
 - [ ] `manifest_trust_root.json(.sig)` の配布・検証をCIに組み込む。
+- [ ] `ci:test-manifest-break-glass` を導入し、時限無効化・スコープ限定・監査ログ必須項目を検証する。
 - [ ] `DistManifest` 固定化（Range排除）をビルドパイプラインで強制する。
 - [ ] SBOM脆弱性検査（Critical/High fail）を導入する。
 
@@ -171,8 +187,10 @@
 ### Phase 7-8 (Frontend / Reliability)
 - [ ] Worker `protocol.error` のハンドリングとフォールバックUIをE2Eで検証する。
 - [ ] fallback UI のA11y（キーボード操作/`aria-live`）とlocale fallbackをE2Eで検証する。
+- [ ] `ci:e2e-canvas-fallback-metrics` を導入し、OffscreenCanvas非対応時のUX下限と `worker_canvas_fallback_total` 計測を検証する。
 - [ ] COOP/COEP + CDNプロキシCORPフォールバックをE2Eで検証する。
 - [ ] Warm/Cold SLOメトリクスを分離し、ダッシュボードに反映する。
+- [ ] `nightly:test-slo-reproducibility` を導入し、`dataset_seed` / `dataset_version` 固定時の再現性を検証する。
 - [ ] 診断データPIIスクラブ、同意制御、24h削除を監視対象に追加する。
 - [ ] DR月次/四半期演習テンプレートと `ci:lint-drill-readiness` を運用に組み込む。
 

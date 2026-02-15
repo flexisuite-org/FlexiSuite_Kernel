@@ -232,6 +232,7 @@ OSとしての堅牢性を担保するため、サードパーティコード（
 - **例外処理 (Canvas/計測)**:
   - **Canvas**: `OffscreenCanvas` を使用し、Worker内で描画処理を完結させ**なければならない (MUST)**。Main ThreadへはBitmap転送またはplaceholder canvasの制御権委譲を行う。
   - **非対応環境フォールバック**: `OffscreenCanvas` が利用できない環境では、機能制限モードとして描画をスキップし、代替プレースホルダを表示する動作を許容して**よい (MAY)**。
+  - **非対応環境のUX下限**: `OffscreenCanvas` 非対応時でも、主要操作（再読込/戻る/サポート導線）はキーボードのみで到達可能でなければならず、状態説明はスクリーンリーダーで通知可能にしなければならない **(MUST)**。加えて、`worker_canvas_fallback_total` を計測し、互換性劣化を監視できるようにしなければならない **(MUST)**。
   - **DOM計測**: `useElementSize`, `useScrollPosition` 等の非同期プロキシフックを提供し、Main Thread側で計測した値をWorkerへ返却する仕組みを実装**しなければならない (MUST)**。
 
 #### 信頼層別ケイパビリティマトリクス (実行環境は全Worker)
@@ -321,11 +322,16 @@ CDNが `CORP` ヘッダを返さない場合のフォールバックプロキシ
 - **検証順序**:
   - Player/Registryは `DistManifest` 受理時に `manifestDigest` の一致を検証し、その後 `manifestSignature` を `kid` で引いた公開鍵で検証しなければならない **(MUST)**。
   - `kid` が `revoked` の場合は即時拒否、`retired` は猶予期間内のみ受理、`active` のみ通常受理とする **(MUST)**。
-  - 署名検証失敗・`kid` 不明・有効期限外のいずれかに該当する場合はインストールを拒否し、監査ログへ `MANIFEST_SIGNATURE_INVALID` を記録しなければならない **(MUST)**。ただし、**Self-Hosted環境で管理者が明示的に危険オプションを有効化した場合のみ**、本拒否規則の適用除外として扱ってよい **(MAY)**。
+  - 署名検証失敗・`kid` 不明・有効期限外のいずれかに該当する場合はインストールを拒否し、監査ログへ `MANIFEST_SIGNATURE_INVALID` を記録しなければならない **(MUST)**。
 - **鍵ローテーション/失効**:
   - 配布鍵は `active + next` の2世代同時配布を維持し、`next` への切替時は最低24時間の重複検証期間を持たなければならない **(MUST)**。
   - **FlexiSuite Cloud（Managed本番）** では、署名検証を無効化するオプション（`--unsafe-skip-signature-verification` 等）を提供してはならない **(MUST NOT)**。
-  - **Self-Hosted環境** では、互換検証/デバッグ用途に限り、管理者の明示設定下で危険オプションを実装してもよい **(MAY)**。ただし既定値は常に無効でなければならず、適用中は `MANIFEST_SIGNATURE_BYPASS_ENABLED` として監査ログ記録を必須とする **(MUST)**。
+  - **Self-Hosted環境** では、互換検証/障害対応に限り、`break-glass` 手順として危険オプションを実装してもよい **(MAY)**。ただし以下をすべて満たさなければならない **(MUST)**:
+    - 既定値は常に無効であり、明示操作でのみ有効化できること。
+    - 有効期間は最大 **60分** とし、期限到達で自動的に無効化されること（恒久化を許可してはならない **(MUST NOT)**）。
+    - 適用範囲は `(tenant_id, manifest_digest)` 単位に限定し、システム全体へ一括適用してはならない **(MUST NOT)**。
+    - 有効化時に `operator`, `approver`（別主体）, `reason`, `ticket_id`, `expires_at` を必須入力とし、`MANIFEST_SIGNATURE_BYPASS_ENABLED` / `MANIFEST_SIGNATURE_BYPASS_DISABLED` / `MANIFEST_SIGNATURE_BYPASS_USED` を監査ログへ記録すること。
+    - 管理UIと運用ダッシュボードで、適用中のバイパスを常時可視化すること。
 
 #### Developer Mode & Sideloading (The Openness Contract, REQ-SIDELOADING-WARNING)
 OSSとしての自由とエコシステムの健全性を両立させるため、以下の機能を仕様化する。
@@ -360,8 +366,6 @@ OSSとしての自由とエコシステムの健全性を両立させるため�
   - `trust_score = clamp((check_pass * 30) + verified_installs_score - (uninstall_rate_30d * 100) - (crash_rate_7d * 200) - permission_penalty - decay_penalty, 0, 100)`
   - **Verified Tenant Weight**: `weighted_verified_installs` は検証済みテナント（支払実績あり、運用期間3ヶ月以上など）の寄与を重み付けした値を使う。
   - **Sybil Resistance**: 短期間での大量インストール、同一IP/Deviceからの操作は異常検知し、スコア計算から除外または手動審査に回す。
-  - **監査**: スコアの算出根拠（入力値、係数、最終スコア、クリップ前後の値）を監査ログとして記録・開示可能でなければならない。
-
   - **監査**: スコアの算出根拠（入力値、係数、最終スコア、クリップ前後の値）を監査ログとして記録・開示可能でなければならない。
 
 ### 4.5 Sandbox Runtime 制限 (Time Limits Contract)
@@ -432,8 +436,11 @@ KMS (Key Management Service) を前提とした鍵ライフサイクルを規定
   - 書き込みAPI（`POST`, `PUT`, `PATCH`, `DELETE`）は、`Idempotency-Key` リクエストヘッダを受理し、仕様に従って評価**しなければならない (MUST)**。
   - `Idempotency-Key` は 1..128 文字のASCII可視文字とし、制御文字を含めてはならない **(MUST NOT)**。
   - HTTPヘッダ名の解釈は大文字小文字非依存だが、ログ・監査では `Idempotency-Key` を正規表記として記録**しなければならない (MUST)**。
-- **Idempotency Scope**: 冪等性キーの一意性は `(tenant_id, method, canonical_path, idempotency_key)` の複合タプルで判定**しなければならない (MUST)**。
-  - **Canonical Path**: 末尾スラッシュ削除、小文字化は行わず、URLデコード後のパスを正規形とする。クエリパラメータはキーでソートして正規化する。
+- **Idempotency Scope**: 冪等性キーの一意性は `(tenant_id, method, canonical_request_target, idempotency_key)` の複合タプルで判定**しなければならない (MUST)**。
+  - **Canonical Request Target**:
+    - `canonical_path`: originを除いたパスを用い、`/` 以外の末尾スラッシュのみ削除する。小文字化・URLデコードは行ってはならない **(MUST NOT)**。
+    - `canonical_query`: クエリパラメータはキー昇順、同一キーは値昇順で並べ替える。空クエリは省略し、重複キーは保持する。
+    - `canonical_request_target`: `canonical_path` と `canonical_query` を `?` で連結して生成する（クエリが空なら `canonical_path` のみ）。
 - **Request Hash Validation**:
   - リクエストごとに `request_hash = SHA256(canonical_request_body)` を計算し、保存されたキーと照合**しなければならない (MUST)**。
   - `idempotency_key` が存在し、かつ `request_hash` が一致しない場合、**409 Conflict** を返却**しなければならない (MUST)**（キーの誤再利用防止）。

@@ -40,12 +40,12 @@ FlexiStudy（勉強管理アプリ）でAIがUI/UXを自己書き換えする「
 
 - **Zero Setup** — ブラウザを開けばそこが開発・実行環境
 - **AI Native** — 標準化されたインターフェースと安全なサンドボックス
-- **Ecosystem** — コンポーネントをストアで配布・購入・インストール
+- **Ecosystem** — コンポーネントをストアで配布・導入できる。課金/購入フローは将来フェーズで導入する。
 - **AI Self-Correction Loop** — エラーやデザイン崩れをAI自身が検知し、修正する「自己修復ループ」をOSレベルで支援
 - **Feedback Interface** — KernelはAIを主対象に、認可された開発者にも構造化診断データを提供する。ユーザーは「AIの思考と作業」をダッシュボードで観測でき、安心して任せられる体験（Observability）を提供する。
 - **AI Rulebook** — プロジェクトごとに「デザインのルール（Wabi-Sabi等）」や「コンテキスト」を定義し、AIの自己修復を制御する権利をユーザーに与える。デフォルトは「完成された美しさ」だが、例外を許容する柔軟性を持つ。
 - **Openness** — Jailbreak不要。SideloadingとSelf-Hostingを公式にサポートし、誰でもKernelを改造・運用できる。Kernel UI自体もFlexiSuiteアプリとして実装される（Dogfooding）。
-- **Data Portability** — 「アプリ定義」と「データ」をセットで書き出し、他のFlexiSuiteインスタンスへ完全に移行できる権利（Exit Right）を保証する。
+- **Data Portability** — 「アプリ定義」と「データ」をセットで書き出し、他のFlexiSuiteインスタンスへ移行できる権利（Exit Right）の実装をロードマップで保証する（現時点では提案/将来フェーズ）。
 
 
 
