@@ -12,11 +12,13 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, Notify};
+use tracing::{error, info, instrument, warn};
 
 use crate::auth::TenantContext;
 
 const IDEMPOTENCY_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 const ACTION_TTL: Duration = Duration::from_secs(24 * 60 * 60);
+const MAX_BODY_SIZE: usize = 10 * 1024 * 1024; // 10MB DoS protection
 
 #[derive(Clone, Debug)]
 pub struct IdempotencyRecord {
@@ -83,6 +85,40 @@ impl MiddlewareState {
             action_store: Arc::new(Mutex::new(HashMap::new())),
         }
     }
+
+    pub fn start_cleanup_task(&self) {
+        let idempotency_store = self.idempotency_store.clone();
+        let action_store = self.action_store.clone();
+
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(60));
+            loop {
+                interval.tick().await;
+                
+                // Cleanup Idempotency Store
+                {
+                    let mut lock = idempotency_store.lock().await;
+                    let initial_len = lock.len();
+                    cleanup_expired_idempotency_entries(&mut lock);
+                    let removed = initial_len - lock.len();
+                    if removed > 0 {
+                        info!(removed_count = removed, "Cleaned up expired idempotency entries");
+                    }
+                }
+
+                // Cleanup Action Store
+                {
+                    let mut lock = action_store.lock().await;
+                    let initial_len = lock.len();
+                    cleanup_expired_actions(&mut lock);
+                    let removed = initial_len - lock.len();
+                    if removed > 0 {
+                        info!(removed_count = removed, "Cleaned up expired action entries");
+                    }
+                }
+            }
+        });
+    }
 }
 
 pub async fn record_action(
@@ -92,7 +128,7 @@ pub async fn record_action(
     status: ActionStatus,
 ) {
     let mut lock = store.lock().await;
-    cleanup_expired_actions(&mut lock);
+    // O(N) cleanup removed from critical path
     lock.insert(
         ActionScopeKey {
             tenant_id: tenant_id.to_string(),
@@ -106,8 +142,8 @@ pub async fn record_action(
 }
 
 pub async fn get_action(store: &ActionStore, tenant_id: &str, action_id: &str) -> Option<ActionRecord> {
-    let mut lock = store.lock().await;
-    cleanup_expired_actions(&mut lock);
+    let lock = store.lock().await;
+    // O(N) cleanup removed from critical path
     lock.get(&ActionScopeKey {
         tenant_id: tenant_id.to_string(),
         action_id: action_id.to_string(),
@@ -116,6 +152,7 @@ pub async fn get_action(store: &ActionStore, tenant_id: &str, action_id: &str) -
 }
 
 /// REQ-IDEMPOTENCY-HEADER: Middleware logic
+#[instrument(skip_all, fields(tenant_id, method, path))]
 pub async fn idempotency_middleware(req: Request<Body>, next: Next) -> Result<Response, StatusCode> {
     let (parts, body) = req.into_parts();
     let method = parts.method.clone();
@@ -127,8 +164,17 @@ pub async fn idempotency_middleware(req: Request<Body>, next: Next) -> Result<Re
 
     let idempotency_key = match parts.headers.get("Idempotency-Key") {
         Some(val) => {
-            let key = val.to_str().map_err(|_| StatusCode::BAD_REQUEST)?;
-            validate_idempotency_key(key)?;
+            let key = match val.to_str() {
+                Ok(k) => k,
+                Err(_) => {
+                    warn!("Invalid Idempotency-Key encoding");
+                    return Err(StatusCode::BAD_REQUEST);
+                }
+            };
+            if let Err(_) = validate_idempotency_key(key) {
+                warn!(key = %key, "Invalid Idempotency-Key format");
+                return Err(StatusCode::BAD_REQUEST);
+            }
             key.to_string()
         }
         None => return Ok(next.run(Request::from_parts(parts, body)).await),
@@ -138,6 +184,11 @@ pub async fn idempotency_middleware(req: Request<Body>, next: Next) -> Result<Re
         .extensions
         .get::<TenantContext>()
         .ok_or(StatusCode::UNAUTHORIZED)?;
+    
+    // Enrich span
+    tracing::Span::current().record("tenant_id", &tenant_ctx.tenant_id);
+    tracing::Span::current().record("method", method.as_str());
+    tracing::Span::current().record("path", parts.uri.path());
 
     // Canonicalize
     let path = parts.uri.path();
@@ -149,13 +200,19 @@ pub async fn idempotency_middleware(req: Request<Body>, next: Next) -> Result<Re
         tenant_id: tenant_ctx.tenant_id.clone(),
         method: method.as_str().to_string(),
         canonical_target: canonical_target.clone(),
-        idempotency_key,
+        idempotency_key: idempotency_key.clone(),
     };
 
     // Body hash MUST be derived from the actual request body.
-    let body_bytes = to_bytes(body, usize::MAX)
-        .await
-        .map_err(|_| StatusCode::BAD_REQUEST)?;
+    // DoS Protection: Limit body size
+    let body_bytes = match to_bytes(body, MAX_BODY_SIZE).await {
+        Ok(b) => b,
+        Err(_) => {
+            warn!("Request body exceeded MAX_BODY_SIZE ({})", MAX_BODY_SIZE);
+            return Err(StatusCode::BAD_REQUEST);
+        }
+    };
+    
     let body_hash = compute_body_hash(&body_bytes);
     let req = Request::from_parts(parts, Body::from(body_bytes));
 
@@ -168,7 +225,7 @@ pub async fn idempotency_middleware(req: Request<Body>, next: Next) -> Result<Re
 
     loop {
         let mut lock = state.idempotency_store.lock().await;
-        cleanup_expired_idempotency_entries(&mut lock);
+        // O(N) cleanup removed from critical path
 
         let waiter = if let Some(existing) = lock.get(&scope_key) {
             match existing {
@@ -179,8 +236,13 @@ pub async fn idempotency_middleware(req: Request<Body>, next: Next) -> Result<Re
                         &canonical_target,
                         &record.body_hash,
                     ) {
+                        warn!(
+                            key = %idempotency_key, 
+                            "Idempotency conflict detected (Completed)"
+                        );
                         return Err(StatusCode::CONFLICT);
                     }
+                    info!(key = %idempotency_key, "Replaying idempotent response");
                     return Ok(build_replay_response(record));
                 }
                 IdempotencyEntry::InFlight {
@@ -194,8 +256,13 @@ pub async fn idempotency_middleware(req: Request<Body>, next: Next) -> Result<Re
                         &canonical_target,
                         existing_hash,
                     ) {
+                        warn!(
+                            key = %idempotency_key, 
+                            "Idempotency conflict detected (InFlight)"
+                        );
                         return Err(StatusCode::CONFLICT);
                     }
+                    // Wait for the in-flight request to complete
                     notify.clone()
                 }
             }
@@ -211,6 +278,7 @@ pub async fn idempotency_middleware(req: Request<Body>, next: Next) -> Result<Re
             break;
         };
         drop(lock);
+        // Wait outside lock
         waiter.notified().await;
     }
 
@@ -220,10 +288,26 @@ pub async fn idempotency_middleware(req: Request<Body>, next: Next) -> Result<Re
     // Store successful result
     if response.status().is_success() {
         let (parts, body) = response.into_parts();
-        let body_bytes = match to_bytes(body, usize::MAX).await {
+        // We need to buffer the response body to store it for replay.
+        // Again, enforce size limit to protect memory.
+        let body_bytes = match to_bytes(body, MAX_BODY_SIZE).await {
             Ok(bytes) => bytes,
             Err(_) => {
-                release_inflight(&state.idempotency_store, &scope_key).await;
+                error!("Response body exceeded MAX_BODY_SIZE, cannot cache for idempotency");
+                let failed_record = IdempotencyRecord {
+                    body_hash,
+                    action_id: parts
+                        .headers
+                        .get("X-Action-Id")
+                        .and_then(|v| v.to_str().ok())
+                        .unwrap_or("")
+                        .to_string(),
+                    status: StatusCode::INTERNAL_SERVER_ERROR,
+                    headers: Vec::new(),
+                    body: Vec::new(),
+                    expires_at: Instant::now() + IDEMPOTENCY_TTL,
+                };
+                complete_with_record(&state.idempotency_store, scope_key.clone(), failed_record).await;
                 return Err(StatusCode::INTERNAL_SERVER_ERROR);
             }
         };
@@ -241,18 +325,14 @@ pub async fn idempotency_middleware(req: Request<Body>, next: Next) -> Result<Re
             body: body_bytes.to_vec(),
             expires_at: Instant::now() + IDEMPOTENCY_TTL,
         };
-        {
-            let mut write_lock = state.idempotency_store.lock().await;
-            let notify = match write_lock.remove(&scope_key) {
-                Some(IdempotencyEntry::InFlight { notify, .. }) => notify,
-                _ => Arc::new(Notify::new()),
-            };
-            write_lock.insert(scope_key, IdempotencyEntry::Completed(stored));
-            notify.notify_waiters();
-        }
+        complete_with_record(&state.idempotency_store, scope_key.clone(), stored).await;
         return Ok(Response::from_parts(parts, Body::from(body_bytes)));
     }
 
+    // If request failed (non-2xx), we release the lock so retries can happen.
+    // Note: 4xx errors are generally deterministic and *could* be cached, 
+    // but for now we follow the pattern of "retry on failure".
+    // 5xx errors should definitely allow retry.
     release_inflight(&state.idempotency_store, &scope_key).await;
     Ok(response)
 }
@@ -281,6 +361,20 @@ async fn release_inflight(store: &IdempotencyStore, scope_key: &IdempotencyScope
     if let Some(IdempotencyEntry::InFlight { notify, .. }) = write_lock.remove(scope_key) {
         notify.notify_waiters();
     }
+}
+
+async fn complete_with_record(
+    store: &IdempotencyStore,
+    scope_key: IdempotencyScopeKey,
+    record: IdempotencyRecord,
+) {
+    let mut write_lock = store.lock().await;
+    let notify = match write_lock.remove(&scope_key) {
+        Some(IdempotencyEntry::InFlight { notify, .. }) => notify,
+        _ => Arc::new(Notify::new()),
+    };
+    write_lock.insert(scope_key, IdempotencyEntry::Completed(record));
+    notify.notify_waiters();
 }
 
 fn cleanup_expired_idempotency_entries(store: &mut HashMap<IdempotencyScopeKey, IdempotencyEntry>) {
@@ -347,6 +441,7 @@ pub async fn quota_middleware(req: Request<Body>, next: Next) -> Result<Response
             layer: QuotaLayer::SystemHardLimit,
             retry_after_s: 100,
         };
+        warn!("System Hard Limit exceeded");
         return Err(violation_to_response(&violation));
     }
 
@@ -356,6 +451,7 @@ pub async fn quota_middleware(req: Request<Body>, next: Next) -> Result<Response
             layer: QuotaLayer::TenantBudget,
             retry_after_s: 5,
         };
+        warn!("Tenant Budget exceeded");
         return Err(violation_to_response(&violation));
     }
 
@@ -365,6 +461,7 @@ pub async fn quota_middleware(req: Request<Body>, next: Next) -> Result<Response
             layer: QuotaLayer::ApiRateLimit,
             retry_after_s: 60,
         };
+        warn!("API Rate Limit exceeded");
         return Err(violation_to_response(&violation));
     }
 
