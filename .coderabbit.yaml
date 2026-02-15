@@ -1,0 +1,36 @@
+# /.coderabbit.yaml
+# FlexiSuite Kernel — CodeRabbit config (docs excluded)
+
+reviews:
+  # レビュー対象ファイルの制御
+  path_filters:
+    - "**/*"
+
+    # --- exclude noise / non-code ---
+    - "!**/*.md"
+    - "!docs/**"
+    - "!**/*.png"
+    - "!**/*.jpg"
+    - "!**/*.jpeg"
+    - "!**/*.svg"
+    - "!**/*.lock"
+    - "!**/*.min.*"
+
+  # コードレビュー時の観点を注入
+  path_instructions:
+    - path: "**/*"
+      instructions: |
+        You are reviewing a security- and contract-critical OS-kernel-like codebase.
+        Prioritize:
+        1) Security boundaries (tenant isolation, authn/z, permissions, supply chain)
+        2) Contract correctness enforced by CI (REQ-* assumptions in code)
+        3) Backward compatibility and migration safety
+        4) Observability (metrics, logs, traces, debuggability)
+        5) Performance regressions on hot paths
+
+        Avoid:
+        - Style-only comments
+        - Subjective refactors
+        - Rewriting code without reducing risk
+
+        Suggest changes only when they clearly reduce risk or improve correctness.
