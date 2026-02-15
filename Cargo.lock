@@ -675,13 +675,16 @@ name = "kernel-api"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "base64 0.22.1",
  "http",
  "kernel-core",
+ "ring",
  "serde",
  "serde_json",
  "tokio",
  "tower 0.4.13",
  "tower-http 0.5.2",
+ "uuid",
 ]
 
 [[package]]
@@ -1554,6 +1557,7 @@ checksum = "b672338555252d43fd2240c714dc444b8c6fb0a5c5335e65a07bba7742735ddb"
 dependencies = [
  "getrandom 0.4.1",
  "js-sys",
+ "serde_core",
  "wasm-bindgen",
 ]
 
