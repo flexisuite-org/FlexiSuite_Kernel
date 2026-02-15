@@ -4,6 +4,7 @@ import { useState, Suspense } from 'react';
 import Link from 'next/link';
 import { useSearchParams } from 'next/navigation';
 import { useAuth } from '@/lib/auth';
+import { signup as signupRequest, ApiError } from '@/lib/apiClient';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from '@/components/ui/card';
@@ -26,22 +27,11 @@ function SignupForm() {
         setError('');
 
         try {
-            const res = await fetch(`${process.env.NEXT_PUBLIC_KERNEL_API}/auth/signup`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ email, password, accountInviteCode: inviteCode }),
-            });
-
-            const data = await res.json();
-
-            if (!res.ok) {
-                throw new Error(data.message || 'Signup failed');
-            }
-
-            // data: { accessToken, refreshToken, user }
+            const data = await signupRequest({ email, password, accountInviteCode: inviteCode });
             login(data.accessToken, data.refreshToken, data.user);
-        } catch (err: any) {
-            setError(err.message);
+        } catch (err: unknown) {
+            const message = err instanceof ApiError ? err.message : 'Signup failed';
+            setError(message);
         } finally {
             setIsLoading(false);
         }

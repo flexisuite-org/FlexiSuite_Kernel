@@ -1,15 +1,17 @@
 'use client';
 
 import { createContext, useContext, useEffect, useState, useCallback } from 'react';
-import { useRouter, usePathname } from 'next/navigation';
+import { useRouter } from 'next/navigation';
 import { getCookie, setCookie, removeCookie } from '@/lib/cookies';
 import { UserProfile } from '@/types/api';
+import { getProfile, logout as apiLogout, onUnauthorized } from '@/lib/apiClient';
 
 interface AuthContextType {
   user: UserProfile | null;
   isLoading: boolean;
   login: (token: string, refreshToken: string, user: UserProfile) => void;
   logout: () => void;
+  switchGroup: (groupId: string) => Promise<void>;
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
@@ -18,56 +20,61 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [user, setUser] = useState<UserProfile | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const router = useRouter();
-  const pathname = usePathname();
 
-  const logout = useCallback(() => {
+  const logout = useCallback(async () => {
     console.log('[Auth] Logout called');
+    const token = getCookie('flexi_token');
+    if (token) {
+      try {
+        await apiLogout();
+      } catch (err) {
+        console.warn('[Auth] Logout failed', err);
+      }
+    }
     removeCookie('flexi_token');
     removeCookie('flexi_refresh_token');
     setUser(null);
     router.push('/login');
   }, [router]);
 
+  const switchGroup = useCallback(async (groupId: string) => {
+    try {
+      const { accessToken, refreshToken } = await import('@/lib/apiClient').then(m => m.switchGroup(groupId));
+      setCookie('flexi_token', accessToken);
+      setCookie('flexi_refresh_token', refreshToken);
+      const profile = await import('@/lib/apiClient').then(m => m.getProfile());
+      setUser(profile);
+    } catch (err) {
+      console.error('[Auth] failed to switch group', err);
+    }
+  }, []);
+
   useEffect(() => {
+    let isMounted = true;
     const initAuth = async () => {
-      const token = getCookie('flexi_token');
-      console.log('[Auth] Checking token:', token ? 'exists' : 'missing');
-
-      if (!token) {
-        console.log('[Auth] No token found, user not logged in');
-        setIsLoading(false);
-        return;
-      }
-
-      const apiUrl = process.env.NEXT_PUBLIC_KERNEL_API;
-      console.log('[Auth] API URL:', apiUrl);
-
       try {
-        const res = await fetch(`${apiUrl}/auth/me`, {
-          headers: { Authorization: `Bearer ${token}` }
-        });
-
-        console.log('[Auth] /auth/me response status:', res.status);
-
-        if (res.ok) {
-          const userData = await res.json();
-          console.log('[Auth] User data received:', userData);
-          setUser(userData);
-        } else {
-          console.log('[Auth] Auth check failed, logging out');
-          const errorText = await res.text();
-          console.log('[Auth] Error response:', errorText);
-          logout();
+        const profile = await getProfile();
+        if (isMounted) {
+          setUser(profile);
         }
-      } catch (e) {
-        console.error('[Auth] Auth check failed with error:', e);
-        setIsLoading(false);
+      } catch (err) {
+        console.error('[Auth] failed to load profile', err);
       } finally {
-        setIsLoading(false);
+        if (isMounted) setIsLoading(false);
       }
     };
 
     initAuth();
+    return () => {
+      isMounted = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    const cleanup = onUnauthorized(() => {
+      logout();
+    });
+    return cleanup;
   }, [logout]);
 
   const login = (token: string, refreshToken: string, userData: UserProfile) => {
@@ -79,7 +86,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     router.push('/dashboard');
   };
 
-  const value = { user, isLoading, login, logout };
+  const value = { user, isLoading, login, logout, switchGroup };
 
   return (
     <AuthContext.Provider value={value}>

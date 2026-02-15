@@ -1,4 +1,3 @@
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Box, Plus } from "lucide-react";
 import { Button } from "@/components/ui/button";
 
@@ -22,7 +21,7 @@ export default function SandboxPage() {
                 </div>
                 <h3 className="text-lg font-semibold text-slate-900">No active drafts</h3>
                 <p className="text-slate-500 max-w-sm mt-2 mb-6">
-                    You haven't created any draft components yet. Start building your custom tools today.
+                    You haven’t created any draft components yet. Start building your custom tools today.
                 </p>
                 <Button variant="outline">Learn about Custom UX</Button>
             </div>
