@@ -1,23 +1,36 @@
 use axum::{
-    body::Body,
-    http::{Request, StatusCode, Method},
+    body::{to_bytes, Body},
+    http::{HeaderMap, HeaderName, HeaderValue, Method, Request, StatusCode},
     middleware::Next,
     response::{Response, IntoResponse},
 };
 use crate::auth::TenantContext;
 use kernel_core::idempotency::{canonicalize_request_target, check_idempotency_conflict};
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
+use tokio::sync::{Mutex, Notify};
 
 // REQ-IDEMPOTENCY-STORE: Simulation of 24h storage
 #[derive(Clone, Debug)]
 pub struct IdempotencyRecord {
     pub body_hash: String,
     pub action_id: String,
+    pub status: StatusCode,
+    pub headers: Vec<(String, String)>,
+    pub body: Vec<u8>,
     // ttl etc omitted for simulation
 }
 
-pub type IdempotencyStore = Arc<RwLock<HashMap<String, IdempotencyRecord>>>;
+#[derive(Clone, Debug)]
+pub enum IdempotencyEntry {
+    InFlight {
+        body_hash: String,
+        notify: Arc<Notify>,
+    },
+    Completed(IdempotencyRecord),
+}
+
+pub type IdempotencyStore = Arc<Mutex<HashMap<String, IdempotencyEntry>>>;
 
 /// REQ-IDEMPOTENCY-HEADER: Middleware logic
 pub async fn idempotency_middleware(req: Request<Body>, next: Next) -> Result<Response, StatusCode> {
@@ -54,20 +67,39 @@ pub async fn idempotency_middleware(req: Request<Body>, next: Next) -> Result<Re
         .cloned() // Clone Arc to release borrow of req
         .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
     
-    {
-        let read_lock = store.read().map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-        if let Some(record) = read_lock.get(&scope_key) {
-            // REQ-IDEMPOTENCY-CONFLICT: Conflict Guard logic
-            if check_idempotency_conflict(&canonical_target, &body_hash, &canonical_target, &record.body_hash) {
-                return Err(StatusCode::CONFLICT);
+    loop {
+        let mut lock = store.lock().await;
+        let waiter = if let Some(existing) = lock.get(&scope_key) {
+            match existing {
+                IdempotencyEntry::Completed(record) => {
+                    // REQ-IDEMPOTENCY-CONFLICT: Conflict Guard logic
+                    if check_idempotency_conflict(&canonical_target, &body_hash, &canonical_target, &record.body_hash) {
+                        return Err(StatusCode::CONFLICT);
+                    }
+                    return Ok(build_replay_response(record));
+                }
+                IdempotencyEntry::InFlight {
+                    body_hash: existing_hash,
+                    notify,
+                } => {
+                    if check_idempotency_conflict(&canonical_target, &body_hash, &canonical_target, existing_hash) {
+                        return Err(StatusCode::CONFLICT);
+                    }
+                    notify.clone()
+                }
             }
-            
-            // Replay detected: Return stored response (simulated by X-Action-Id)
-            let mut res = "".into_response(); // Mock empty success
-            res.headers_mut().insert("X-Action-Id", record.action_id.parse().unwrap());
-            res.headers_mut().insert("X-Idempotency-Replay", "true".parse().unwrap());
-            return Ok(res);
-        }
+        } else {
+            lock.insert(
+                scope_key.clone(),
+                IdempotencyEntry::InFlight {
+                    body_hash: body_hash.clone(),
+                    notify: Arc::new(Notify::new()),
+                },
+            );
+            break;
+        };
+        drop(lock);
+        waiter.notified().await;
     }
 
     // Process request
@@ -75,19 +107,72 @@ pub async fn idempotency_middleware(req: Request<Body>, next: Next) -> Result<Re
 
     // Store successful result (Atomic Upsert simulation)
     if response.status().is_success() {
-        let action_id = response.headers().get("X-Action-Id")
+        let (parts, body) = response.into_parts();
+        let body_bytes = to_bytes(body, usize::MAX)
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        let action_id = parts.headers.get("X-Action-Id")
             .and_then(|v| v.to_str().ok())
             .unwrap_or("act-new")
             .to_string();
-
-        let mut write_lock = store.write().map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-        write_lock.insert(scope_key, IdempotencyRecord {
+        let stored = IdempotencyRecord {
             body_hash,
             action_id,
-        });
+            status: parts.status,
+            headers: snapshot_headers(&parts.headers),
+            body: body_bytes.to_vec(),
+        };
+        {
+            let mut write_lock = store.lock().await;
+            let notify = match write_lock.remove(&scope_key) {
+                Some(IdempotencyEntry::InFlight { notify, .. }) => notify,
+                _ => Arc::new(Notify::new()),
+            };
+            write_lock.insert(scope_key, IdempotencyEntry::Completed(stored));
+            notify.notify_waiters();
+        }
+        return Ok(Response::from_parts(parts, Body::from(body_bytes)));
+    }
+    {
+        let mut write_lock = store.lock().await;
+        if let Some(IdempotencyEntry::InFlight { notify, .. }) = write_lock.remove(&scope_key) {
+            notify.notify_waiters();
+        }
     }
 
     Ok(response)
+}
+
+fn snapshot_headers(headers: &HeaderMap) -> Vec<(String, String)> {
+    headers
+        .iter()
+        .filter_map(|(name, value)| {
+            value
+                .to_str()
+                .ok()
+                .map(|v| (name.as_str().to_string(), v.to_string()))
+        })
+        .collect()
+}
+
+fn build_replay_response(record: &IdempotencyRecord) -> Response {
+    let mut res = Response::builder()
+        .status(record.status)
+        .body(Body::from(record.body.clone()))
+        .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response());
+
+    for (name, val) in &record.headers {
+        if let (Ok(header_name), Ok(header_value)) = (
+            HeaderName::from_bytes(name.as_bytes()),
+            HeaderValue::from_str(val),
+        ) {
+            res.headers_mut().insert(header_name, header_value);
+        }
+    }
+    if let Ok(value) = HeaderValue::from_str("true") {
+        res.headers_mut().insert("X-Idempotency-Replay", value);
+    }
+    res
 }
 
 use kernel_core::quota::{QuotaLayer, QuotaViolation};
