@@ -7,6 +7,7 @@ use axum::{
 use crate::auth::TenantContext;
 use kernel_core::idempotency::{canonicalize_request_target, check_idempotency_conflict};
 use std::collections::HashMap;
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::Arc;
 use tokio::sync::{Mutex, Notify};
 
@@ -34,33 +35,41 @@ pub type IdempotencyStore = Arc<Mutex<HashMap<String, IdempotencyEntry>>>;
 
 /// REQ-IDEMPOTENCY-HEADER: Middleware logic
 pub async fn idempotency_middleware(req: Request<Body>, next: Next) -> Result<Response, StatusCode> {
+    let (parts, body) = req.into_parts();
+    let method = parts.method.clone();
+
     // Only apply to write methods
-    let method = req.method();
     if method == Method::GET || method == Method::HEAD || method == Method::OPTIONS {
-        return Ok(next.run(req).await);
+        return Ok(next.run(Request::from_parts(parts, body)).await);
     }
 
-    let idempotency_key = match req.headers().get("Idempotency-Key") {
+    let idempotency_key = match parts.headers.get("Idempotency-Key") {
         Some(val) => val.to_str().map_err(|_| StatusCode::BAD_REQUEST)?.to_string(),
-        None => return Ok(next.run(req).await), // Optional header
+        None => return Ok(next.run(Request::from_parts(parts, body)).await), // Optional header
     };
 
-    let tenant_ctx = req.extensions().get::<TenantContext>().ok_or(StatusCode::UNAUTHORIZED)?;
+    let tenant_ctx = parts
+        .extensions
+        .get::<TenantContext>()
+        .ok_or(StatusCode::UNAUTHORIZED)?;
     
     // Canonicalize
-    let path = req.uri().path();
-    let query = req.uri().query();
+    let path = parts.uri.path();
+    let query = parts.uri.query();
     let canonical_target = canonicalize_request_target(path, query);
 
     // Uniqueness Scope: (tenant_id, method, canonical_target, key)
     let scope_key = format!("{}:{}:{}:{}", tenant_ctx.tenant_id, method, canonical_target, idempotency_key);
 
-    // Simulated Body Hash (Real implementation would buffer body)
-    // For simulation, we assume some header or just fixed hash if missing
-    let body_hash = req.headers().get("X-Mock-Body-Hash")
+    // Body hash MUST be derived from the actual request body.
+    let body_bytes = to_bytes(body, usize::MAX)
+        .await
+        .map_err(|_| StatusCode::BAD_REQUEST)?;
+    let body_hash = parts.headers.get("X-Mock-Body-Hash")
         .and_then(|v| v.to_str().ok())
-        .unwrap_or("hash-default")
-        .to_string();
+        .map(ToString::to_string)
+        .unwrap_or_else(|| compute_body_hash(&body_bytes));
+    let req = Request::from_parts(parts, Body::from(body_bytes));
 
     // Check Store
     let store = req.extensions().get::<IdempotencyStore>()
@@ -108,9 +117,13 @@ pub async fn idempotency_middleware(req: Request<Body>, next: Next) -> Result<Re
     // Store successful result (Atomic Upsert simulation)
     if response.status().is_success() {
         let (parts, body) = response.into_parts();
-        let body_bytes = to_bytes(body, usize::MAX)
-            .await
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        let body_bytes = match to_bytes(body, usize::MAX).await {
+            Ok(bytes) => bytes,
+            Err(_) => {
+                release_inflight(&store, &scope_key).await;
+                return Err(StatusCode::INTERNAL_SERVER_ERROR);
+            }
+        };
         let action_id = parts.headers.get("X-Action-Id")
             .and_then(|v| v.to_str().ok())
             .unwrap_or("act-new")
@@ -133,14 +146,22 @@ pub async fn idempotency_middleware(req: Request<Body>, next: Next) -> Result<Re
         }
         return Ok(Response::from_parts(parts, Body::from(body_bytes)));
     }
-    {
-        let mut write_lock = store.lock().await;
-        if let Some(IdempotencyEntry::InFlight { notify, .. }) = write_lock.remove(&scope_key) {
-            notify.notify_waiters();
-        }
-    }
+    release_inflight(&store, &scope_key).await;
 
     Ok(response)
+}
+
+fn compute_body_hash(body: &[u8]) -> String {
+    let mut hasher = DefaultHasher::new();
+    body.hash(&mut hasher);
+    format!("{:016x}", hasher.finish())
+}
+
+async fn release_inflight(store: &IdempotencyStore, scope_key: &str) {
+    let mut write_lock = store.lock().await;
+    if let Some(IdempotencyEntry::InFlight { notify, .. }) = write_lock.remove(scope_key) {
+        notify.notify_waiters();
+    }
 }
 
 fn snapshot_headers(headers: &HeaderMap) -> Vec<(String, String)> {
