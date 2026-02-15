@@ -834,13 +834,27 @@ Kernelはエラー発生時や診断要求に対し、以下の構造化デー�
 - S3/MinIO artifact storage
 - **前提**: Phase 2（認証）、Phase 3（Entity — メタデータ保存）
 
-### Phase 6: Runtime
-- `kernel-runtime`: Deno Core統合
-- `kernel-runtime`: Wasmtime統合
-- Permission model enforcement
-- **前提**: Phase 3（Kernel API経由のデータアクセス）、Phase 4（イベント発行）
+### Phase 6: Contract Test & Runtime
+- **Contract Verification (REQ-CONTRACT-VERIFY)**:
+  - Idempotency正規化・衝突判定ロジックの実装
+  - Quota違反時の判定マトリクスとRetry-After付与ロジックの実装
+  - Supply Chain マニフェスト・鍵失効チェックの実装
+- **Runtime**:
+  - `kernel-runtime`: Deno Core / Wasmtime 統合
+  - Permission model enforcement
+- **前提**: Phase 1-5（基盤・認証・データ）
 
-### Phase 7: Frontend (Universal Player)
+### Phase 7: Kernel API & Middleware Implementation
+- **Goal**: `kernel-core` で定義した契約ロジックを Axum ミドルウェアとして統合し、HTTP フローで強制する。
+- **Middleware Chain**: `Auth` → `Idempotency` → `Quota` の順で適用。
+- **Security Policy (REQ-AUTH-SEC)**:
+  - `X-Tenant-Id` ヘッダは `dev_only` (cfg(debug_assertions)) とし、Release ビルドではトークン検証のみを信頼する。
+  - `401 Unauthorized` (Identity 未確定) と `403 Forbidden` (権限/テナント境界不足) を厳格に使い分ける。
+- **Idempotency Scope**: `(tenant, method, target, key)` の複合キーで 24h 保持。
+- **Quota Priority**: `System Hard Limit` (1-30s clip) → `Tenant` → `API` の順で短絡評価。
+- **前提**: Phase 6（契約ロジックおよびランタイム基盤）
+
+### Phase 8: Frontend (Universal Player)
 - **Worker-based Isolation**:
   - `react-reconciler` によるCustom Renderer実装
   - Workerスレッド管理・メッセージング基盤
@@ -848,9 +862,9 @@ Kernelはエラー発生時や診断要求に対し、以下の構造化デー�
 - Component Composition Loader
 - COOP/COEP + CDNプロキシ
 - Kernel API統合
-- **前提**: Phase 5（コンポーネント配信）、Phase 6（ランタイム実行）
+- **前提**: Phase 5（コンポーネント配信）、Phase 7（Kernel API/ミドルウェア）
 
-### Phase 8: Platform Reliability (New)
+### Phase 9: Platform Reliability
 - **Operations**:
   - Backup & Restore Drills の自動化
   - Secret Rotation の自動化
@@ -867,22 +881,17 @@ Kernelはエラー発生時や診断要求に対し、以下の構造化デー�
   - Error Budget / Burn Rate Alerting Setup
 - **前提**: Phase 7（全機能実装後の安定化フェーズ）
 
-### Phase 9: Ecosystem (Renumbered)
+### Phase 10: Ecosystem
 - Component Store UI
 - 審査フロー（自動 + 条件付き手動）
 - Install / Update / Rollback
 - Trust Score Logic Implementation (with Anti-Sybil)
-- **前提**: Phase 8（信頼性担保された基盤）
+- **前提**: Phase 9（信頼性担保された基盤）
 
-### Phase 10: Future Capabilities (Kernel Capabilities)
-将来的な拡張性（WebRTC, Bluetooth, WebXR等）を担保するための設計枠。現在のPhase 1-9完了後のロードマップとする。
-
-- **Kernel Capabilities (RPC Proxy)**:
-  - Workerから直接触れないHardware APIへの安全なプロキシ。
-  - `await kernel.bluetooth.requestDevice(...)` のようなRPCインターフェース。
-  - ユーザーへの明示的な許可ダイアログ（OSレベル）の実装。
-- **P2P / Local Network Bridge**:
-  - WebRTC DataChannel や Local Network デバイス連携のための専用シグナリング・ブリッジ。
+### Phase 11: Future Capabilities (Kernel Capabilities)
+- **Kernel Capabilities (RPC Proxy)**: Hardware API (Bluetooth/WebXR等) への安全なプロキシ
+- **P2P / Local Network Bridge**: WebRTC / Local Network デバイス連携
+- **前提**: Phase 1-10 完了後のロードマップ
 
 ---
 
