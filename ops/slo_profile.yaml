@@ -25,6 +25,9 @@ object_storage:
   same_region: true
   tls_termination: true
 workload:
+  dataset_seed: "flexisuite-v1-seed-2026-02-15"
+  dataset_version: "v1.0.0"
+  distribution_profile: "uniform-50-tenant-1m-rows"
   concurrent_connections: 100
   sustained_rps: 1000
   traffic_mix:
