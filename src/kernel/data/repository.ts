@@ -1,6 +1,7 @@
 import { Prisma } from '@prisma/client';
 import { prisma } from '../../lib/db';
 import { getValidator } from './validator';
+import { recordAuditLog } from '../../lib/audit';
 
 export class EntityRepository {
   async create(definitionId: string, groupId: string, schema: object, data: Prisma.InputJsonValue) {
@@ -18,6 +19,13 @@ export class EntityRepository {
         schemaVersion: (schema as any).version ?? 1
       }
     });
+
+    await recordAuditLog({
+      resource: 'EntityRecord',
+      action: 'create',
+      metadata: { id: record.id, definitionId }
+    });
+
     return record;
   }
 
@@ -32,9 +40,36 @@ export class EntityRepository {
       throw new Error(`Validation failed: ${msg}`);
     }
 
-    const result = await prisma.entityRecord.updateMany({ where: { id, groupId }, data: { data } });
-    if (result.count === 0) throw new Error('Entity not found or not in tenant');
-    return prisma.entityRecord.findFirst({ where: { id, groupId } });
+    return prisma.$transaction(async (tx) => {
+      const current = await tx.entityRecord.findFirst({ where: { id, groupId } });
+      if (!current) throw new Error('Entity not found or not in tenant');
+
+      // Create history record
+      await tx.entityHistory.create({
+        data: {
+          entityId: id,
+          data: current.data as any,
+          version: current.schemaVersion
+        }
+      });
+
+      // Update record
+      const updated = await tx.entityRecord.update({
+        where: { id },
+        data: {
+          data,
+          schemaVersion: (schema as any).version ?? current.schemaVersion
+        }
+      });
+
+      await recordAuditLog({
+        resource: 'EntityRecord',
+        action: 'update',
+        metadata: { id, definitionId: current.definitionId }
+      });
+
+      return updated;
+    });
   }
 }
 

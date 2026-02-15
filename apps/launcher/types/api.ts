@@ -1,15 +1,16 @@
 export interface UserProfile {
     userId: string;
     email: string;
+    currentGroupId: string | null;
     roles: string[];
     memberships: GroupMembership[];
 }
 
 export interface GroupMembership {
     groupId: string;
-    name: string;
-    type: string;
-    role: string;
+    name: string | null;
+    type: string | null;
+    membershipRoles: string[];
 }
 
 export interface LauncherGroup {
@@ -17,6 +18,7 @@ export interface LauncherGroup {
     name: string;
     type: string;
     installs: AppInstallSummary[];
+    insights?: LauncherInsights;
 }
 
 export interface AppInstallSummary {
@@ -36,8 +38,53 @@ export interface GroupInvite {
     expiresAt?: string;
 }
 
+export interface GroupInviteAcceptResponse {
+    accepted: boolean;
+    groupId: string;
+    roles: string[];
+}
+
+export interface GroupInviteDeclineResponse {
+    declined: boolean;
+}
+
 export interface AuthResponse {
     accessToken: string;
     refreshToken: string;
     user: UserProfile;
+}
+
+export interface RegistryPackageSummary {
+    id: string;
+    name: string;
+    description?: string;
+    category?: string;
+    publisher?: string;
+    iconUrl?: string;
+    status?: 'draft' | 'approved' | 'revoked' | 'deprecated' | string;
+}
+
+export interface LauncherInsights {
+    recentApps?: AppInstallSummary[];
+    pinnedApps?: AppInstallSummary[];
+    recommendations?: string[];
+    jobs?: JobSummary[];
+    drafts?: DraftSummary[];
+}
+
+export interface JobSummary {
+    jobId: string;
+    title: string;
+    status: 'running' | 'queued' | 'completed' | 'failed' | 'paused' | string;
+    message?: string;
+    progress?: number;
+    updatedAt?: string;
+}
+
+export interface DraftSummary {
+    id: string;
+    title: string;
+    status: string;
+    updatedAt: string;
+    owner?: string;
 }

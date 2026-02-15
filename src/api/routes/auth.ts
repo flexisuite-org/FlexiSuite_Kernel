@@ -100,6 +100,20 @@ export default async function authRoutes(fastify: FastifyInstance) {
     reply.send(tokens);
   });
 
+  fastify.post('/switch', { config: { rateLimit: { max: 20, timeWindow: '1 minute' } } }, async (req, reply) => {
+    const switchSchema = z.object({
+      userId: z.string(),
+      refreshToken: z.string(),
+      groupId: z.string()
+    });
+    const parsed = switchSchema.safeParse(req.body);
+    if (!parsed.success) return reply.code(400).send({ error: 'invalid_input', details: parsed.error.flatten() });
+
+    const { userId, refreshToken, groupId } = parsed.data;
+    const tokens = await authService.switchGroup(userId, refreshToken, groupId);
+    reply.send(tokens);
+  });
+
   fastify.get('/me', async (req, reply) => {
     const user = (req as any).user;
     if (!user) return reply.code(401).send({ error: 'unauthorized' });
@@ -118,6 +132,7 @@ export default async function authRoutes(fastify: FastifyInstance) {
     reply.send({
       userId: user.id,
       email: record.email,
+      currentGroupId: user.groupId,
       roles: user.roles ?? [],
       memberships: memberships.map((membership: any) => ({
         groupId: membership.groupId,

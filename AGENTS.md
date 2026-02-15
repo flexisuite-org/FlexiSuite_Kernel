@@ -1,69 +1,78 @@
-# FlexiSuite Kernel – Agent/Contributor Guidelines
+# FlexiSuite Kernel — Agent Instructions
 
-このリポで作業する開発エージェントの行動指針をまとめます。最新スタック: **Fastify 5.x**, **Node.js 20**, **PostgreSQL 16 (5433)**, **Redis 7 (6380)**, **App port 9000**。
+## Project Overview
 
-## 基本姿勢
-- 破壊的操作はユーザー明示許可なしに行わない（drop/reset/rm -rf など）。
-- 変更は最小差分・可読性重視。意図は短いコメントか PR メモで残す。
-- シークレットや `.env` の内容は決して出力しない。
-- マルチテナント境界（groupId/RLS）を最優先で守る。
-- npm の代わりに pnpm を使用する。
+FlexiSuite is a **"Flexible OS for the SaaS era"** — an operating system-level platform that democratizes AI-driven application development (Vibe Coding). This is NOT an MVP or a prototype. We are building a **production-grade, full-featured OS kernel** in Rust.
 
-## ツールバージョン
-- Fastify: 5.x
-- @fastify/helmet: 12.x（Fastify 5 対応）
-- @fastify/rate-limit: 10.x（Fastify 5 対応）
-- @fastify/cors: 10.x
-- Prisma/@prisma/client: 5.9.0
-- Node: 20.x, pnpm 10.x
+### Background
+- The concept of "Custom UX" (AI-driven UI/UX self-modification) was validated through a separate product called **FlexiStudy** (a study management app with embedded Gemini CLI).
+- This repository is the **generalized infrastructure** that makes Custom UX available to anyone, as a platform.
 
-## 主要コマンド
-```
-# 依存起動
-docker compose up -d postgres redis
+### Core Philosophy
+- **Kernel/Userland Separation**: The Kernel (Rust) provides primitives (Identity, Storage, Events, Compute). Business logic runs in Userland (sandboxed JS/TS or Wasm).
+- **App is Data**: Applications are JSON definitions rendered by a single "Universal Player" (Next.js). No per-user containers.
+- **3-Tier Trust Model**: Kernel Provided (direct) → Store Verified (reviewed, initially iframe) → User Imported (iframe sandbox).
+- **AI Native**: The system is designed to be equally usable by humans and AI agents.
 
-# Prisma
-pnpm prisma migrate dev --name init   # 初回のみ
-pnpm prisma generate                  # スキーマ変更時
+### Tech Stack
+- **Backend**: Rust (Axum + SeaORM + Tokio)
+- **Frontend**: Next.js (Universal Player, single instance, multi-tenant)
+- **Sandbox**: Deno Core (JS/TS) + Wasmtime (Wasm) hybrid
+- **Database**: PostgreSQL with Row-Level Security (RLS)
+- **Cache/Events**: Redis (Streams with abstraction layer)
+- **Auth**: PASETO v4
+- **Component Compiler**: SWC (Rust) + esm.sh CDN resolution
 
-# 開発起動
-pnpm dev  # ポート 9000
+## Development Principles
 
-# テスト/ビルド
-pnpm test
-pnpm build
-```
+> **These are absolute rules. No exceptions.**
 
-## やるべきこと (Do)
-- すべての DB 操作に `groupId` を必須にする。RLS を有効化する場合はリクエストごとに `set_config('flexi.current_group', ...)` を設定。
-- パスワードは Argon2id。JWT は 15m、Refresh は 7d ローテーション+再利用検知。
-- 入力は Zod/Ajv でスキーマ検証。ログは PII をマスク。
-- イベント処理は冪等性を確保し、idempotency key を持たせる。
+1. **Production-grade always.** Every line of code must be written with production-quality robustness. No throwaway code, no "we'll fix it later", no shortcuts. If you are unsure about the correct approach, research and verify before implementing.
+2. **No guesswork.** Never implement based on assumptions or speculation. If you don't know the answer, investigate the codebase, read documentation, or ask. Incorrect implementations are worse than no implementation.
+3. **This is an OS, not an app.** Design decisions must account for multi-tenancy, security isolation, backward compatibility, and performance at scale. Think in terms of system contracts, not feature checklists.
+4. **Tenant isolation is sacred.** Every database access MUST go through `TenantContext`. Raw SQL without tenant scoping MUST NOT exist in any public API. This is enforced at the type system level.
+5. **Security by default.** User-generated code runs in sandboxes. External dependencies are isolated. Trust must be earned through verification, not assumed.
 
-## やってはいけないこと (Don't)
-- `.env` や鍵をログ・ドキュメントに載せる。
-- `prisma.$executeRaw` をテナント条件なしで使う。
-- Fastify 5 非対応プラグインを入れる（v4 用を混ぜない）。
-- ポートをデフォルト 5432/6379/3000 に固定して記述する（実環境は 5433/6380/9000）。
+## AI-DLC and Spec-Driven Development
 
-## 例: テナントスコープの Prisma ミドルウェア
-```ts
-prisma.$use(async (params, next) => {
-  const ctx = (params as any).context || {};
-  const groupId = ctx.groupId;
-  if (!groupId) throw new Error('missing groupId');
+Kiro-style Spec Driven Development implementation on AI-DLC (AI Development Life Cycle).
 
-  const scopedModels = ['EntityRecord','EntityDefinition','AppInstall','GroupMember'];
-  if (scopedModels.includes(params.model || '')) {
-    params.args ??= {};
-    params.args.where = { ...(params.args.where || {}), groupId };
-    if (params.args.data) params.args.data.groupId = groupId;
-  }
-  return next(params);
-});
-```
+### Project Memory
+- Use `.kiro/steering/` for project-wide policies.
+- Use local `AGENTS.md` files for feature/library context specific to that folder.
+- Specs stay with each spec under `.kiro/specs/`.
 
-## 参考ドキュメント
-- `docs/security.md`
-- `docs/deploy.md`
-- `docs/ops.md`
+### Paths
+- Steering: `.kiro/steering/`
+- Specs: `.kiro/specs/`
+
+### Active Specifications
+- Check `.kiro/specs/` for active specifications
+- Use `/prompts:kiro-spec-status [feature-name]` to check progress
+
+### Development Guidelines
+- Think in English, generate responses in English. All Markdown content written to project files MUST be written in the target language configured for the specification.
+
+### Minimal Workflow
+- Phase 0 (optional): `/prompts:kiro-steering`, `/prompts:kiro-steering-custom`
+- Phase 1 (Specification):
+  - `/prompts:kiro-spec-init "description"`
+  - `/prompts:kiro-spec-requirements {feature}`
+  - `/prompts:kiro-validate-gap {feature}` (optional)
+  - `/prompts:kiro-spec-design {feature} [-y]`
+  - `/prompts:kiro-validate-design {feature}` (optional)
+  - `/prompts:kiro-spec-tasks {feature} [-y]`
+- Phase 2 (Implementation): `/prompts:kiro-spec-impl {feature} [tasks]`
+  - `/prompts:kiro-validate-impl {feature}` (optional)
+- Progress check: `/prompts:kiro-spec-status {feature}` (anytime)
+
+### Development Rules
+- 3-phase approval workflow: Requirements → Design → Tasks → Implementation
+- Human review required each phase; use `-y` only for intentional fast-track
+- Keep steering current and verify alignment with `/prompts:kiro-spec-status`
+- Follow the user's instructions precisely, and within that scope act autonomously.
+
+### Steering Configuration
+- Load entire `.kiro/steering/` as project memory
+- Default files: `product.md`, `tech.md`, `structure.md`
+- Custom files are supported (managed via `/prompts:kiro-steering-custom`)

@@ -1,6 +1,6 @@
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
-import { Users, Plus, Sparkles } from 'lucide-react';
+import { Plus, Sparkles } from 'lucide-react';
 
 export function EmptyState() {
     return (
@@ -13,7 +13,7 @@ export function EmptyState() {
                 <div className="space-y-2">
                     <h3 className="text-xl font-bold text-slate-900">Welcome to FlexiSuite!</h3>
                     <p className="text-slate-500">
-                        You don't have any groups yet. Create your first group to get started.
+                        You don’t have any groups yet. Create your first group to get started.
                     </p>
                 </div>
 

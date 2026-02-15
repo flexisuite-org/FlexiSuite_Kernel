@@ -37,7 +37,7 @@ export default function DashboardLayout({
     const router = useRouter();
     const pathname = usePathname();
     const [isUserMenuOpen, setIsUserMenuOpen] = useState(false);
-    const [hasNotifications, setHasNotifications] = useState(true); // Mock notification state
+    const hasNotifications = true; // Mock notification state
 
     useEffect(() => {
         if (!isLoading && !user) {

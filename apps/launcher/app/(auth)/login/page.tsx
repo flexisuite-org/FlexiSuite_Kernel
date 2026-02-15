@@ -3,6 +3,7 @@
 import { useState } from 'react';
 import Link from 'next/link';
 import { useAuth } from '@/lib/auth';
+import { login as loginRequest, ApiError } from '@/lib/apiClient';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from '@/components/ui/card';
@@ -21,41 +22,11 @@ export default function LoginPage() {
         setError('');
 
         try {
-            const res = await fetch(`${process.env.NEXT_PUBLIC_KERNEL_API}/auth/login`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ email, password }),
-            });
-
-            const data = await res.json();
-            console.log('[Login] API response:', data);
-
-            if (!res.ok) {
-                throw new Error(data.message || 'Login failed');
-            }
-
-            // If user data is not in the response, fetch it from /auth/me
-            let userData = data.user;
-            if (!userData) {
-                console.log('[Login] User not in response, fetching from /auth/me');
-                const meRes = await fetch(`${process.env.NEXT_PUBLIC_KERNEL_API}/auth/me`, {
-                    headers: { Authorization: `Bearer ${data.accessToken}` }
-                });
-                if (meRes.ok) {
-                    userData = await meRes.json();
-                    console.log('[Login] User data from /auth/me:', userData);
-                }
-            }
-
-            console.log('[Login] Calling login with:', {
-                hasAccessToken: !!data.accessToken,
-                hasRefreshToken: !!data.refreshToken,
-                user: userData
-            });
-            login(data.accessToken, data.refreshToken, userData);
-        } catch (err: any) {
-            console.error('[Login] Error:', err);
-            setError(err.message);
+            const data = await loginRequest({ email, password });
+            login(data.accessToken, data.refreshToken, data.user);
+        } catch (err: unknown) {
+            const message = err instanceof ApiError ? err.message : 'Login failed';
+            setError(message);
         } finally {
             setIsLoading(false);
         }
@@ -106,7 +77,7 @@ export default function LoginPage() {
                 </CardContent>
                 <CardFooter className="flex justify-center">
                     <p className="text-sm text-slate-500">
-                        Don't have an account?{' '}
+                        Don’t have an account?{' '}
                         <Link href="/signup" className="text-primary hover:underline font-medium">
                             Sign up
                         </Link>
