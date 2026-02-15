@@ -1,1 +1,0 @@
-{"version":3,"file":"policy.js","sourceRoot":"","sources":["../../../../src/kernel/runtime/policy.ts"],"names":[],"mappings":";;;AAOa,QAAA,aAAa,GAAkB;IAC1C,QAAQ,EAAE,QAAQ,CAAC,OAAO,CAAC,GAAG,CAAC,iBAAiB,IAAI,KAAK,EAAE,EAAE,CAAC;IAC9D,SAAS,EAAE,QAAQ,CAAC,OAAO,CAAC,GAAG,CAAC,kBAAkB,IAAI,KAAK,EAAE,EAAE,CAAC;IAChE,YAAY,EAAE,KAAK;IACnB,cAAc,EAAE,EAAE;CACnB,CAAC"}
