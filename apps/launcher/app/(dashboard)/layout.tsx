@@ -19,7 +19,6 @@ import {
     Sparkles
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
-import { Button } from '@/components/ui/button';
 
 const NAV_ITEMS = [
     { label: 'Home', href: '/dashboard', icon: Home },
@@ -57,26 +56,23 @@ export default function DashboardLayout({
     if (!user) return null;
 
     return (
-        <div className="min-h-screen bg-slate-50 flex font-sans">
+        <div className="min-h-screen bg-slate-50 flex font-sans text-slate-800">
             {/* Sidebar Area */}
-            <aside className="w-72 bg-white/80 backdrop-blur-xl border-r border-slate-200/60 hidden md:flex flex-col fixed inset-y-0 z-30 shadow-soft transition-all duration-300">
+            <aside className="w-72 bg-white border-r border-slate-200 hidden md:flex flex-col fixed inset-y-0 z-30 transition-all duration-300">
                 {/* Logo Section */}
-                <div className="h-20 flex items-center px-6 border-b border-slate-100/50">
-                    <div className="flex items-center gap-3 group cursor-pointer">
-                        <div className="w-10 h-10 bg-gradient-to-br from-primary to-pink-600 rounded-xl flex items-center justify-center shadow-glow group-hover:scale-105 transition-transform duration-300">
-                            <Sparkles className="w-5 h-5 text-white" />
+                <div className="h-16 flex items-center px-6 border-b border-slate-100">
+                    <Link href="/dashboard" className="flex items-center gap-3 group">
+                        <div className="w-8 h-8 bg-primary/10 rounded-lg flex items-center justify-center group-hover:bg-primary/20 transition-colors">
+                            <Sparkles className="w-4 h-4 text-primary" />
                         </div>
-                        <div className="flex flex-col">
-                            <span className="font-bold text-lg text-slate-900 tracking-tight leading-none">FlexiSuite</span>
-                            <span className="text-xs font-medium text-primary tracking-widest uppercase mt-0.5">Lumina</span>
-                        </div>
-                    </div>
+                        <span className="font-bold text-lg tracking-tight text-slate-900">FlexiSuite Lumina</span>
+                    </Link>
                 </div>
 
                 {/* Navigation */}
-                <div className="flex-1 flex flex-col py-6 px-4 gap-1 overflow-y-auto">
-                    <div className="mb-4 px-2 text-[10px] font-bold text-slate-400 uppercase tracking-widest">
-                        Main Menu
+                <div className="flex-1 flex flex-col py-6 px-3 gap-1 overflow-y-auto">
+                    <div className="mb-2 px-4 text-[10px] font-bold text-slate-400 uppercase tracking-widest">
+                        Menu
                     </div>
                     {NAV_ITEMS.map((item) => {
                         const isActive = pathname === item.href;
@@ -85,43 +81,43 @@ export default function DashboardLayout({
                                 key={item.href}
                                 href={item.href}
                                 className={cn(
-                                    "flex items-center gap-3 px-4 py-3 rounded-xl text-sm font-medium transition-all duration-200 group relative overflow-hidden",
+                                    "flex items-center gap-3 px-4 py-2.5 rounded-lg text-sm font-medium transition-all duration-200 relative group",
                                     isActive
-                                        ? "bg-primary/5 text-primary shadow-sm"
+                                        ? "bg-primary/5 text-primary"
                                         : "text-slate-600 hover:bg-slate-50 hover:text-slate-900"
                                 )}
                             >
                                 {isActive && (
-                                    <div className="absolute left-0 top-1/2 -translate-y-1/2 w-1 h-8 bg-primary rounded-r-full" />
+                                    <div className="absolute left-0 top-1/2 -translate-y-1/2 w-1 h-6 bg-primary rounded-r-full" />
                                 )}
-                                <item.icon className={cn("w-5 h-5 transition-colors", isActive ? "text-primary" : "text-slate-400 group-hover:text-slate-600")} />
+                                <item.icon className={cn("w-4 h-4 transition-colors", isActive ? "text-primary" : "text-slate-400 group-hover:text-slate-600")} />
                                 {item.label}
                             </Link>
                         );
                     })}
 
-                    <div className="mt-auto pt-6 border-t border-slate-100/50">
+                    <div className="mt-auto pt-6 border-t border-slate-100 mx-3">
                         <Link
                             href="/help"
-                            className="flex items-center gap-3 px-4 py-3 rounded-xl text-sm font-medium text-slate-600 hover:bg-slate-50 hover:text-slate-900 transition-colors"
+                            className="flex items-center gap-3 px-4 py-2.5 rounded-lg text-sm font-medium text-slate-600 hover:bg-slate-50 hover:text-slate-900 transition-colors"
                         >
-                            <HelpCircle className="w-5 h-5 text-slate-400" />
-                            Help & Documentation
+                            <HelpCircle className="w-4 h-4 text-slate-400" />
+                            Help & Docs
                         </Link>
                     </div>
                 </div>
 
                 {/* User Profile Section */}
-                <div className="p-4 border-t border-slate-100/50 bg-slate-50/30 backdrop-blur-sm">
+                <div className="p-4 border-t border-slate-100 bg-white">
                     <div className="relative">
                         <button
                             onClick={() => setIsUserMenuOpen(!isUserMenuOpen)}
                             className={cn(
-                                "w-full flex items-center gap-3 p-2 rounded-xl transition-all duration-200 border border-transparent hover:bg-white hover:shadow-sm hover:border-slate-100",
-                                isUserMenuOpen && "bg-white shadow-sm border-slate-100"
+                                "w-full flex items-center gap-3 p-2 rounded-lg transition-all duration-200 border border-transparent hover:bg-slate-50",
+                                isUserMenuOpen && "bg-slate-50"
                             )}
                         >
-                            <div className="w-10 h-10 rounded-full bg-gradient-to-tr from-slate-100 to-slate-200 border border-white shadow-sm flex items-center justify-center text-slate-600 font-bold text-sm">
+                            <div className="w-9 h-9 rounded-full bg-slate-100 border border-white shadow-sm flex items-center justify-center text-slate-600 font-bold text-xs">
                                 {user.email[0].toUpperCase()}
                             </div>
                             <div className="flex-1 min-w-0 text-left">
@@ -133,17 +129,17 @@ export default function DashboardLayout({
 
                         {/* User Menu Dropdown */}
                         {isUserMenuOpen && (
-                            <div className="absolute bottom-full left-0 w-full mb-2 p-1 bg-white/90 backdrop-blur-xl rounded-2xl border border-white/50 shadow-xl animate-scale-in origin-bottom">
-                                <Link href="/settings" className="flex items-center gap-2 px-3 py-2.5 text-sm font-medium text-slate-600 hover:bg-slate-50 hover:text-slate-900 rounded-xl transition-colors">
+                            <div className="absolute bottom-full left-0 w-full mb-2 p-1 bg-white rounded-xl border border-slate-200 shadow-lg animate-scale-in origin-bottom z-50">
+                                <Link href="/settings" className="flex items-center gap-2 px-3 py-2 text-sm font-medium text-slate-600 hover:bg-slate-50 hover:text-slate-900 rounded-lg transition-colors">
                                     <User className="w-4 h-4" />
                                     Account Settings
                                 </Link>
                                 <div className="h-px bg-slate-100 my-1" />
                                 <button
                                     onClick={logout}
-                                    className="w-full flex items-center gap-2 px-3 py-2.5 text-sm font-medium text-slate-600 hover:bg-primary hover:text-white rounded-xl transition-all duration-200 group"
+                                    className="w-full flex items-center gap-2 px-3 py-2 text-sm font-medium text-slate-600 hover:bg-red-50 hover:text-red-600 rounded-lg transition-all duration-200"
                                 >
-                                    <LogOut className="w-4 h-4 group-hover:text-white transition-colors" />
+                                    <LogOut className="w-4 h-4" />
                                     Sign out
                                 </button>
                             </div>
@@ -154,19 +150,19 @@ export default function DashboardLayout({
 
             {/* Main Content */}
             <main className="flex-1 md:ml-72 min-h-screen flex flex-col">
-                {/* Top Header for Mobile/Notifications */}
-                <header className="h-20 flex items-center justify-end px-8 sticky top-0 z-20 bg-slate-50/80 backdrop-blur-md">
+                {/* Top Header */}
+                <header className="h-16 flex items-center justify-end px-8 sticky top-0 z-20 bg-slate-50/90 backdrop-blur-sm border-b border-transparent">
                     <div className="flex items-center gap-4">
-                        <button className="relative p-2.5 rounded-full text-slate-500 hover:bg-white hover:text-primary hover:shadow-sm transition-all duration-200">
+                        <button className="relative p-2 rounded-full text-slate-400 hover:bg-white hover:text-primary hover:shadow-sm transition-all duration-200">
                             <Bell className="w-5 h-5" />
                             {hasNotifications && (
-                                <span className="absolute top-2 right-2.5 w-2 h-2 bg-primary rounded-full border-2 border-slate-50" />
+                                <span className="absolute top-2 right-2 w-2 h-2 bg-primary rounded-full border-2 border-slate-50" />
                             )}
                         </button>
                     </div>
                 </header>
 
-                <div className="flex-1 px-8 pb-8 max-w-7xl mx-auto w-full animate-fade-in">
+                <div className="flex-1 px-8 pb-12 max-w-6xl mx-auto w-full animate-fade-in">
                     {children}
                 </div>
             </main>
