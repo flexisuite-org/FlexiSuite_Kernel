@@ -48,7 +48,10 @@ Kiro-style Spec Driven Development implementation on AI-DLC (AI Development Life
 
 ## FlexiSuite Project Overview
 
-FlexiSuite is a **"Flexible OS for the SaaS era"** — an operating system-level platform that democratizes AI-driven application development (Vibe Coding). This is NOT an MVP or a prototype. We are building a **production-grade, full-featured OS kernel** in Rust.
+FlexiSuite is a **"Flexible OS for the SaaS era"** — an operating system-level platform that democratizes AI-driven application development (Vibe Coding). 
+
+> **MDP (Minimal Desirable Product) Philosophy**
+> This is NOT an MVP or a prototype. We are building a **production-grade, full-featured OS kernel** in Rust. The goal is not just "viable", but "desirable" — an OS that demonstrates robust architecture, security, and developer experience from Day 1.
 
 ### Background
 - The concept of "Custom UX" (AI-driven UI/UX self-modification) was validated through a separate product called **FlexiStudy** (a study management app with embedded Gemini CLI).
@@ -77,4 +80,4 @@ FlexiSuite is a **"Flexible OS for the SaaS era"** — an operating system-level
 2. **No guesswork.** Never implement based on assumptions or speculation. If you don't know the answer, investigate the codebase, read documentation, or ask. Incorrect implementations are worse than no implementation.
 3. **This is an OS, not an app.** Design decisions must account for multi-tenancy, security isolation, backward compatibility, and performance at scale. Think in terms of system contracts, not feature checklists.
 4. **Tenant isolation is sacred.** Every database access MUST go through `TenantContext`. Raw SQL without tenant scoping MUST NOT exist in any public API. This is enforced at the type system level.
-5. **Security by default.** User-generated code runs in sandboxes. External dependencies are isolated. Trust must be earned through verification, not assumed.
+6. **MDP over MVP.** Do not build "temporary" features. If a feature is included, it must be implemented with the quality and robustness expected of a finished OS. It is better to have fewer, perfectly working features than many half-baked ones.
