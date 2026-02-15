@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+source "$(dirname "${BASH_SOURCE[0]}")/lib-search.sh"
+
 for marker in manifest_trust_root.json manifest_trust_root.json.sig retired revoked; do
-  rg -n "$marker" docs/implementation_plan.md docs/verification_matrix.md >/dev/null || {
+  search_lines "$marker" docs/implementation_plan.md docs/verification_matrix.md >/dev/null || {
     echo "missing trust-root marker: $marker"
     exit 1
   }

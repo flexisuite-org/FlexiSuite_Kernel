@@ -12,6 +12,8 @@
 
 | REQ-ID | 検証ゲート | 主検証ジョブ/手段 | 失敗条件 |
 |---|---|---|---|
+| `REQ-AUTH-SEC` | PR-Blocking | `ci:lint-sql-security`, `ci:test-contract`（auth suite）, `ci:e2e-frontend-security` | `SECURITY DEFINER` 標準契約違反、`X-Tenant-Id` の本番許容、`401/403` 境界の逸脱 |
+| `REQ-CONTRACT-VERIFY` | PR-Blocking | `ci:lint-traceability`, `ci:test-contract`, `ci:test-observability` | 契約ドキュメントと実装/検証の不整合、契約テスト欠落、メトリクス契約欠落 |
 | `REQ-TENANT-TOKEN-V2` | PR-Blocking + Nightly | `ci:test-auth-contract`, `nightly:test-token-compat`, `nightly:test-token-version-usage` | v2発行不備、`kid` 欠落受理、互換期限超過受理、14日連続ゼロ未達でv1停止 |
 | `REQ-KEY-REVOCATION-SLO` | PR-Blocking + Nightly + Drill | `ci:lint-drill-readiness`, `nightly:test-key-revocation-chaos`, 月次失効演習 | Readiness欠落、失効伝播 `p95 > 60s`、失効鍵で検証成功 |
 | `REQ-QUOTA-HTTP-CONTRACT` | PR-Blocking | `ci:test-contract`（quota suite） | 判定表と異なるHTTPコード、`Retry-After` 欠落/異常 |
