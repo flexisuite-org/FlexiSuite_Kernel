@@ -3,6 +3,7 @@ use axum::{
     Router,
     middleware::from_fn,
     Extension,
+    http::StatusCode,
 };
 use crate::auth::auth_middleware;
 use crate::middleware::{idempotency_middleware, quota_middleware, IdempotencyStore};
@@ -13,7 +14,23 @@ pub mod middleware;
 pub fn build_app(idempotency_store: IdempotencyStore) -> Router {
     Router::new()
         .route("/health", get(|| async { "OK" }))
-        .route("/test", post(|| async { "OK" }).put(|| async { "OK" }))
+        .route(
+            "/test",
+            post(|| async {
+                (
+                    StatusCode::CREATED,
+                    [("X-Action-Id", "act-live"), ("X-Result-Version", "v1")],
+                    "OK",
+                )
+            })
+            .put(|| async {
+                (
+                    StatusCode::OK,
+                    [("X-Action-Id", "act-put"), ("X-Result-Version", "v1")],
+                    "OK",
+                )
+            }),
+        )
         // Register Middlewares (Outermost applied last)
         .layer(from_fn(quota_middleware))
         .layer(from_fn(idempotency_middleware))
