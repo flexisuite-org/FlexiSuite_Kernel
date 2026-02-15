@@ -1,0 +1,36 @@
+# /.coderabbit.yaml
+# FlexiSuite Kernel - CodeRabbit config (minimal, low-noise)
+
+# 目的:
+# - “好み/抽象論”を抑制
+# - “契約/セキュリティ/後方互換/運用影響”に集中
+# - docs変更は原則ノイズになりやすいのでレビュー対象から外す（必要なら後で戻す）
+
+reviews:
+  auto_review:
+    enabled: true
+
+  # レビューの観点（AIに“見るべき軸”を固定）
+  focus_areas:
+    - "contract consistency (REQ-* / verification matrix / CI gates)"
+    - "security implications (auth, tenant isolation, supply chain)"
+    - "backward compatibility"
+    - "observability impact (metrics/logs/traces)"
+    - "performance regressions (hot paths, allocations, async)"
+
+  # “好み”レビューを抑制（コメントがうるさくなりがちな領域）
+  style_guidelines:
+    enabled: false
+
+  # 具体案を必須化（抽象コメントを減らす）
+  request_changes:
+    require_code_suggestions: true
+
+  # まずはドキュメント系を対象外（必要になったら外す）
+  ignore:
+    - "**/*.md"
+    - "docs/**"
+    - "**/*.lock"
+    - "**/*.png"
+    - "**/*.jpg"
+    - "**/*.svg"
