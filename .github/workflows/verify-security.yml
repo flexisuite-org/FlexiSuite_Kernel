@@ -1,0 +1,60 @@
+name: verify-security
+
+on:
+  pull_request:
+    paths:
+      - docs/implementation_plan.md
+      - docs/verification_matrix.md
+      - ops/**
+      - scripts/ci/**
+      - tests/contract/supplychain/**
+      - .github/workflows/verify-security.yml
+  push:
+    branches: [main]
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+    inputs:
+      run_nightly:
+        description: "Run nightly reliability suite"
+        required: false
+        type: boolean
+        default: false
+
+concurrency:
+  group: verify-security-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint-sql-security:
+    name: ci:lint-sql-security
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run SQL security lint
+        run: bash scripts/ci/ci-lint-sql-security.sh
+
+  lint-manifest-trust-root:
+    name: ci:lint-manifest-trust-root
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run trust root lint
+        run: bash scripts/ci/ci-lint-manifest-trust-root.sh
+
+  test-manifest-break-glass:
+    name: ci:test-manifest-break-glass
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run break-glass contract test stub
+        run: bash scripts/ci/ci-test-manifest-break-glass.sh
+
+  nightly-reliability:
+    name: nightly:test-reliability
+    runs-on: ubuntu-latest
+    if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.run_nightly)
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run nightly reliability suites
+        run: bash scripts/ci/nightly-test-reliability.sh
