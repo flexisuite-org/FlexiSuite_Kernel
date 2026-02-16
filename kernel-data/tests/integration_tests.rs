@@ -21,8 +21,8 @@ async fn test_tenant_isolation_rls() {
     let db = Database::connect(&connection_string).await.expect("Failed to connect to DB");
 
     // Initialize HMAC Secret for tests
-    unsafe { std::env::set_var("FLEXI_HMAC_SECRET", "test_secret_for_integration_tests"); }
-    if let Err(e) = kernel_data::init_hmac_secret() {
+    // Initialize HMAC Secret for tests (using deterministic secret specific to tests)
+    if let Err(e) = kernel_data::init_hmac_secret_for_test("test_secret_for_integration_tests") {
         // Assert it's the expected "already initialized" error if it fails
         assert!(e.contains("already initialized"), "Unexpected error from init_hmac_secret: {}", e);
     }
@@ -34,6 +34,8 @@ async fn test_tenant_isolation_rls() {
     migration::Migrator::up(&db, None).await.expect("Failed to run migrations");
 
     // Mock Authorize Function (Simpler for test, or copy exact one)
+    // NOTE: This mock intentionally skips signature verification and format validation
+    // to simplify testing RLS isolation. It does NOT exercise the HMAC signing path fully.
     db.execute_unprepared(r#"
         DROP FUNCTION IF EXISTS flexi.authorize_tenant();
         DROP FUNCTION IF EXISTS flexi.authorize_tenant(text);
@@ -146,7 +148,7 @@ async fn test_tenant_isolation_rls() {
     let ts_2 = ts_1 + 10; // Different timestamp, same second window
     
     // First insert (Succeeds)
-    use sea_orm::{Statement, DbBackend};
+    // use sea_orm::{Statement, DbBackend}; // Removed duplicate import
     db.execute(Statement::from_sql_and_values(
         DbBackend::Postgres,
         "INSERT INTO flexi.flexi_nonce (nonce, created_at) VALUES ($1, to_timestamp($2))",
