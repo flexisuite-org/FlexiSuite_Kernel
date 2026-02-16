@@ -30,7 +30,7 @@ mod tests {
             // Note: In real integration, we pass full URL, but here we test the canonicalizer logic.
             // The kernel logic handles origin stripping.
 
-            // This test will fail until implementation is linked, documenting the strict contract.
+            // Implementation is linked; test validates canonicalize_request_target behavior.
             assert_eq!(
                 canonicalize_request_target(input_path, input_query),
                 expected,

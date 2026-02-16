@@ -277,7 +277,10 @@ pub async fn idempotency_middleware(
             }
             key.to_string()
         }
-        None => return Ok(next.run(Request::from_parts(parts, body)).await),
+        None => {
+            warn!(method = %method, "Missing Idempotency-Key for write operation");
+            return Err(StatusCode::BAD_REQUEST);
+        }
     };
 
     let tenant_ctx = parts
@@ -414,7 +417,10 @@ pub async fn idempotency_middleware(
                     "Response body could not be buffered for idempotency cache due to body read error"
                 );
                 store.release_inflight(&scope_key).await;
-                return Err(StatusCode::BAD_GATEWAY);
+                let mut res = Response::from_parts(parts, Body::empty());
+                let val = HeaderValue::from_static("cache-buffer-error");
+                res.headers_mut().insert("X-Idempotency-Cache-Error", val);
+                return Ok(res);
             }
         };
         if body_bytes.len() > MAX_REPLAY_BODY_SIZE {
@@ -516,34 +522,37 @@ fn violation_to_response(v: &QuotaViolation) -> Response {
 
 /// REQ-QUOTA-HTTP-CONTRACT: Evaluation Priority (System > Tenant > API)
 pub async fn quota_middleware(req: Request<Body>, next: Next) -> Result<Response, Response> {
-    // 1. System Hard Limit (Critical Protection)
-    if req.headers().contains_key("X-Mock-Quota-System") {
-        let violation = QuotaViolation {
-            layer: QuotaLayer::SystemHardLimit,
-            retry_after_s: 100,
-        };
-        warn!("System Hard Limit exceeded");
-        return Err(violation_to_response(&violation));
-    }
+    #[cfg(debug_assertions)]
+    {
+        // 1. System Hard Limit (Critical Protection)
+        if req.headers().contains_key("X-Mock-Quota-System") {
+            let violation = QuotaViolation {
+                layer: QuotaLayer::SystemHardLimit,
+                retry_after_s: 100,
+            };
+            warn!("System Hard Limit exceeded");
+            return Err(violation_to_response(&violation));
+        }
 
-    // 2. Tenant Budget
-    if req.headers().contains_key("X-Mock-Quota-Tenant") {
-        let violation = QuotaViolation {
-            layer: QuotaLayer::TenantBudget,
-            retry_after_s: 5,
-        };
-        warn!("Tenant Budget exceeded");
-        return Err(violation_to_response(&violation));
-    }
+        // 2. Tenant Budget
+        if req.headers().contains_key("X-Mock-Quota-Tenant") {
+            let violation = QuotaViolation {
+                layer: QuotaLayer::TenantBudget,
+                retry_after_s: 5,
+            };
+            warn!("Tenant Budget exceeded");
+            return Err(violation_to_response(&violation));
+        }
 
-    // 3. API Rate Limit
-    if req.headers().contains_key("X-Mock-Quota-Api") {
-        let violation = QuotaViolation {
-            layer: QuotaLayer::ApiRateLimit,
-            retry_after_s: 60,
-        };
-        warn!("API Rate Limit exceeded");
-        return Err(violation_to_response(&violation));
+        // 3. API Rate Limit
+        if req.headers().contains_key("X-Mock-Quota-Api") {
+            let violation = QuotaViolation {
+                layer: QuotaLayer::ApiRateLimit,
+                retry_after_s: 60,
+            };
+            warn!("API Rate Limit exceeded");
+            return Err(violation_to_response(&violation));
+        }
     }
 
     Ok(next.run(req).await)
