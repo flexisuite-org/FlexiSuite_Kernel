@@ -63,6 +63,7 @@ impl MigrationTrait for Migration {
         ).await?;
 
         // 4. Create Authorize Function
+        db.execute_unprepared("CREATE EXTENSION IF NOT EXISTS pgcrypto").await?;
         db.execute_unprepared(
             r#"
             CREATE OR REPLACE FUNCTION flexi.authorize_tenant() RETURNS void AS $$

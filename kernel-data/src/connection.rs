@@ -9,8 +9,37 @@ use uuid::Uuid;
 use futures::future::BoxFuture;
 use ring::hmac;
 
+use std::sync::OnceLock;
+
+// HMAC Secret Management
+static HMAC_SECRET: OnceLock<Vec<u8>> = OnceLock::new();
+
+pub fn init_hmac_secret() -> Result<(), String> {
+    let secret = std::env::var("FLEXI_HMAC_SECRET")
+        .map_err(|_| "FLEXI_HMAC_SECRET is not set".to_string())?;
+    
+    if secret.is_empty() {
+        return Err("FLEXI_HMAC_SECRET cannot be empty".to_string());
+    }
+
+    HMAC_SECRET.set(secret.into_bytes())
+        .map_err(|_| "HMAC secret already initialized".to_string())
+}
+
+fn get_hmac_secret() -> &'static [u8] {
+    HMAC_SECRET.get().expect("HMAC secret not initialized. Call init_hmac_secret() at startup.")
+}
+
 // Sealed Internal Wrapper
-pub struct RawConnection(pub(crate) DatabaseTransaction);
+pub struct RawConnection {
+    pub(crate) txn: DatabaseTransaction,
+}
+
+impl RawConnection {
+    pub(crate) fn new(txn: DatabaseTransaction) -> Self {
+        Self { txn }
+    }
+}
 
 /// A wrapper around a database transaction that is guaranteed to be scoped to a specific tenant.
 pub struct TenantScoped<C> {
@@ -19,18 +48,18 @@ pub struct TenantScoped<C> {
 }
 
 impl<C> TenantScoped<C> {
-    pub(crate) fn new(inner: C, tenant_id: kernel_core::auth::TenantId) -> Self {
+    pub(super) fn new(inner: C, tenant_id: kernel_core::auth::TenantId) -> Self {
         Self { inner, tenant_id }
     }
 }
 
 impl TenantScoped<RawConnection> {
     pub(crate) async fn commit(self) -> Result<(), DbErr> {
-        self.inner.0.commit().await
+        self.inner.txn.commit().await
     }
     
     pub(crate) async fn rollback(self) -> Result<(), DbErr> {
-        self.inner.0.rollback().await
+        self.inner.txn.rollback().await
     }
 }
 
@@ -61,8 +90,8 @@ where
     let ver = "v2";
 
     // HMAC Signature Calculation
-    let secret = std::env::var("FLEXI_HMAC_SECRET").unwrap_or_else(|_| "placeholder_secret".to_string());
-    let key = hmac::Key::new(hmac::HMAC_SHA256, secret.as_bytes());
+    let secret = get_hmac_secret();
+    let key = hmac::Key::new(hmac::HMAC_SHA256, secret);
     let msg = format!("{}:{}:{}:{}:{}", ver, kid, ts_str, nonce, ctx.tenant_id());
     let tag = hmac::sign(&key, msg.as_bytes());
     let sig = hex::encode(tag.as_ref());
@@ -91,7 +120,7 @@ where
         KernelError::TenantAuthorizationFailed(e.to_string())
     })?;
 
-    let scoped = TenantScoped::new(RawConnection(txn), ctx.tenant_id().clone());
+    let scoped = TenantScoped::new(RawConnection::new(txn), ctx.tenant_id().clone());
 
     match f(&scoped).await {
         Ok(result) => {

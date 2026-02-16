@@ -25,7 +25,7 @@ impl TenantRepository for TenantScoped<RawConnection> {
         // Enforce tenant scoping by overriding the tenant_id field
         active_model.tenant_id = sea_orm::ActiveValue::Set(self.tenant_id.to_string());
         
-        let result = active_model.insert(&self.inner.0).await.map_err(KernelError::db_error)?;
+        let result = active_model.insert(&self.inner.txn).await.map_err(KernelError::db_error)?;
         Ok(result)
     }
 
@@ -33,7 +33,7 @@ impl TenantRepository for TenantScoped<RawConnection> {
         // Since we have a composite primary key (id, tenant_id), we must provide both.
         // RLS will also filter this, but SeaORM requires both for the PK lookup.
         let result = EntityRecord::find_by_id((id.to_string(), self.tenant_id.as_str().to_string()))
-            .one(&self.inner.0)
+            .one(&self.inner.txn)
             .await
             .map_err(KernelError::db_error)?;
         Ok(result)

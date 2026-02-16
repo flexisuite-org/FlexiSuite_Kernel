@@ -9,7 +9,6 @@ impl MigrationTrait for Migration {
         let db = manager.get_connection();
 
         // 1. Create Table
-        // 1. Create Table
         db.execute_unprepared(
             r#"
             CREATE TABLE IF NOT EXISTS flexi.entity_records (

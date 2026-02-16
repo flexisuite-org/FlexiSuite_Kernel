@@ -1725,6 +1725,7 @@ dependencies = [
  "http",
  "http-body-util",
  "kernel-core",
+ "kernel-data",
  "ring",
  "rusty_paseto",
  "serde",

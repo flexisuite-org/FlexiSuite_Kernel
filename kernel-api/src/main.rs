@@ -12,7 +12,12 @@ async fn main() {
         .init();
 
     if let Err(msg) = kernel_api::auth::init_auth_config() {
-        eprintln!("kernel-api startup error: {msg}");
+        eprintln!("kernel-api startup error (auth): {msg}");
+        std::process::exit(1);
+    }
+
+    if let Err(msg) = kernel_data::init_hmac_secret() {
+        eprintln!("kernel-api startup error (data): {msg}");
         std::process::exit(1);
     }
 
