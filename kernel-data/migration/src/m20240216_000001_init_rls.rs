@@ -31,7 +31,28 @@ impl MigrationTrait for Migration {
             "CREATE TABLE IF NOT EXISTS flexi.flexi_nonce_default PARTITION OF flexi.flexi_nonce DEFAULT;"
         ).await?;
 
-        // 3. Create Authorize Function
+        // 3. Create Uniqueness Trigger (Global uniqueness on partitioned table)
+        db.execute_unprepared(
+            r#"
+            CREATE OR REPLACE FUNCTION flexi.check_nonce_uniqueness() RETURNS TRIGGER AS $$
+            BEGIN
+                IF EXISTS (
+                    SELECT 1 FROM flexi.flexi_nonce 
+                    WHERE nonce = NEW.nonce
+                ) THEN
+                    RAISE EXCEPTION 'Nonce already used: %', NEW.nonce USING ERRCODE = 'unique_violation';
+                END IF;
+                RETURN NEW;
+            END;
+            $$ LANGUAGE plpgsql SECURITY DEFINER;
+
+            CREATE TRIGGER nonce_uniqueness_trigger
+            BEFORE INSERT ON flexi.flexi_nonce
+            FOR EACH ROW EXECUTE FUNCTION flexi.check_nonce_uniqueness();
+            "#
+        ).await?;
+
+        // 4. Create Authorize Function
         db.execute_unprepared(
             r#"
             CREATE OR REPLACE FUNCTION flexi.authorize_tenant() RETURNS void AS $$
@@ -56,7 +77,6 @@ impl MigrationTrait for Migration {
                 END IF;
 
                 -- 2. Parse Token (v2:kid:ts:nonce:tenant_id:sig)
-                -- Simple split by ':'
                 parts := string_to_array(token_val, ':');
                 IF array_length(parts, 1) != 6 THEN
                     RAISE EXCEPTION 'Invalid token format';
@@ -80,17 +100,14 @@ impl MigrationTrait for Migration {
                     RAISE EXCEPTION 'Token timestamp expired or future (skew > 30s)';
                 END IF;
 
-                -- 4. Verify Signature (Mock for now, REAL IMPLEMENTATION needed via pgcrypto/plrust)
-                -- We enforce strict equality to the mock signature used by the kernel.
+                -- 4. Verify Signature (Mock for now)
                 IF sig != 'mock_sig' THEN
                     RAISE EXCEPTION 'Invalid signature';
                 END IF;
 
                 -- 5. Check Nonce (Consumption)
-                -- INSERT into nonce table using the TOKEN'S timestamp.
-                -- Since PK is (nonce, created_at), using the token's timestamp ensures that
-                -- reusing the same token (same nonce + same ts) constitutes a PK violation,
-                -- preventing replay.
+                -- The trigger 'nonce_uniqueness_trigger' ensures global uniqueness of 'nonce'
+                -- even if 'created_at' (partition key) is different.
                 BEGIN
                     INSERT INTO flexi.flexi_nonce (nonce, created_at) 
                     VALUES (nonce_val, to_timestamp(ts::double precision));
@@ -100,14 +117,11 @@ impl MigrationTrait for Migration {
 
                 -- 6. Set Context
                 PERFORM set_config('flexi.current_tenant', tenant_id_val, true);
-
-                -- 7. Audit (Optional validation log)
             END;
             $$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = flexi, pg_catalog, pg_temp;
 
             -- Revoke public access
             REVOKE ALL ON FUNCTION flexi.authorize_tenant() FROM PUBLIC;
-            -- Grant to application user (todo)
             "#
         ).await?;
 

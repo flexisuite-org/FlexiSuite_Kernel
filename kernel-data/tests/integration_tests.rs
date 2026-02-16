@@ -2,6 +2,7 @@ use kernel_core::auth::TenantContext;
 use kernel_core::kernel;
 use kernel_data::connection::{with_tenant_tx, TenantScoped, RawConnection};
 use kernel_data::repository::TenantRepository;
+use migration::MigratorTrait;
 use sea_orm::{Database, ActiveValue, ConnectionTrait};
 use testcontainers::{clients, RunnableImage};
 use testcontainers_modules::postgres::Postgres;
@@ -38,53 +39,36 @@ async fn test_tenant_isolation_rls() {
     let db = Database::connect(&connection_string).await.expect("Failed to connect to DB");
 
     // 2. Run Migrations
-    // We need the migration logic. If we can't easily link the migration crate, 
-    // we might need to replicate the schema creation SQL here for the test.
-    // Ideally we link `kernel_migration`.
-    // For now, let's create the schema manually to ensure test runs, 
-    // verifying the RLS *logic* specifically.
-    
-    // Manual Schema Setup (Copy of migration logic for test isolation)
-    db.execute_unprepared("CREATE SCHEMA IF NOT EXISTS flexi").await.unwrap();
-    db.execute_unprepared(r#"
-        CREATE TABLE IF NOT EXISTS flexi.flexi_nonce (
-            nonce TEXT NOT NULL,
-            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-            PRIMARY KEY (nonce, created_at)
-        ) PARTITION BY RANGE (created_at);
-        CREATE TABLE IF NOT EXISTS flexi.flexi_nonce_default PARTITION OF flexi.flexi_nonce DEFAULT;
-    "#).await.unwrap();
+    migration::Migrator::up(&db, None).await.expect("Failed to run migrations");
 
     // Mock Authorize Function (Simpler for test, or copy exact one)
-    // We need `authorize_tenant` because `with_tenant_tx` calls it.
     db.execute_unprepared(r#"
+        DROP FUNCTION IF EXISTS flexi.authorize_tenant();
         CREATE OR REPLACE FUNCTION flexi.authorize_tenant() RETURNS void AS $$
+        DECLARE
+            token_val text;
+            parts text[];
+            tenant_id_val text;
+            nonce_val text;
+            ts bigint;
         BEGIN
-            -- Minimized for test: just accept whatever is in current_setting or rely on the Mock Logic
-            -- The real `with_tenant_tx` sets `flexi.tenant_token`.
-            -- The real `authorize_tenant` parses it.
-            -- To test REAL RLS, we should use the REAL function.
-            -- But we need to make sure `with_tenant_tx` generates a valid token for IT.
-            -- `with_tenant_tx` generates a "mock_sig" token.
-            -- The migration expects "mock_sig".
-            -- So if we copy the migration SQL exactly, it should pass.
+            token_val := current_setting('flexi.tenant_token', true);
+            if token_val is null or token_val = '' then return; end if;
             
-            DECLARE
-                token_val text;
-                parts text[];
-                tenant_id_val text;
+            parts := string_to_array(token_val, ':');
+            -- v2:kid:ts:nonce:tenant_id:sig
+            ts := parts[3]::bigint;
+            nonce_val := parts[4];
+            tenant_id_val := parts[5];
+            
             BEGIN
-                token_val := current_setting('flexi.tenant_token', true);
-                if token_val is null or token_val = '' then return; end if;
-                
-                parts := string_to_array(token_val, ':');
-                -- v2:kid:ts:nonce:tenant_id:sig
-                tenant_id_val := parts[5];
-                
-                -- Simulate signature check pass
-                
-                PERFORM set_config('flexi.current_tenant', tenant_id_val, true);
+                INSERT INTO flexi.flexi_nonce (nonce, created_at) 
+                VALUES (nonce_val, to_timestamp(ts::double precision));
+            EXCEPTION WHEN unique_violation THEN
+                RAISE EXCEPTION 'Nonce already used: %', nonce_val;
             END;
+            
+            PERFORM set_config('flexi.current_tenant', tenant_id_val, true);
         END;
         $$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = flexi, pg_catalog, pg_temp;
     "#).await.unwrap();
@@ -99,24 +83,14 @@ async fn test_tenant_isolation_rls() {
 
     // Table
     db.execute_unprepared(r#"
-        CREATE TABLE IF NOT EXISTS flexi.entity_records (
-            id TEXT NOT NULL,
-            tenant_id TEXT NOT NULL,
-            entity_type TEXT NOT NULL,
-            schema_version INT NOT NULL DEFAULT 1,
-            content JSONB NOT NULL,
-            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-            version INT NOT NULL DEFAULT 1,
-            PRIMARY KEY (id, tenant_id)
-        );
+        -- Table is created by migration, but we ensure RLS is on for the test
+        ALTER TABLE flexi.entity_records DISABLE ROW LEVEL SECURITY;
         ALTER TABLE flexi.entity_records ENABLE ROW LEVEL SECURITY;
+        DROP POLICY IF EXISTS tenant_isolation_policy ON flexi.entity_records;
         CREATE POLICY tenant_isolation_policy ON flexi.entity_records
             FOR ALL TO PUBLIC
             USING (tenant_id = flexi.authorized_tenant_id());
     "#).await.unwrap();
-
-
     // 3. Test Logic
     let tenant_a = TenantContext { tenant_id: "tenant-a".to_string(), user_id: Some("user-1".to_string()) };
     let tenant_b = TenantContext { tenant_id: "tenant-b".to_string(), user_id: Some("user-2".to_string()) };
@@ -153,6 +127,27 @@ async fn test_tenant_isolation_rls() {
     
     // E. Verify uniqueness allows same ID for different tenants (if PK allows)
     // Our PK is (id, tenant_id), so this works.
+    
+    // F. Global Nonce Uniqueness Test
+    let test_nonce = "once-only-nonce";
+    let ts_1 = chrono::Utc::now().timestamp();
+    let ts_2 = ts_1 + 10; // Different timestamp, same second window
+    
+    // First insert (Succeeds)
+    db.execute_unprepared(&format!(
+        "INSERT INTO flexi.flexi_nonce (nonce, created_at) VALUES ('{}', to_timestamp({}))",
+        test_nonce, ts_1
+    )).await.expect("First nonce insert should succeed");
+    
+    // Second insert with same nonce but different TS (Should fail via Trigger)
+    let res = db.execute_unprepared(&format!(
+        "INSERT INTO flexi.flexi_nonce (nonce, created_at) VALUES ('{}', to_timestamp({}))",
+        test_nonce, ts_2
+    )).await;
+    
+    assert!(res.is_err(), "Second nonce insert with different TS should fail");
+    let err = res.unwrap_err().to_string();
+    assert!(err.contains("Nonce already used"), "Error message should mention nonce usage: {}", err);
 }
 
 async fn insert_record(repo: &TenantScoped<RawConnection>, id: String, tenant: &str, val: &str) -> kernel::Result<()> {
