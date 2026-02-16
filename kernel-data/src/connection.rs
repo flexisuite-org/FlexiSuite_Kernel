@@ -18,6 +18,14 @@ pub fn init_hmac_secret() -> Result<(), String> {
     let secret = std::env::var("FLEXI_HMAC_SECRET")
         .map_err(|_| "FLEXI_HMAC_SECRET is not set".to_string())?;
     
+    init_hmac_secret_from_string(secret)
+}
+
+pub fn init_hmac_secret_for_test(secret: impl Into<String>) -> Result<(), String> {
+    init_hmac_secret_from_string(secret.into())
+}
+
+fn init_hmac_secret_from_string(secret: String) -> Result<(), String> {
     if secret.as_bytes().len() < 32 {
         return Err("FLEXI_HMAC_SECRET must be at least 32 bytes".to_string());
     }
