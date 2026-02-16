@@ -239,6 +239,11 @@ impl MiddlewareState {
         }
     }
 
+    /// Starts a background task to clean up expired idempotency and action records.
+    ///
+    /// # Warning
+    /// This task runs indefinitely in a loop. The returned `JoinHandle` must be aborted
+    /// to stop the task (e.g., during graceful shutdown).
     pub fn start_cleanup_task(&self) -> tokio::task::JoinHandle<()> {
         let idempotency_store = self.idempotency_store.clone();
         let action_store = self.action_store.clone();
@@ -380,8 +385,25 @@ pub async fn idempotency_middleware(
     let req = Request::from_parts(parts, Body::from(body_bytes));
 
     let store = &state.idempotency_store;
+    let mut attempts = 0;
+    const MAX_ATTEMPTS: usize = 3;
 
     loop {
+        attempts += 1;
+        if attempts > MAX_ATTEMPTS {
+            warn!(
+                key = %idempotency_key,
+                attempts = attempts,
+                "Exceeded max attempts waiting for in-flight idempotent request"
+            );
+            let mut res = StatusCode::SERVICE_UNAVAILABLE.into_response();
+            let retry_after = state.config.inflight_wait_timeout.as_secs().max(1).to_string();
+            if let Ok(val) = HeaderValue::from_str(&retry_after) {
+                res.headers_mut().insert(axum::http::header::RETRY_AFTER, val);
+            }
+            return Ok(res);
+        }
+
         // Atomic check-and-acquire
         match store
             .try_acquire(scope_key.clone(), body_hash.clone(), state.config.idempotency_ttl)
@@ -515,11 +537,12 @@ pub async fn idempotency_middleware(
 // ... helpers ...
 
 fn compute_body_hash(body: &[u8]) -> String {
+    use std::fmt::Write;
     let result = digest(&SHA256, body);
     let bytes = result.as_ref();
     let mut hex = String::with_capacity(bytes.len() * 2);
     for &b in bytes {
-        use std::fmt::Write;
+        // Writing to a String cannot fail, but write! returns a Result.
         let _ = write!(hex, "{b:02x}");
     }
     hex
@@ -542,7 +565,7 @@ fn snapshot_headers(headers: &HeaderMap) -> Vec<(String, String)> {
             let name_str = name.as_str();
             // Filter transient headers
             if matches!(
-                name_str.to_lowercase().as_str(),
+                name_str,
                 "date" | "content-length" | "transfer-encoding" | "connection" | "x-request-id"
             ) {
                 return None;

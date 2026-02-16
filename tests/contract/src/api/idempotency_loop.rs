@@ -1,0 +1,84 @@
+use axum::{
+    body::Body,
+    http::{Request, StatusCode},
+    routing::post,
+    Router,
+    middleware,
+    Extension,
+};
+use tower::ServiceExt; // for oneshot
+use kernel_api::middleware::{MiddlewareConfig, MiddlewareState, idempotency_middleware};
+use kernel_api::auth::TenantContext;
+use std::time::Duration;
+use tokio::task::JoinSet;
+
+#[tokio::test]
+async fn test_idempotency_loop_limit() {
+    // Setup
+    let config = MiddlewareConfig {
+        idempotency_ttl: Duration::from_secs(60),
+        // Large enough to avoid timeout, so we hit the loop limit instead
+        inflight_wait_timeout: Duration::from_millis(1000), 
+        ..Default::default()
+    };
+    let state = MiddlewareState::new(config);
+
+    // Mock handler that simulates FAST processing time but FAILS.
+    // Failure causes the lock to be released (instead of Completed), allowing others to try acquire.
+    // This creates the race condition where a waiter can repeatedly lose the race.
+    let app = Router::new()
+        .route("/", post(|_: Request<Body>| async move {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            StatusCode::INTERNAL_SERVER_ERROR // Force release_inflight
+        }))
+        .layer(middleware::from_fn(idempotency_middleware))
+        .layer(Extension(state));
+
+    let mut set = JoinSet::new();
+    let num_requests = 20; 
+    
+    let tenant_ctx = TenantContext {
+        tenant_id: "tenant-1".to_string(),
+        user_id: Some("user-1".to_string()),
+    };
+
+    for _ in 0..num_requests {
+        let app = app.clone();
+        let ctx = tenant_ctx.clone();
+        set.spawn(async move {
+            let req = Request::builder()
+                .method("POST")
+                .uri("/")
+                .header("Idempotency-Key", "test-key-loop-v4")
+                .extension(ctx)
+                .body(Body::from("same-body")) 
+                .unwrap();
+
+            match app.oneshot(req).await {
+                Ok(res) => res.status(),
+                Err(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            }
+        });
+    }
+
+    let mut service_unavailable_count = 0; // 503
+    let mut internal_error_count = 0; // 500 (from handler)
+    let mut conflict_count = 0; // 409
+    let mut other_count = 0;
+
+    while let Some(res) = set.join_next().await {
+        let status = res.unwrap();
+        if status == StatusCode::SERVICE_UNAVAILABLE {
+            service_unavailable_count += 1;
+        } else if status == StatusCode::INTERNAL_SERVER_ERROR {
+            internal_error_count += 1;
+        } else if status == StatusCode::CONFLICT {
+            conflict_count += 1;
+        } else {
+            other_count += 1;
+        }
+    }
+
+    // We expect some requests to process (return 500) and some to fail acquiring (return 503).
+    assert!(service_unavailable_count > 0, "Expected at least one 503 due to loop limit");
+}
