@@ -8,7 +8,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use http_body_util::BodyExt;
-use kernel_core::idempotency::{canonicalize_request_target, check_idempotency_conflict};
+use kernel_core::idempotency::canonicalize_request_target;
 use kernel_core::quota::{QuotaLayer, QuotaViolation};
 use ring::digest::{SHA256, digest};
 use serde::{Deserialize, Serialize};
@@ -31,33 +31,38 @@ pub struct MiddlewareConfig {
 
 impl Default for MiddlewareConfig {
     fn default() -> Self {
+        fn get_env_duration(key: &str, default_secs: u64) -> Duration {
+            match std::env::var(key) {
+                Ok(v) => match v.parse::<u64>() {
+                    Ok(s) => Duration::from_secs(s),
+                    Err(_) => {
+                        tracing::warn!(key = %key, value = %v, "Invalid Duration env var, using default");
+                        Duration::from_secs(default_secs)
+                    }
+                },
+                Err(_) => Duration::from_secs(default_secs),
+            }
+        }
+
+        fn get_env_usize(key: &str, default_val: usize) -> usize {
+            match std::env::var(key) {
+                Ok(v) => match v.parse::<usize>() {
+                    Ok(s) => s,
+                    Err(_) => {
+                        tracing::warn!(key = %key, value = %v, "Invalid usize env var, using default");
+                        default_val
+                    }
+                },
+                Err(_) => default_val,
+            }
+        }
+
         Self {
-            idempotency_ttl: Duration::from_secs(
-                std::env::var("IDEMPOTENCY_TTL_SECS")
-                    .ok()
-                    .and_then(|v| v.parse().ok())
-                    .unwrap_or(24 * 60 * 60),
-            ),
-            action_ttl: Duration::from_secs(
-                std::env::var("ACTION_TTL_SECS")
-                    .ok()
-                    .and_then(|v| v.parse().ok())
-                    .unwrap_or(24 * 60 * 60),
-            ),
-            max_body_size: std::env::var("MAX_BODY_SIZE_BYTES")
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(10 * 1024 * 1024),
-            max_replay_body_size: std::env::var("MAX_REPLAY_BODY_SIZE_BYTES")
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(10 * 1024 * 1024),
-            inflight_wait_timeout: Duration::from_secs(
-                std::env::var("INFLIGHT_WAIT_TIMEOUT_SECS")
-                    .ok()
-                    .and_then(|v| v.parse().ok())
-                    .unwrap_or(5),
-            ),
+            idempotency_ttl: get_env_duration("IDEMPOTENCY_TTL_SECS", 24 * 60 * 60),
+            action_ttl: get_env_duration("ACTION_TTL_SECS", 24 * 60 * 60),
+            max_body_size: get_env_usize("MAX_BODY_SIZE_BYTES", 10 * 1024 * 1024),
+            max_replay_body_size: get_env_usize("MAX_REPLAY_BODY_SIZE_BYTES", 10 * 1024 * 1024),
+            inflight_wait_timeout: get_env_duration("INFLIGHT_WAIT_TIMEOUT_SECS", 5),
         }
     }
 }
@@ -288,6 +293,7 @@ pub async fn get_action(
         tenant_id: tenant_id.to_string(),
         action_id: action_id.to_string(),
     })
+    .filter(|r| r.expires_at > Instant::now())
     .cloned()
 }
 
@@ -387,12 +393,9 @@ pub async fn idempotency_middleware(
                 // Conflict or InFlight
                 match entry {
                     IdempotencyEntry::Completed(record) => {
-                        if check_idempotency_conflict(
-                            &canonical_target,
-                            &body_hash,
-                            &canonical_target,
-                            &record.body_hash,
-                        ) {
+                        // Scope key match implies canonical_target match.
+                        // Conflict if body hash differs.
+                        if body_hash != record.body_hash {
                             warn!(
                                 key = %idempotency_key,
                                 "Idempotency conflict detected (Completed)"
@@ -407,12 +410,9 @@ pub async fn idempotency_middleware(
                         notify,
                         ..
                     } => {
-                        if check_idempotency_conflict(
-                            &canonical_target,
-                            &body_hash,
-                            &canonical_target,
-                            &existing_hash,
-                        ) {
+                        // Scope key match implies canonical_target match.
+                        // Conflict if body hash differs.
+                        if body_hash != existing_hash {
                             warn!(
                                 key = %idempotency_key,
                                 "Idempotency conflict detected (InFlight)"
@@ -507,9 +507,11 @@ pub async fn idempotency_middleware(
 
 fn compute_body_hash(body: &[u8]) -> String {
     let result = digest(&SHA256, body);
-    let mut hex = String::with_capacity(result.as_ref().len() * 2);
-    for b in result.as_ref() {
-        hex.push_str(&format!("{b:02x}"));
+    let bytes = result.as_ref();
+    let mut hex = String::with_capacity(bytes.len() * 2);
+    for &b in bytes {
+        use std::fmt::Write;
+        let _ = write!(hex, "{b:02x}");
     }
     hex
 }
@@ -528,10 +530,18 @@ fn snapshot_headers(headers: &HeaderMap) -> Vec<(String, String)> {
     headers
         .iter()
         .filter_map(|(name, value)| {
+            let name_str = name.as_str();
+            // Filter transient headers
+            if matches!(
+                name_str.to_lowercase().as_str(),
+                "date" | "content-length" | "transfer-encoding" | "connection" | "x-request-id"
+            ) {
+                return None;
+            }
             value
                 .to_str()
                 .ok()
-                .map(|v| (name.as_str().to_string(), v.to_string()))
+                .map(|v| (name_str.to_string(), v.to_string()))
         })
         .collect()
 }
