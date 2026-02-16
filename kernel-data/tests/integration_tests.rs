@@ -281,3 +281,48 @@ async fn test_authorize_integrity_bypass_attempt() {
     let err = res.unwrap_err().to_string();
     assert!(err.contains("Tenant context integrity check failed"), "Should catch integrity violation: {}", err);
 }
+
+
+#[tokio::test]
+async fn test_connection_rejects_colon_injection() {
+    use kernel_core::auth::TenantId; // Import needed
+
+    let docker = clients::Cli::default();
+    let image = RunnableImage::from(Postgres::default()).with_tag("15-alpine");
+    let node = docker.run(image);
+    let port = node.get_host_port_ipv4(5432); // No await
+    let connection_string = format!("postgres://postgres:postgres@127.0.0.1:{}/postgres", port);
+
+    let db = Database::connect(&connection_string).await.expect("Failed to connect to DB");
+
+    // Initialize HMAC Secret for tests (using deterministic secret specific to tests)
+    // We need this because authorization expects it
+    let _ = kernel_data::init_hmac_secret_for_test("test_secret_for_integration_tests_colons");
+
+    // We can verify TenantId prevents creation.
+    // The previous implementation used unsafe transmute which is hard to simplify. 
+    // Since `TenantId::new` validates, we can just assert that.
+    // The `connection.rs` check is defense in depth for IF an invalid ID exists.
+    // To verify that check, we MUST bypass `TenantId` validation.
+    
+    // Safety: modifying internal string of TenantId.
+    // TenantId is a tuple struct `pub struct TenantId(String);`
+    // We can use transmute if we trust the layout is just String.
+    let _valid = TenantId::new("valid").unwrap();
+    let invalid: TenantId = unsafe {
+        std::mem::transmute::<String, TenantId>("invalid:id".to_string())
+    };
+
+    // We also need a TenantContext
+    let ctx = TenantContext::new(invalid, None);
+
+    // Now call with_tenant_tx
+    let res = with_tenant_tx(&db, &ctx, |_| Box::pin(async { Ok(()) })).await;
+    
+    assert!(res.is_err());
+    let err = res.unwrap_err().to_string();
+    assert!(err.contains("tenant_id must not contain ':'"), "Should match our new error check: {}", err);
+}
+
+// Removed test_hmac_secret_length_check as it's covered in security_tests.rs
+

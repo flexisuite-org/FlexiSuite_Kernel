@@ -26,6 +26,10 @@ pub fn init_hmac_secret_for_test(secret: impl Into<String>) -> Result<(), String
 }
 
 fn init_hmac_secret_from_string(secret: String) -> Result<(), String> {
+    if secret.is_empty() {
+        return Err("FLEXI_HMAC_SECRET cannot be empty".to_string());
+    }
+
     if secret.as_bytes().len() < 32 {
         return Err("FLEXI_HMAC_SECRET must be at least 32 bytes".to_string());
     }
@@ -90,6 +94,12 @@ where
 
     // 1. Set Token
     // Format: v2:kid:ts:nonce:tenant_id:sig
+
+    if ctx.tenant_id().as_str().contains(':') {
+        return Err(KernelError::TenantAuthorizationFailed(
+            "tenant_id must not contain ':'".into(),
+        ));
+    }
 
     let now = chrono::Utc::now().timestamp();
     let ts_str = now.to_string();
