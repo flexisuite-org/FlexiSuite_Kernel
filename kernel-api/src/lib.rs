@@ -68,7 +68,7 @@ pub async fn write_test(
     let action_id = Uuid::now_v7().to_string();
     record_action(
         &state,
-        &ctx.tenant_id,
+        ctx.tenant_id().clone(),
         &action_id,
         ActionStatus::Completed,
     )
@@ -101,7 +101,7 @@ pub async fn get_action_status(
     Extension(state): Extension<MiddlewareState>,
     Extension(ctx): Extension<TenantContext>,
 ) -> Result<Json<ActionStatusResponse>, StatusCode> {
-    if let Some(record) = get_action(&state, &ctx.tenant_id, &action_id).await {
+    if let Some(record) = get_action(&state, ctx.tenant_id().clone(), &action_id).await {
         return Ok(Json(ActionStatusResponse {
             action_id,
             status: record.status,

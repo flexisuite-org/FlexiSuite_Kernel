@@ -21,25 +21,21 @@ pub trait TenantRepository: private::Sealed + Send + Sync {
 
 #[async_trait]
 impl TenantRepository for TenantScoped<RawConnection> {
-    async fn create_entity(&self, active_model: entity_record::ActiveModel) -> kernel::Result<entity_record::Model> {
-        // tenant_id handling is implicitly enforced by RLS, but we also enforce it in application layer
-        // However, active_model usually comes with tenant_id set by the caller logic (business logic).
-        // If we want to strictly enforce it here, we would need to override it with context.
-        // But TenantRepository doesn't hold Context, only `with_tenant_tx` does.
-        // `with_tenant_tx` sets the RLS context.
-        // So RLS will reject if tenant_id doesn't match the current_setting.
+    async fn create_entity(&self, mut active_model: entity_record::ActiveModel) -> kernel::Result<entity_record::Model> {
+        // Enforce tenant scoping by overriding the tenant_id field
+        active_model.tenant_id = sea_orm::ActiveValue::Set(self.tenant_id.to_string());
         
-        let result = active_model.insert(&self.inner.0).await.map_err(KernelError::DbError)?;
+        let result = active_model.insert(&self.inner.0).await.map_err(KernelError::db_error)?;
         Ok(result)
     }
 
     async fn get_entity(&self, id: &str) -> kernel::Result<Option<entity_record::Model>> {
         // Since we have a composite primary key (id, tenant_id), we must provide both.
         // RLS will also filter this, but SeaORM requires both for the PK lookup.
-        let result = EntityRecord::find_by_id((id.to_string(), self.tenant_id.clone()))
+        let result = EntityRecord::find_by_id((id.to_string(), self.tenant_id.as_str().to_string()))
             .one(&self.inner.0)
             .await
-            .map_err(KernelError::DbError)?;
+            .map_err(KernelError::db_error)?;
         Ok(result)
     }
 }

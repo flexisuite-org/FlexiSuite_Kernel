@@ -1725,7 +1725,6 @@ dependencies = [
  "http",
  "http-body-util",
  "kernel-core",
- "kernel-data",
  "ring",
  "rusty_paseto",
  "serde",
@@ -1743,7 +1742,6 @@ name = "kernel-core"
 version = "0.1.0"
 dependencies = [
  "form_urlencoded",
- "sea-orm",
  "serde",
  "thiserror 1.0.69",
  "url",
@@ -1756,8 +1754,10 @@ dependencies = [
  "async-trait",
  "chrono",
  "futures",
+ "hex",
  "kernel-core",
  "migration",
+ "ring",
  "sea-orm",
  "sea-orm-migration",
  "serde",

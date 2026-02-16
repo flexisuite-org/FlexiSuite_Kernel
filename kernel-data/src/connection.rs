@@ -7,6 +7,7 @@ use sea_orm::{
 use tracing::{error, warn};
 use uuid::Uuid;
 use futures::future::BoxFuture;
+use ring::hmac;
 
 // Sealed Internal Wrapper
 pub struct RawConnection(pub(crate) DatabaseTransaction);
@@ -14,11 +15,11 @@ pub struct RawConnection(pub(crate) DatabaseTransaction);
 /// A wrapper around a database transaction that is guaranteed to be scoped to a specific tenant.
 pub struct TenantScoped<C> {
     pub(crate) inner: C,
-    pub(crate) tenant_id: String,
+    pub(crate) tenant_id: kernel_core::auth::TenantId,
 }
 
 impl<C> TenantScoped<C> {
-    pub(crate) fn new(inner: C, tenant_id: String) -> Self {
+    pub(crate) fn new(inner: C, tenant_id: kernel_core::auth::TenantId) -> Self {
         Self { inner, tenant_id }
     }
 }
@@ -48,16 +49,27 @@ where
     F: for<'c> FnOnce(&'c TenantScoped<RawConnection>) -> BoxFuture<'c, kernel::Result<R>> + Send,
     R: Send,
 {
-    let txn = pool.begin().await.map_err(KernelError::DbError)?;
+    let txn = pool.begin().await.map_err(KernelError::db_error)?;
 
     // 1. Set Token
     // Format: v2:kid:ts:nonce:tenant_id:sig
+
     let now = chrono::Utc::now().timestamp();
+    let ts_str = now.to_string();
+    let nonce = Uuid::now_v7().to_string();
+    let kid = "master";
+    let ver = "v2";
+
+    // HMAC Signature Calculation
+    let secret = std::env::var("FLEXI_HMAC_SECRET").unwrap_or_else(|_| "placeholder_secret".to_string());
+    let key = hmac::Key::new(hmac::HMAC_SHA256, secret.as_bytes());
+    let msg = format!("{}:{}:{}:{}:{}", ver, kid, ts_str, nonce, ctx.tenant_id());
+    let tag = hmac::sign(&key, msg.as_bytes());
+    let sig = hex::encode(tag.as_ref());
+
     let token = format!(
-        "v2:master:{}:{}:{}:mock_sig",
-        now,             // ts
-        Uuid::now_v7(), // nonce (unique per call)
-        ctx.tenant_id,   // tenant_id
+        "{}:{}:{}:{}:{}:{}",
+        ver, kid, ts_str, nonce, ctx.tenant_id(), sig
     );
 
     txn.execute(Statement::from_sql_and_values(
@@ -66,7 +78,7 @@ where
         [token.into()],
     ))
     .await
-    .map_err(KernelError::DbError)?;
+    .map_err(KernelError::db_error)?;
 
     // 2. Authorize
     txn.execute(Statement::from_string(
@@ -79,7 +91,7 @@ where
         KernelError::TenantAuthorizationFailed(e.to_string())
     })?;
 
-    let scoped = TenantScoped::new(RawConnection(txn), ctx.tenant_id.to_string());
+    let scoped = TenantScoped::new(RawConnection(txn), ctx.tenant_id().clone());
 
     match f(&scoped).await {
         Ok(result) => {
@@ -87,7 +99,7 @@ where
                 Ok(()) => Ok(result),
                 Err(commit_err) => {
                     error!(
-                        tenant_id = %ctx.tenant_id,
+                        tenant_id = %ctx.tenant_id(),
                         "commit failed (outcome unknown): {commit_err}"
                     );
                     Err(KernelError::CommitUnknown(commit_err.to_string()))
@@ -98,7 +110,7 @@ where
             if let Err(rollback_err) = scoped.rollback().await {
                error!("rollback failed: {rollback_err}");
             }
-            warn!(tenant_id = %ctx.tenant_id, "tx rolled back: {e}");
+            warn!(tenant_id = %ctx.tenant_id(), "tx rolled back: {e}");
             Err(e)
         }
     }

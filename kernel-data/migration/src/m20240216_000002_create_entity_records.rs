@@ -9,6 +9,7 @@ impl MigrationTrait for Migration {
         let db = manager.get_connection();
 
         // 1. Create Table
+        // 1. Create Table
         db.execute_unprepared(
             r#"
             CREATE TABLE IF NOT EXISTS flexi.entity_records (
@@ -22,17 +23,24 @@ impl MigrationTrait for Migration {
                 version INT NOT NULL DEFAULT 1,
                 PRIMARY KEY (id, tenant_id)
             );
+            "#,
+        ).await?;
 
+        // 2. Setup RLS
+        db.execute_unprepared(
+            r#"
             -- RLS Policy
             ALTER TABLE flexi.entity_records ENABLE ROW LEVEL SECURITY;
+            ALTER TABLE flexi.entity_records FORCE ROW LEVEL SECURITY;
 
+            DROP POLICY IF EXISTS tenant_isolation_policy ON flexi.entity_records;
             CREATE POLICY tenant_isolation_policy ON flexi.entity_records
                 FOR ALL
                 TO PUBLIC
                 USING (tenant_id = flexi.authorized_tenant_id());
             
             -- Index for performance
-            CREATE INDEX idx_entity_records_type ON flexi.entity_records (tenant_id, entity_type);
+            CREATE INDEX IF NOT EXISTS idx_entity_records_type ON flexi.entity_records (tenant_id, entity_type);
             "#,
         ).await?;
 
