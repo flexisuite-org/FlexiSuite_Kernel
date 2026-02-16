@@ -10,7 +10,7 @@ use rusty_paseto::prelude::*;
 use serde::Deserialize;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-pub use kernel_core::auth::TenantContext;
+pub use kernel_core::auth::{TenantContext, TenantId, UserId};
 
 #[derive(Debug)]
 enum AuthError {
@@ -137,7 +137,6 @@ fn verify_paseto_v4_public_token(
     validate_claims(claims)
 }
 
-use kernel_core::auth::{TenantId, UserId};
 
 fn validate_claims(claims: PasetoClaims) -> Result<TenantContext, AuthError> {
     let tenant_id = TenantId::new(&claims.tenant_id).map_err(|_| AuthError::Forbidden)?;

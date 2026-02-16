@@ -20,6 +20,10 @@ async fn test_tenant_isolation_rls() {
     // 1. Connect
     let db = Database::connect(&connection_string).await.expect("Failed to connect to DB");
 
+    // Initialize HMAC Secret for tests
+    unsafe { std::env::set_var("FLEXI_HMAC_SECRET", "test_secret_for_integration_tests"); }
+    let _ = kernel_data::init_hmac_secret();
+
     // 2. Run Migrations
     migration::Migrator::up(&db, None).await.expect("Failed to run migrations");
 
@@ -35,7 +39,9 @@ async fn test_tenant_isolation_rls() {
             ts bigint;
         BEGIN
             token_val := current_setting('flexi.tenant_token', true);
-            if token_val is null or token_val = '' then return; end if;
+            IF token_val IS NULL OR token_val = '' THEN
+                RAISE EXCEPTION 'Missing or empty tenant token';
+            END IF;
             
             parts := string_to_array(token_val, ':');
             -- v2:kid:ts:nonce:tenant_id:sig
@@ -118,15 +124,18 @@ async fn test_tenant_isolation_rls() {
     let ts_2 = ts_1 + 10; // Different timestamp, same second window
     
     // First insert (Succeeds)
-    db.execute_unprepared(&format!(
-        "INSERT INTO flexi.flexi_nonce (nonce, created_at) VALUES ('{}', to_timestamp({}))",
-        test_nonce, ts_1
+    use sea_orm::{Statement, DbBackend};
+    db.execute(Statement::from_sql_and_values(
+        DbBackend::Postgres,
+        "INSERT INTO flexi.flexi_nonce (nonce, created_at) VALUES ($1, to_timestamp($2))",
+        [test_nonce.into(), ts_1.into()],
     )).await.expect("First nonce insert should succeed");
     
     // Second insert with same nonce but different TS (Should fail via Trigger)
-    let res = db.execute_unprepared(&format!(
-        "INSERT INTO flexi.flexi_nonce (nonce, created_at) VALUES ('{}', to_timestamp({}))",
-        test_nonce, ts_2
+    let res = db.execute(Statement::from_sql_and_values(
+        DbBackend::Postgres,
+        "INSERT INTO flexi.flexi_nonce (nonce, created_at) VALUES ($1, to_timestamp($2))",
+        [test_nonce.into(), ts_2.into()],
     )).await;
     
     assert!(res.is_err(), "Second nonce insert with different TS should fail");

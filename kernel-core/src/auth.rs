@@ -1,8 +1,35 @@
 use std::fmt;
-use serde::{Deserialize, Serialize};
+use serde::de::{self, Visitor};
+use serde::{Deserialize, Deserializer, Serialize};
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, Debug, Serialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct TenantId(String);
+
+impl<'de> Deserialize<'de> for TenantId {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct TenantIdVisitor;
+
+        impl<'de> Visitor<'de> for TenantIdVisitor {
+            type Value = TenantId;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+                formatter.write_str("a valid tenant_id string")
+            }
+
+            fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                TenantId::new(value).map_err(de::Error::custom)
+            }
+        }
+
+        deserializer.deserialize_str(TenantIdVisitor)
+    }
+}
 
 impl TenantId {
     pub fn new(id: impl Into<String>) -> Result<Self, String> {
@@ -25,8 +52,34 @@ impl fmt::Display for TenantId {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, Debug, Serialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct UserId(String);
+
+impl<'de> Deserialize<'de> for UserId {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct UserIdVisitor;
+
+        impl<'de> Visitor<'de> for UserIdVisitor {
+            type Value = UserId;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+                formatter.write_str("a valid user_id string")
+            }
+
+            fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                UserId::new(value).map_err(de::Error::custom)
+            }
+        }
+
+        deserializer.deserialize_str(UserIdVisitor)
+    }
+}
 
 impl UserId {
     pub fn new(id: impl Into<String>) -> Result<Self, String> {
