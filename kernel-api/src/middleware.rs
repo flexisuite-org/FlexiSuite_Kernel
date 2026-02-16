@@ -89,7 +89,7 @@ pub enum IdempotencyEntry {
 
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub struct IdempotencyScopeKey {
-    tenant_id: String,
+    tenant_id: kernel_core::auth::TenantId,
     method: String,
     canonical_target: String,
     idempotency_key: String,
@@ -113,6 +113,12 @@ pub trait IdempotencyStore: Send + Sync {
 
 pub struct InMemoryIdempotencyStore {
     inner: Mutex<HashMap<IdempotencyScopeKey, IdempotencyEntry>>,
+}
+
+impl Default for InMemoryIdempotencyStore {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl InMemoryIdempotencyStore {
@@ -178,11 +184,10 @@ impl IdempotencyStore for InMemoryIdempotencyStore {
                 IdempotencyEntry::InFlight { expires_at, .. } => *expires_at > now,
                 IdempotencyEntry::Completed(record) => record.expires_at > now,
             };
-            if !keep {
-                if let IdempotencyEntry::InFlight { notify, .. } = entry {
+            if !keep
+                && let IdempotencyEntry::InFlight { notify, .. } = entry {
                     expired_inflight_notifies.push(notify.clone());
                 }
-            }
             keep
         });
         drop(lock);
@@ -199,7 +204,7 @@ impl IdempotencyStore for InMemoryIdempotencyStore {
 
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub struct ActionScopeKey {
-    tenant_id: String,
+    tenant_id: kernel_core::auth::TenantId,
     action_id: String,
 }
 
@@ -269,7 +274,7 @@ impl MiddlewareState {
 
 pub async fn record_action(
     state: &MiddlewareState,
-    tenant_id: &str,
+    tenant_id: kernel_core::auth::TenantId,
     action_id: &str,
     status: ActionStatus,
 ) {
@@ -277,7 +282,7 @@ pub async fn record_action(
     // O(N) cleanup removed from critical path
     lock.insert(
         ActionScopeKey {
-            tenant_id: tenant_id.to_string(),
+            tenant_id,
             action_id: action_id.to_string(),
         },
         ActionRecord {
@@ -289,13 +294,13 @@ pub async fn record_action(
 
 pub async fn get_action(
     state: &MiddlewareState,
-    tenant_id: &str,
+    tenant_id: kernel_core::auth::TenantId,
     action_id: &str,
 ) -> Option<ActionRecord> {
     let lock = state.action_store.lock().await;
     // O(N) cleanup removed from critical path
     lock.get(&ActionScopeKey {
-        tenant_id: tenant_id.to_string(),
+        tenant_id,
         action_id: action_id.to_string(),
     })
     .filter(|r| r.expires_at > Instant::now())
@@ -320,7 +325,7 @@ pub async fn idempotency_middleware(
                     return Err(StatusCode::BAD_REQUEST);
                 }
             };
-            if let Err(_) = validate_idempotency_key(key) {
+            if validate_idempotency_key(key).is_err() {
                 warn!(key = %key, "Invalid Idempotency-Key format");
                 return Err(StatusCode::BAD_REQUEST);
             }
@@ -345,7 +350,7 @@ pub async fn idempotency_middleware(
         .ok_or(StatusCode::UNAUTHORIZED)?;
 
     // Enrich span
-    tracing::Span::current().record("tenant_id", &tenant_ctx.tenant_id);
+    tracing::Span::current().record("tenant_id", &tenant_ctx.tenant_id().to_string());
     tracing::Span::current().record("method", method.as_str());
     tracing::Span::current().record("path", parts.uri.path());
 
@@ -356,7 +361,7 @@ pub async fn idempotency_middleware(
 
     // Uniqueness Scope: (tenant_id, method, canonical_target, key)
     let scope_key = IdempotencyScopeKey {
-        tenant_id: tenant_ctx.tenant_id.clone(),
+        tenant_id: tenant_ctx.tenant_id().clone(),
         method: method.as_str().to_string(),
         canonical_target: canonical_target.clone(),
         idempotency_key: idempotency_key.clone(),
