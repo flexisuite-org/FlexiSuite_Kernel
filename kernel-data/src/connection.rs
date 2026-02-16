@@ -21,6 +21,7 @@ pub fn init_hmac_secret() -> Result<(), String> {
     init_hmac_secret_from_string(secret)
 }
 
+#[cfg(feature = "test-utils")]
 pub fn init_hmac_secret_for_test(secret: impl Into<String>) -> Result<(), String> {
     init_hmac_secret_from_string(secret.into())
 }

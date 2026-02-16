@@ -44,6 +44,11 @@ impl TenantId {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+
+    #[cfg(feature = "test-utils")]
+    pub fn new_unchecked(id: impl Into<String>) -> Self {
+        Self(id.into())
+    }
 }
 
 impl fmt::Display for TenantId {

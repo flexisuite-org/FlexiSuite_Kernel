@@ -1757,6 +1757,7 @@ dependencies = [
  "futures",
  "hex",
  "kernel-core",
+ "kernel-data",
  "migration",
  "ring",
  "sea-orm",
