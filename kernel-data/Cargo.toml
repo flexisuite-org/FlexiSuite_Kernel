@@ -19,6 +19,7 @@ uuid = { version = "1.21.0", features = ["v7", "serde"] }
 futures = "0.3.32"
 ring = "0.17.14"
 hex = "0.4"
+redis = { version = "0.24", features = ["tokio-comp", "cluster-async", "connection-manager"] }
 
 [dev-dependencies]
 migration = { path = "./migration" }
