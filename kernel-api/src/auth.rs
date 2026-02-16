@@ -33,31 +33,61 @@ struct PasetoClaims {
 /// REQ-AUTH-SOURCE: Extract TenantContext from token or dev-headers (if debug)
 pub async fn auth_middleware(mut req: Request<Body>, next: Next) -> Result<Response, StatusCode> {
     let context = if let Some(header) = req.headers().get("Authorization") {
-        let value = header.to_str().map_err(|_| StatusCode::UNAUTHORIZED)?;
+        let value = header.to_str().map_err(|_| {
+            tracing::warn!("Invalid Authorization header encoding");
+            StatusCode::UNAUTHORIZED
+        })?;
         match verify_paseto_v4_public_from_env(value) {
             Ok(ctx) => ctx,
-            Err(AuthError::Unauthorized) => return Err(StatusCode::UNAUTHORIZED),
-            Err(AuthError::Forbidden) => return Err(StatusCode::FORBIDDEN),
+            Err(AuthError::Unauthorized) => {
+                tracing::warn!("PASETO token verification failed: Unauthorized");
+                return Err(StatusCode::UNAUTHORIZED);
+            }
+            Err(AuthError::Forbidden) => {
+                tracing::warn!("PASETO token verification failed: Forbidden (invalid claims)");
+                return Err(StatusCode::FORBIDDEN);
+            }
         }
     } else {
         #[cfg(debug_assertions)]
         {
-            if let Some(tenant_id) = req.headers().get("X-Tenant-Id") {
-                let id = tenant_id.to_str().map_err(|_| StatusCode::FORBIDDEN)?;
-                if !is_valid_principal(id) {
+            if let Some(tenant_id_header) = req.headers().get("X-Tenant-Id") {
+                let tenant_id = tenant_id_header.to_str().map_err(|_| {
+                    tracing::warn!("Invalid X-Tenant-Id header encoding");
+                    StatusCode::FORBIDDEN
+                })?;
+                if !is_valid_principal(tenant_id) {
+                    tracing::warn!(tenant_id = %tenant_id, "Invalid tenant_id in X-Tenant-Id");
                     return Err(StatusCode::FORBIDDEN);
                 }
+
+                let user_id = if let Some(user_id_header) = req.headers().get("X-User-Id") {
+                    let id = user_id_header.to_str().map_err(|_| {
+                        tracing::warn!("Invalid X-User-Id header encoding");
+                        StatusCode::FORBIDDEN
+                    })?;
+                    if !is_valid_principal(id) {
+                        tracing::warn!(user_id = %id, "Invalid user_id in X-User-Id");
+                        return Err(StatusCode::FORBIDDEN);
+                    }
+                    Some(id.to_string())
+                } else {
+                    None
+                };
+
                 TenantContext {
-                    tenant_id: id.to_string(),
-                    user_id: None,
+                    tenant_id: tenant_id.to_string(),
+                    user_id,
                 }
             } else {
+                tracing::warn!("Missing Authorization header (and no X-Tenant-Id for debug bypass)");
                 return Err(StatusCode::UNAUTHORIZED);
             }
         }
 
         #[cfg(not(debug_assertions))]
         {
+            tracing::warn!("Missing Authorization header");
             return Err(StatusCode::UNAUTHORIZED);
         }
     };
