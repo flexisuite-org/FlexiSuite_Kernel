@@ -19,6 +19,6 @@ thiserror = "1.0"
 url = "2.4"
 async-trait = "0.1"
 kernel-core = { path = "../../kernel-core" }
-kernel-api = { path = "../../kernel-api" }
+kernel-api = { path = "../../kernel-api", features = ["test-utils"] }
 tracing = "0.1.44"
 tracing-subscriber = "0.3.22"

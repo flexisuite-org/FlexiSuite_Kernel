@@ -85,7 +85,7 @@ pub async fn write_test(
         [
             (
                 HeaderName::from_static("x-action-id"),
-                HeaderValue::from_str(&action_id).unwrap(),
+                HeaderValue::from_str(&action_id).expect("UUID v7 is valid ASCII"),
             ),
             (
                 HeaderName::from_static("x-result-version"),

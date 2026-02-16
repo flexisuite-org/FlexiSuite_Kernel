@@ -16,7 +16,8 @@ pub(crate) mod private {
 pub trait TenantRepository: private::Sealed + Send + Sync {
     async fn create_entity(&self, active_model: entity_record::ActiveModel) -> kernel::Result<entity_record::Model>;
     async fn get_entity(&self, id: &str) -> kernel::Result<Option<entity_record::Model>>;
-    // TODO: Add more methods (update, list, etc.) as needed in 3-2-2
+    async fn update_entity(&self, id: &str, active_model: entity_record::ActiveModel) -> kernel::Result<entity_record::Model>;
+    async fn delete_entity(&self, id: &str) -> kernel::Result<()>;
 }
 
 #[async_trait]
@@ -37,5 +38,23 @@ impl TenantRepository for TenantScoped<RawConnection> {
             .await
             .map_err(KernelError::db_error)?;
         Ok(result)
+    }
+
+    async fn update_entity(&self, id: &str, mut active_model: entity_record::ActiveModel) -> kernel::Result<entity_record::Model> {
+        // Enforce tenant scoping by overriding the tenant_id field
+        active_model.tenant_id = sea_orm::ActiveValue::Set(self.tenant_id.to_string());
+        // Ensure ID matches
+        active_model.id = sea_orm::ActiveValue::Set(id.to_string());
+
+        let result = active_model.update(&self.inner.txn).await.map_err(KernelError::db_error)?;
+        Ok(result)
+    }
+
+    async fn delete_entity(&self, id: &str) -> kernel::Result<()> {
+        entity_record::Entity::delete_by_id((id.to_string(), self.tenant_id.to_string()))
+            .exec(&self.inner.txn)
+            .await
+            .map_err(KernelError::db_error)?;
+        Ok(())
     }
 }
