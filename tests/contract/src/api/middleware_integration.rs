@@ -89,6 +89,7 @@ async fn test_auth_logic_401_403() {
             .uri("/test")
             .method("POST")
             .header("X-Tenant-Id", "tenant-dev")
+            .header("Idempotency-Key", "auth-test-key")
             .body(Body::empty())
             .unwrap();
         let res = app.clone().oneshot(req).await.unwrap();
@@ -141,10 +142,6 @@ async fn test_idempotency_conflict_scope_and_action_lookup() {
     #[cfg(debug_assertions)]
     {
         builder = builder.header("X-Tenant-Id", "tenant-1");
-    }
-    #[cfg(not(debug_assertions))]
-    {
-        builder = builder.header("Authorization", "Bearer invalid");
     }
     let req = builder.body(Body::empty()).unwrap();
     let res = app.clone().oneshot(req).await.unwrap();
@@ -201,6 +198,7 @@ async fn test_quota_evaluation_priority_and_clipping() {
     let req = builder
         .header("X-Mock-Quota-System", "true")
         .header("X-Mock-Quota-Tenant", "true")
+        .header("Idempotency-Key", "quota-test-key")
         .body(Body::empty())
         .unwrap();
     let res = app.clone().oneshot(req).await.unwrap();

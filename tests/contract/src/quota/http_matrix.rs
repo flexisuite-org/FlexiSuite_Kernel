@@ -48,7 +48,7 @@ mod tests {
             assert_eq!(
                 retry_after.unwrap().1,
                 "10",
-                "Retry-After value hash must match"
+                "Retry-After value must match"
             );
         }
     }

@@ -5,7 +5,7 @@ use axum::{
     response::Response,
 };
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-use ring::signature::{ED25519, UnparsedPublicKey};
+use rusty_paseto::prelude::*;
 use serde::Deserialize;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -25,7 +25,7 @@ enum AuthError {
 struct PasetoClaims {
     tenant_id: String,
     user_id: Option<String>,
-    exp: Option<u64>,
+    exp: u64,
     nbf: Option<u64>,
 }
 
@@ -97,39 +97,20 @@ fn verify_paseto_v4_public_from_env(auth_header: &str) -> Result<TenantContext, 
 
 fn verify_paseto_v4_public_token(
     token: &str,
-    public_key: &[u8],
+    public_key_bytes: &[u8],
 ) -> Result<TenantContext, AuthError> {
-    // Supports v4.public with optional footer (implicit assertion is not used in this API layer).
-    let parts: Vec<&str> = token.split('.').collect();
-    if !(parts.len() == 3 || parts.len() == 4) || parts[0] != "v4" || parts[1] != "public" {
-        return Err(AuthError::Unauthorized);
-    }
-
-    let payload_and_sig = URL_SAFE_NO_PAD
-        .decode(parts[2])
+    let key_array: [u8; 32] = public_key_bytes
+        .try_into()
         .map_err(|_| AuthError::Unauthorized)?;
-    if payload_and_sig.len() < 64 {
-        return Err(AuthError::Unauthorized);
-    }
-    let split_at = payload_and_sig.len() - 64;
-    let payload = payload_and_sig[..split_at].to_vec();
-    let signature = payload_and_sig[split_at..].to_vec();
-    let footer = if parts.len() == 4 {
-        URL_SAFE_NO_PAD
-            .decode(parts[3])
-            .map_err(|_| AuthError::Unauthorized)?
-    } else {
-        Vec::new()
-    };
+    let key_raw = rusty_paseto::core::Key::<32>::from(key_array);
+    let key = PasetoAsymmetricPublicKey::<V4, Public>::from(&key_raw);
 
-    let msg = pae(&[b"v4.public.", &payload, &footer, b""]);
-    let verifier = UnparsedPublicKey::new(&ED25519, public_key);
-    verifier
-        .verify(&msg, &signature)
+    let verified_payload: serde_json::Value = PasetoParser::<V4, Public>::default()
+        .parse(token, &key)
         .map_err(|_| AuthError::Unauthorized)?;
 
     let claims: PasetoClaims =
-        serde_json::from_slice(&payload).map_err(|_| AuthError::Unauthorized)?;
+        serde_json::from_value(verified_payload).map_err(|_| AuthError::Unauthorized)?;
     validate_claims(claims)
 }
 
@@ -149,10 +130,8 @@ fn validate_claims(claims: PasetoClaims) -> Result<TenantContext, AuthError> {
             return Err(AuthError::Unauthorized);
         }
     }
-    if let Some(exp) = claims.exp {
-        if now >= exp {
-            return Err(AuthError::Unauthorized);
-        }
+    if now >= claims.exp {
+        return Err(AuthError::Unauthorized);
     }
 
     Ok(TenantContext {
@@ -175,16 +154,6 @@ fn unix_now() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
-}
-
-fn pae(pieces: &[&[u8]]) -> Vec<u8> {
-    let mut out = Vec::new();
-    out.extend_from_slice(&(pieces.len() as u64).to_le_bytes());
-    for piece in pieces {
-        out.extend_from_slice(&(piece.len() as u64).to_le_bytes());
-        out.extend_from_slice(piece);
-    }
-    out
 }
 
 fn extract_bearer_token(auth_header: &str) -> Option<&str> {

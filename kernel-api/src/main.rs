@@ -11,9 +11,19 @@ async fn main() {
 
     let app = build_app();
 
-    let addr = SocketAddr::from(([127, 0, 0, 1], 3000));
+    let addr_str = std::env::var("FLEXI_API_BIND_ADDR").unwrap_or_else(|_| "127.0.0.1:3000".to_string());
+    let addr: SocketAddr = addr_str.parse().unwrap_or_else(|_| {
+        eprintln!("Invalid bind address: {addr_str}");
+        std::process::exit(1);
+    });
     println!("Listening on http://{}", addr);
 
-    let listener = TcpListener::bind(addr).await.unwrap();
-    axum::serve(listener, app).await.unwrap();
+    let listener = TcpListener::bind(addr).await.unwrap_or_else(|e| {
+        eprintln!("Failed to bind to {addr}: {e}");
+        std::process::exit(1);
+    });
+    axum::serve(listener, app).await.unwrap_or_else(|e| {
+        eprintln!("Server error: {e}");
+        std::process::exit(1);
+    });
 }
