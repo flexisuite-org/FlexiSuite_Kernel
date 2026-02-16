@@ -421,8 +421,15 @@ pub async fn idempotency_middleware(
                             );
                             return Err(StatusCode::CONFLICT);
                         }
+                        
                         // Wait for the in-flight request to complete
-                        if tokio::time::timeout(state.config.inflight_wait_timeout, notify.notified())
+                        // Use enable() pattern to avoid missed wakeups if notify_waiters() fires 
+                        // between try_acquire returning and awaiting notified()
+                        let notified = notify.notified();
+                        tokio::pin!(notified);
+                        notified.as_mut().enable();
+
+                        if tokio::time::timeout(state.config.inflight_wait_timeout, notified)
                             .await
                             .is_err()
                         {
