@@ -19,6 +19,8 @@ use tokio::sync::{Mutex, Notify};
 use tracing::{error, info, instrument, warn};
 
 use crate::auth::TenantContext;
+use crate::metrics::record_api_latency;
+use axum::extract::MatchedPath;
 
 #[derive(Clone, Debug)]
 pub struct MiddlewareConfig {
@@ -667,4 +669,25 @@ fn violation_to_status(v: &QuotaViolation) -> StatusCode {
         QuotaLayer::SystemHardLimit => StatusCode::SERVICE_UNAVAILABLE,
         _ => StatusCode::TOO_MANY_REQUESTS,
     }
+}
+
+pub async fn metrics_middleware(req: Request<Body>, next: Next) -> Response {
+    let start = Instant::now();
+    let method = req.method().clone();
+
+    // Use MatchedPath if available to avoid high cardinality, fallback to path
+    let path = if let Some(matched_path) = req.extensions().get::<MatchedPath>() {
+        matched_path.as_str().to_owned()
+    } else {
+        "unmatched".to_string()
+    };
+
+    let response = next.run(req).await;
+
+    let duration = start.elapsed().as_secs_f64();
+    let status = response.status().as_u16();
+
+    record_api_latency(duration, method.as_str(), &path, status);
+
+    response
 }
