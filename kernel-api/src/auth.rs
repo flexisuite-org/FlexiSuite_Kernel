@@ -127,18 +127,26 @@ fn validate_claims(claims: PasetoClaims) -> Result<TenantContext, AuthError> {
 
     let now = unix_now();
     if let Some(nbf_str) = claims.nbf {
-        let nbf = DateTime::parse_from_rfc3339(&nbf_str)
+        let nbf_ts = DateTime::parse_from_rfc3339(&nbf_str)
             .map_err(|_| AuthError::Unauthorized)?
-            .timestamp() as u64;
+            .timestamp();
+        if nbf_ts < 0 {
+            return Err(AuthError::Unauthorized);
+        }
+        let nbf = nbf_ts as u64;
         if now < nbf {
             return Err(AuthError::Unauthorized);
         }
     }
-    
-    let exp = DateTime::parse_from_rfc3339(&claims.exp)
+
+    let exp_ts = DateTime::parse_from_rfc3339(&claims.exp)
         .map_err(|_| AuthError::Unauthorized)?
-        .timestamp() as u64;
-    
+        .timestamp();
+    if exp_ts < 0 {
+        return Err(AuthError::Unauthorized);
+    }
+    let exp = exp_ts as u64;
+
     if now >= exp {
         return Err(AuthError::Unauthorized);
     }
