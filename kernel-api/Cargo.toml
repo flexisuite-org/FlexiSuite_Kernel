@@ -19,3 +19,5 @@ async-trait = "0.1"
 kernel-core = { path = "../kernel-core" }
 tracing = "0.1.44"
 rusty_paseto = "0.7.1"
+chrono = { version = "0.4", features = ["serde"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

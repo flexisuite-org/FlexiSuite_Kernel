@@ -6,13 +6,56 @@ use axum::{
     body::Body,
     http::{Request, StatusCode},
 };
-use kernel_api::build_app;
+use kernel_api::middleware::{MiddlewareConfig, MiddlewareState, IdempotencyStore, IdempotencyEntry, IdempotencyScopeKey, IdempotencyRecord};
+use std::sync::Arc;
+use tokio::sync::Notify;
+use async_trait::async_trait;
+
 #[cfg(debug_assertions)]
 use serde_json::Value;
 use tower::ServiceExt;
 
 fn setup_app() -> axum::Router {
-    build_app()
+    setup_app_with_config(MiddlewareConfig::default(), None)
+}
+
+fn setup_app_with_config(config: MiddlewareConfig, store: Option<Arc<dyn IdempotencyStore>>) -> axum::Router {
+    let state = if let Some(s) = store {
+        MiddlewareState::with_store(config, s)
+    } else {
+        MiddlewareState::new(config)
+    };
+    kernel_api::build_app_with_state(state)
+}
+
+#[cfg(debug_assertions)]
+struct NotifyingStore {
+    inner: Arc<dyn IdempotencyStore>,
+    notify: Arc<Notify>,
+}
+
+#[cfg(debug_assertions)]
+#[async_trait]
+impl IdempotencyStore for NotifyingStore {
+    async fn get(&self, key: &IdempotencyScopeKey) -> Option<IdempotencyEntry> {
+        self.inner.get(key).await
+    }
+    async fn try_acquire(&self, key: IdempotencyScopeKey, hash: String, ttl: std::time::Duration) -> Option<IdempotencyEntry> {
+        let res = self.inner.try_acquire(key, hash, ttl).await;
+        if res.is_none() {
+            self.notify.notify_one();
+        }
+        res
+    }
+    async fn complete(&self, key: IdempotencyScopeKey, record: IdempotencyRecord) {
+        self.inner.complete(key, record).await
+    }
+    async fn release_inflight(&self, key: &IdempotencyScopeKey) {
+        self.inner.release_inflight(key).await
+    }
+    async fn cleanup(&self) {
+        self.inner.cleanup().await
+    }
 }
 
 fn build_idempotent_post(key: &str, body: &str) -> Request<Body> {
@@ -219,7 +262,12 @@ async fn test_quota_evaluation_priority_and_clipping() {
 #[tokio::test]
 #[cfg(debug_assertions)]
 async fn test_idempotency_inflight_concurrency() {
-    let app = setup_app();
+    let notify = Arc::new(Notify::new());
+    let store = Arc::new(NotifyingStore {
+        inner: Arc::new(kernel_api::middleware::InMemoryIdempotencyStore::new()),
+        notify: notify.clone(),
+    });
+    let app = setup_app_with_config(MiddlewareConfig::default(), Some(store));
 
     let t1 = tokio::spawn({
         let app = app.clone();
@@ -231,9 +279,10 @@ async fn test_idempotency_inflight_concurrency() {
 
     let t2 = tokio::spawn({
         let app = app.clone();
+        let notify = notify.clone();
         async move {
-            // Ensure t1 starts first to trigger InFlight state
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            // Wait until t1 has entered the middleware and acquired the in-flight lock
+            notify.notified().await;
             let req = build_idempotent_post("key-concurrent", "payload-c");
             app.oneshot(req).await.unwrap()
         }
