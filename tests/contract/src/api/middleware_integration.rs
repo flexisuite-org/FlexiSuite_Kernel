@@ -10,6 +10,7 @@ use kernel_api::middleware::{MiddlewareConfig, MiddlewareState, IdempotencyStore
 use std::sync::Arc;
 use tokio::sync::Notify;
 use async_trait::async_trait;
+use sea_orm::{MockDatabase, DatabaseBackend};
 
 #[cfg(debug_assertions)]
 use serde_json::Value;
@@ -25,7 +26,11 @@ fn setup_app_with_config(config: MiddlewareConfig, store: Option<Arc<dyn Idempot
     } else {
         MiddlewareState::new(config)
     };
-    let (app, _cleanup) = kernel_api::build_app_with_state(state);
+
+    let db = MockDatabase::new(DatabaseBackend::Postgres)
+        .into_connection();
+
+    let (app, _cleanup) = kernel_api::build_app_with_state(state, db);
     app
 }
 
