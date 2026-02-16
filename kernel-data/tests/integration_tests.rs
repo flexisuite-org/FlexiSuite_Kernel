@@ -9,24 +9,6 @@ use testcontainers_modules::postgres::Postgres;
 use uuid::Uuid;
 use kernel_data::entities::entity_record;
 
-// We need a way to run migrations. Since migration crate is internal to kernel-data or separate?
-// kernel-data re-exports nothing about migration.
-// We might need to add `kernel-data-migration` as a dev-dependency or access it if it's in workspace.
-// Looking at file structure, migration is a member of workspace or inside kernel-data?
-// It was `kernel-data/migration`.
-// Let's assume we can rely on `sea_orm_migration` to run it if we import the migration crate.
-// But wait, `integration_tests.rs` is outside the crate structure (tests/ folder).
-// We need `kernel_migration` crate available.
-// Let's check Cargo.toml of `kernel-data` again. It has `migration` member?
-// No, it likely has a workspace structure or `migration` is a separate crate.
-// Based on previous `ls`, `migration` is inside `kernel-data`.
-// If it is a library crate inside, we might need to add it to dev-dependencies of `kernel-data`?
-// Or just reference it if it's part of the lib?
-// Usually `migration` is a separate crate.
-// Let's assume for now we just `include!` it or use `sea_orm::Schema` to create tables if migration crate is hard to link.
-// BETTER: The migration crate is defined in `kernel-data/migration/Cargo.toml`.
-// We should add it as a dev-dependency to `kernel-data` to run it.
-
 #[tokio::test]
 async fn test_tenant_isolation_rls() {
     let docker = clients::Cli::default();
@@ -89,18 +71,20 @@ async fn test_tenant_isolation_rls() {
         DROP POLICY IF EXISTS tenant_isolation_policy ON flexi.entity_records;
         CREATE POLICY tenant_isolation_policy ON flexi.entity_records
             FOR ALL TO PUBLIC
-            USING (tenant_id = flexi.authorized_tenant_id());
+            USING (tenant_id = flexi.authorized_tenant_id())
+            WITH CHECK (tenant_id = flexi.authorized_tenant_id());
     "#).await.unwrap();
     // 3. Test Logic
-    let tenant_a = TenantContext { tenant_id: "tenant-a".to_string(), user_id: Some("user-1".to_string()) };
-    let tenant_b = TenantContext { tenant_id: "tenant-b".to_string(), user_id: Some("user-2".to_string()) };
+    use kernel_core::auth::{TenantId, UserId};
+    let tenant_a = TenantContext::new(TenantId::new("tenant-a").unwrap(), Some(UserId::new("user-1").unwrap()));
+    let tenant_b = TenantContext::new(TenantId::new("tenant-b").unwrap(), Some(UserId::new("user-2").unwrap()));
     
     let record_id = Uuid::now_v7().to_string();
 
     // A. Insert as Tenant A
     let record_id_a = record_id.clone();
     with_tenant_tx(&db, &tenant_a, |repo| Box::pin(async move {
-        insert_record(repo, record_id_a, "tenant-a", "bar").await
+        insert_record(repo, record_id_a, "bar").await
     })).await.expect("Tenant A insert failed");
 
     // B. Read as Tenant A (Should succeed)
@@ -122,13 +106,13 @@ async fn test_tenant_isolation_rls() {
     // D. Insert as Tenant B (Should succeed independent of A)
     let record_id_b = record_id.clone();
     with_tenant_tx(&db, &tenant_b, |repo| Box::pin(async move {
-        insert_record(repo, record_id_b, "tenant-b", "baz").await
+        insert_record(repo, record_id_b, "baz").await
     })).await.expect("Tenant B insert failed");
     
     // E. Verify uniqueness allows same ID for different tenants (if PK allows)
     // Our PK is (id, tenant_id), so this works.
     
-    // F. Global Nonce Uniqueness Test
+    // f. Global Nonce Uniqueness Test
     let test_nonce = "once-only-nonce";
     let ts_1 = chrono::Utc::now().timestamp();
     let ts_2 = ts_1 + 10; // Different timestamp, same second window
@@ -150,10 +134,10 @@ async fn test_tenant_isolation_rls() {
     assert!(err.contains("Nonce already used"), "Error message should mention nonce usage: {}", err);
 }
 
-async fn insert_record(repo: &TenantScoped<RawConnection>, id: String, tenant: &str, val: &str) -> kernel::Result<()> {
+async fn insert_record(repo: &TenantScoped<RawConnection>, id: String, val: &str) -> kernel::Result<()> {
     let active_model = entity_record::ActiveModel {
         id: ActiveValue::Set(id),
-        tenant_id: ActiveValue::Set(tenant.to_string()),
+        // tenant_id will be overwritten by repository correctly
         entity_type: ActiveValue::Set("test".to_string()),
         content: ActiveValue::Set(serde_json::json!({"foo": val})),
         ..Default::default()

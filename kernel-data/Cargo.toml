@@ -2,6 +2,7 @@
 name = "kernel-data"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.88"
 
 [dependencies]
 tokio = { version = "1.32", features = ["full"] }
@@ -16,6 +17,8 @@ serde_json = "1.0"
 chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1.21.0", features = ["v7", "serde"] }
 futures = "0.3.32"
+ring = "0.17.14"
+hex = "0.4"
 
 [dev-dependencies]
 migration = { path = "./migration" }
