@@ -1,29 +1,22 @@
 use thiserror::Error;
 
-#[derive(Error, Debug)]
+pub type Result<T> = std::result::Result<T, KernelError>;
+
+#[derive(Debug, Error)]
 pub enum KernelError {
     #[error("Database error: {0}")]
-    DbError(String),
+    DbError(#[from] sea_orm::DbErr),
+
+    #[error("Data error: {0}")]
+    DataError(#[from] kernel_data::DataError),
 
     #[error("Tenant authorization failed: {0}")]
     TenantAuthorizationFailed(String),
 
-    #[error("Commit failed with unknown outcome: {0}")]
+    #[error("Commit failed: {0}")]
     CommitUnknown(String),
 
-    /// Used for features that are planned but not yet implemented.
-    /// In production, this should be avoided or gated behind feature flags.
-    #[error("Not implemented: {0}")]
-    NotImplemented(String),
-
-    #[error("Validation error: {0}")]
-    ValidationError(String),
+    // Other errors...
 }
 
-impl KernelError {
-    pub fn db_error<E: std::fmt::Display>(e: E) -> Self {
-        Self::DbError(e.to_string())
-    }
-}
-
-pub type Result<T> = std::result::Result<T, KernelError>;
+// Helper to convert DataError to KernelError (impl From is derived)

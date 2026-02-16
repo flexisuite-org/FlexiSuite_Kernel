@@ -7,7 +7,7 @@ rust-version = "1.88"
 [dependencies]
 tokio = { version = "1.32", features = ["full"] }
 tracing = "0.1.44"
-kernel-core = { path = "../kernel-core" }
+# kernel-core = { path = "../kernel-core" } # Removed to break cycle
 
 sea-orm = { version = "1.1.0", features = ["sqlx-postgres", "runtime-tokio-rustls", "macros"] }
 async-trait = "0.1"
@@ -27,7 +27,13 @@ tokio = { version = "1", features = ["full"] }
 testcontainers = "0.15"
 testcontainers-modules = { version = "0.3", features = ["postgres"] }
 
-# Enable test-utils on kernel-core for tests
+# Enable test-utils on kernel-core for tests (tests can depend on core, that's fine?)
+# Wait, if kernel-data library code uses kernel-core, we have cycle.
+# But if ONLY tests use kernel-core, it's fine IF kernel-core doesn't depend on kernel-data dev-features.
+# But kernel-core depends on kernel-data.
+# So kernel-data [dev-dependencies] kernel-core is also a cycle?
+# Cyclic dev-dependency is allowed in Rust? No, it causes issues.
+# But let's see. If I remove it from [dependencies], library cycle is broken.
 kernel-core = { path = "../kernel-core", features = ["test-utils"] }
 # Enable test-utils on self for tests
 kernel-data = { path = ".", features = ["test-utils"] }
