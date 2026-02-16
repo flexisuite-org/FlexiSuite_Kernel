@@ -3,7 +3,7 @@ use kernel_core::kernel;
 use kernel_data::connection::{with_tenant_tx, TenantScoped, RawConnection};
 use kernel_data::repository::TenantRepository;
 use migration::MigratorTrait;
-use sea_orm::{Database, ActiveValue, ConnectionTrait};
+use sea_orm::{Database, ActiveValue, ConnectionTrait, TransactionTrait, Statement, DbBackend};
 use testcontainers::{clients, RunnableImage};
 use testcontainers_modules::postgres::Postgres;
 use uuid::Uuid;
@@ -22,7 +22,13 @@ async fn test_tenant_isolation_rls() {
 
     // Initialize HMAC Secret for tests
     unsafe { std::env::set_var("FLEXI_HMAC_SECRET", "test_secret_for_integration_tests"); }
-    let _ = kernel_data::init_hmac_secret();
+    if let Err(e) = kernel_data::init_hmac_secret() {
+        // Assert it's the expected "already initialized" error if it fails
+        assert!(e.contains("already initialized"), "Unexpected error from init_hmac_secret: {}", e);
+    }
+
+    // Verify Role Exists (Grant statements in migration depend on it)
+    db.execute_unprepared("DO $$ BEGIN IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = 'flexi') THEN CREATE ROLE flexi; END IF; END $$;").await.expect("Failed to create role flexi");
 
     // 2. Run Migrations
     migration::Migrator::up(&db, None).await.expect("Failed to run migrations");
@@ -30,15 +36,15 @@ async fn test_tenant_isolation_rls() {
     // Mock Authorize Function (Simpler for test, or copy exact one)
     db.execute_unprepared(r#"
         DROP FUNCTION IF EXISTS flexi.authorize_tenant();
-        CREATE OR REPLACE FUNCTION flexi.authorize_tenant() RETURNS void AS $$
+        DROP FUNCTION IF EXISTS flexi.authorize_tenant(text);
+        CREATE OR REPLACE FUNCTION flexi.authorize_tenant(token_val text) RETURNS void AS $$
         DECLARE
-            token_val text;
             parts text[];
             tenant_id_val text;
             nonce_val text;
             ts bigint;
+            secret text;
         BEGIN
-            token_val := current_setting('flexi.tenant_token', true);
             IF token_val IS NULL OR token_val = '' THEN
                 RAISE EXCEPTION 'Missing or empty tenant token';
             END IF;
@@ -56,15 +62,31 @@ async fn test_tenant_isolation_rls() {
                 RAISE EXCEPTION 'Nonce already used: %', nonce_val;
             END;
             
+            secret := current_setting('flexi.hmac_secret', true);
             PERFORM set_config('flexi.current_tenant', tenant_id_val, true);
+            PERFORM set_config('flexi.ctx_sig', encode(hmac(tenant_id_val, secret, 'sha256'), 'hex'), true);
         END;
         $$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = flexi, pg_catalog, pg_temp;
     "#).await.unwrap();
 
     db.execute_unprepared(r#"
         CREATE OR REPLACE FUNCTION flexi.authorized_tenant_id() RETURNS text AS $$
+        DECLARE
+            tid text;
+            sig text;
+            secret text;
         BEGIN
-            RETURN current_setting('flexi.current_tenant', true);
+            tid := current_setting('flexi.current_tenant', true);
+            if tid IS NULL OR tid = '' THEN RETURN NULL; END IF;
+
+            sig := current_setting('flexi.ctx_sig', true);
+            secret := current_setting('flexi.hmac_secret', true);
+
+            IF sig != encode(hmac(tid, secret, 'sha256'), 'hex') THEN
+                RAISE EXCEPTION 'Tenant context integrity check failed';
+            END IF;
+
+            RETURN tid;
         END;
         $$ LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = flexi, pg_catalog, pg_temp;
     "#).await.unwrap();
@@ -153,4 +175,107 @@ async fn insert_record(repo: &TenantScoped<RawConnection>, id: String, val: &str
     };
     repo.create_entity(active_model).await?;
     Ok(())
+}
+
+#[tokio::test]
+async fn test_migration_succeeds_without_flexi_role() {
+    let docker = clients::Cli::default();
+    let image = RunnableImage::from(Postgres::default()).with_tag("15-alpine");
+    let node = docker.run(image);
+    let port = node.get_host_port_ipv4(5432);
+    let connection_string = format!("postgres://postgres:postgres@127.0.0.1:{}/postgres", port);
+
+    let db = Database::connect(&connection_string).await.expect("Failed to connect to DB");
+
+    // Ensure role flexi does NOT exist (should be default in fresh PG, but good to check)
+    let rows = db.query_all(Statement::from_sql_and_values(
+        DbBackend::Postgres,
+        "SELECT 1 FROM pg_roles WHERE rolname = 'flexi'",
+        []
+    )).await.expect("Failed to query roles");
+    assert_eq!(rows.len(), 0, "Role flexi should not exist yet");
+
+    // Run Migrations
+    migration::Migrator::up(&db, None).await.expect("Migration failed when role flexi is missing");
+
+    // Verify schema exists
+    let schema_exists = db.query_all(Statement::from_sql_and_values(
+        DbBackend::Postgres,
+        "SELECT 1 FROM information_schema.schemata WHERE schema_name = 'flexi'",
+        []
+    )).await.expect("Failed to query schema");
+    assert_eq!(schema_exists.len(), 1, "Schema flexi should exist");
+}
+
+#[tokio::test]
+async fn test_authorize_fails_without_secret() {
+    let docker = clients::Cli::default();
+    let image = RunnableImage::from(Postgres::default()).with_tag("15-alpine");
+    let node = docker.run(image);
+    let port = node.get_host_port_ipv4(5432);
+    let connection_string = format!("postgres://postgres:postgres@127.0.0.1:{}/postgres", port);
+
+    let db = Database::connect(&connection_string).await.expect("Failed to connect to DB");
+
+    // Create role so migration has full effect
+    db.execute_unprepared("CREATE ROLE flexi").await.ok(); 
+
+    migration::Migrator::up(&db, None).await.expect("Failed to run migrations");
+
+    // Do NOT set flexi.hmac_secret
+
+    // Try to call authorize_tenant
+    let now = chrono::Utc::now().timestamp();
+    let token = format!("v2:kid:{}:nonce:tenant:sig", now);
+
+    let res = db.execute(Statement::from_sql_and_values(
+        DbBackend::Postgres,
+        "SELECT flexi.authorize_tenant($1)",
+        [token.into()]
+    )).await;
+    
+    assert!(res.is_err());
+    let err = res.unwrap_err().to_string();
+    assert!(err.contains("HMAC secret not set"), "Error should be about missing secret: {}", err);
+}
+
+#[tokio::test]
+async fn test_authorize_integrity_bypass_attempt() {
+    let docker = clients::Cli::default();
+    let image = RunnableImage::from(Postgres::default()).with_tag("15-alpine");
+    let node = docker.run(image);
+    let port = node.get_host_port_ipv4(5432);
+    let connection_string = format!("postgres://postgres:postgres@127.0.0.1:{}/postgres", port);
+
+    let db = Database::connect(&connection_string).await.expect("Failed to connect to DB");
+    db.execute_unprepared("CREATE ROLE flexi").await.ok(); 
+    migration::Migrator::up(&db, None).await.expect("Failed to run migrations");
+
+    // Use a transaction to ensure session state (GUCs) persists across calls
+    let txn = db.begin().await.expect("Failed to begin transaction");
+
+    // Set a secret
+    txn.execute(Statement::from_sql_and_values(
+        DbBackend::Postgres, 
+        "SELECT set_config('flexi.hmac_secret', 'secret', true)", 
+        []
+    )).await.expect("Failed to set secret");
+
+    // 1. Set current_tenant manually (Simulating attack)
+    txn.execute(Statement::from_sql_and_values(
+        DbBackend::Postgres,
+        "SELECT set_config('flexi.current_tenant', 'attacker', true)",
+        []
+    )).await.expect("Failed to set tenant");
+    
+    // 2. Try to call authorized_tenant_id()
+    let res = txn.query_one(Statement::from_sql_and_values(
+        DbBackend::Postgres,
+        "SELECT flexi.authorized_tenant_id()",
+        []
+    )).await;
+
+    assert!(res.is_err());
+    let err = res.unwrap_err().to_string();
+    assert!(err.contains("Tenant context integrity check failed"), "Should catch integrity violation: {}", err);
 }
