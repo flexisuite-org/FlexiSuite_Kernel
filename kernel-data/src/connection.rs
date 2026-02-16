@@ -39,8 +39,11 @@ fn init_hmac_secret_from_string(secret: String) -> Result<(), String> {
         .map_err(|_| "HMAC secret already initialized".to_string())
 }
 
-fn get_hmac_secret() -> &'static [u8] {
-    HMAC_SECRET.get().expect("HMAC secret not initialized. Call init_hmac_secret() at startup.")
+fn get_hmac_secret() -> Result<&'static [u8], KernelError> {
+    HMAC_SECRET.get().map(|s| s.as_slice()).ok_or_else(|| {
+        error!("HMAC secret not initialized");
+        KernelError::TenantAuthorizationFailed("HMAC secret not initialized".to_string())
+    })
 }
 
 // Sealed Internal Wrapper
@@ -113,7 +116,7 @@ where
     let ver = "v2";
 
     // HMAC Signature Calculation
-    let secret = get_hmac_secret();
+    let secret = get_hmac_secret()?;
     let key = hmac::Key::new(hmac::HMAC_SHA256, secret);
     let msg = format!("{}:{}:{}:{}:{}", ver, kid, ts_str, nonce, ctx.tenant_id());
     let tag = hmac::sign(&key, msg.as_bytes());
