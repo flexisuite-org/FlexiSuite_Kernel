@@ -11,19 +11,6 @@ async fn main() {
         .with(tracing_subscriber::fmt::layer())
         .init();
 
-    kernel_api::metrics::init_metrics();
-
-    if let Some(profile) = kernel_api::profile::load_profile() {
-        let matched = kernel_api::profile::check_environment(&profile);
-        kernel_api::metrics::set_slo_env_match(matched);
-        if !matched {
-            tracing::warn!("SLO environment profile mismatch");
-        }
-    } else {
-        tracing::warn!("SLO profile not found");
-        kernel_api::metrics::set_slo_env_match(false);
-    }
-
     if let Err(msg) = kernel_api::auth::init_auth_config() {
         eprintln!("kernel-api startup error (auth): {msg}");
         std::process::exit(1);

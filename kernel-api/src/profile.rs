@@ -14,7 +14,7 @@ pub struct SloProfile {
     pub api_node: ApiNodeConfig,
     // Other fields are loaded but maybe not checked by api-node itself
     #[serde(flatten)]
-    pub other: serde_yml::Value,
+    pub other: serde_yaml::Value,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -45,7 +45,7 @@ pub fn load_profile() -> Option<SloProfile> {
             match File::open(path) {
                 Ok(file) => {
                     let reader = BufReader::new(file);
-                    match serde_yml::from_reader(reader) {
+                    match serde_yaml::from_reader(reader) {
                         Ok(profile) => return Some(profile),
                         Err(e) => {
                             error!("Failed to parse SLO profile: {}", e);

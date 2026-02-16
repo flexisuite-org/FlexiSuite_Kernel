@@ -12,14 +12,11 @@ use uuid::Uuid;
 use crate::auth::{TenantContext, auth_middleware};
 use crate::middleware::{
     ActionStatus, MiddlewareConfig, MiddlewareState, get_action, idempotency_middleware,
-    metrics_middleware, quota_middleware, record_action,
+    quota_middleware, record_action,
 };
-use prometheus::{Encoder, TextEncoder};
 
 pub mod auth;
-pub mod metrics;
 pub mod middleware;
-pub mod profile;
 
 #[derive(Serialize)]
 pub struct TestWriteResponse {
@@ -41,9 +38,7 @@ pub fn build_app(config: MiddlewareConfig) -> (Router, JoinHandle<()>) {
 pub fn build_app_with_state(state: MiddlewareState) -> (Router, JoinHandle<()>) {
     let cleanup_handle = state.start_cleanup_task();
 
-    let public_router = Router::new()
-        .route("/health", get(|| async { "OK" }))
-        .route("/metrics", get(metrics_handler));
+    let public_router = Router::new().route("/health", get(|| async { "OK" }));
 
     let protected_router = Router::new()
         .route("/test", post(write_test).put(write_test))
@@ -57,18 +52,9 @@ pub fn build_app_with_state(state: MiddlewareState) -> (Router, JoinHandle<()>) 
         Router::new()
             .merge(public_router)
             .merge(protected_router)
-            .layer(from_fn(metrics_middleware))
             .layer(Extension(state)),
         cleanup_handle,
     )
-}
-
-async fn metrics_handler() -> String {
-    let encoder = TextEncoder::new();
-    let metric_families = prometheus::gather();
-    let mut buffer = vec![];
-    encoder.encode(&metric_families, &mut buffer).unwrap();
-    String::from_utf8(buffer).unwrap()
 }
 
 pub async fn write_test(
