@@ -1,18 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-source "$(dirname "${BASH_SOURCE[0]}")/lib-search.sh"
-
-[[ -f docs/implementation_plan.md ]]
-[[ -f docs/verification_matrix.md ]]
-
-impl_reqs=$(search_tokens 'REQ-[A-Z0-9-]+' docs/implementation_plan.md | sort -u)
-matrix_reqs=$(search_tokens 'REQ-[A-Z0-9-]+' docs/verification_matrix.md | sort -u)
-
-if [[ "$impl_reqs" != "$matrix_reqs" ]]; then
-  echo "REQ ID mismatch between implementation_plan and verification_matrix"
-  diff <(echo "$impl_reqs") <(echo "$matrix_reqs") || true
-  exit 1
-fi
+# Run the Traceability Linter
+echo "Running Traceability Linter..."
+cargo run -q -p ops-linters --bin traceability-linter -- --path .
 
 echo "traceability lint passed"
