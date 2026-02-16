@@ -10,11 +10,7 @@ use rusty_paseto::prelude::*;
 use serde::Deserialize;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-#[derive(Clone, Debug)]
-pub struct TenantContext {
-    pub tenant_id: String,
-    pub user_id: Option<String>,
-}
+pub use kernel_core::auth::TenantContext;
 
 #[derive(Debug)]
 enum AuthError {
