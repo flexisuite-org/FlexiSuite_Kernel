@@ -25,7 +25,8 @@ fn setup_app_with_config(config: MiddlewareConfig, store: Option<Arc<dyn Idempot
     } else {
         MiddlewareState::new(config)
     };
-    kernel_api::build_app_with_state(state)
+    let (app, _cleanup) = kernel_api::build_app_with_state(state);
+    app
 }
 
 #[cfg(debug_assertions)]
