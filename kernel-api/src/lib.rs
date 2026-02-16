@@ -31,8 +31,8 @@ pub struct ActionStatusResponse {
     pub status: ActionStatus,
 }
 
-pub fn build_app(config: MiddlewareConfig) -> (Router, JoinHandle<()>) {
-    build_app_with_state(MiddlewareState::new(config))
+pub async fn build_app(config: MiddlewareConfig) -> (Router, JoinHandle<()>) {
+    build_app_with_state(MiddlewareState::new_with_redis(config).await)
 }
 
 pub fn build_app_with_state(state: MiddlewareState) -> (Router, JoinHandle<()>) {
