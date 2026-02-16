@@ -2,7 +2,7 @@ use sea_orm::entity::prelude::*;
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, PartialEq, DeriveEntityModel, Serialize, Deserialize)]
-#[sea_orm(table_name = "entity_records")]
+#[sea_orm(table_name = "entity_records", schema_name = "flexi")]
 pub struct Model {
     #[sea_orm(primary_key, auto_increment = false)]
     pub id: String, // UUID v7
