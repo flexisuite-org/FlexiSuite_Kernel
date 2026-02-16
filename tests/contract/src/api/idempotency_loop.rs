@@ -8,7 +8,7 @@ use axum::{
 };
 use tower::ServiceExt; // for oneshot
 use kernel_api::middleware::{MiddlewareConfig, MiddlewareState, idempotency_middleware};
-use kernel_api::auth::TenantContext;
+use kernel_api::auth::{TenantContext, TenantId, UserId};
 use std::time::Duration;
 use tokio::task::JoinSet;
 
@@ -37,10 +37,10 @@ async fn test_idempotency_loop_limit() {
     let mut set = JoinSet::new();
     let num_requests = 20; 
     
-    let tenant_ctx = TenantContext {
-        tenant_id: "tenant-1".to_string(),
-        user_id: Some("user-1".to_string()),
-    };
+    let tenant_ctx = TenantContext::new(
+        TenantId::new("tenant-1").unwrap(),
+        Some(UserId::new("user-1").unwrap()),
+    );
 
     for _ in 0..num_requests {
         let app = app.clone();

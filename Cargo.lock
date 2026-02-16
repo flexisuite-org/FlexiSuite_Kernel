@@ -701,6 +701,7 @@ dependencies = [
  "kernel-api",
  "kernel-core",
  "reqwest",
+ "sea-orm",
  "serde",
  "serde_json",
  "thiserror 1.0.69",
@@ -1728,6 +1729,7 @@ dependencies = [
  "kernel-data",
  "ring",
  "rusty_paseto",
+ "sea-orm",
  "serde",
  "serde_json",
  "tokio",
@@ -1742,10 +1744,15 @@ dependencies = [
 name = "kernel-core"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "form_urlencoded",
+ "once_cell",
+ "regex",
  "serde",
+ "serde_json",
  "thiserror 1.0.69",
  "url",
+ "uuid",
 ]
 
 [[package]]
