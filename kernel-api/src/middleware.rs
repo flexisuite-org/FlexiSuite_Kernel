@@ -306,11 +306,6 @@ pub async fn idempotency_middleware(
     let (parts, body) = req.into_parts();
     let method = parts.method.clone();
 
-    // Only apply to write methods
-    if method == Method::GET || method == Method::HEAD || method == Method::OPTIONS {
-        return Ok(next.run(Request::from_parts(parts, body)).await);
-    }
-
     let idempotency_key = match parts.headers.get("Idempotency-Key") {
         Some(val) => {
             let key = match val.to_str() {
@@ -327,8 +322,15 @@ pub async fn idempotency_middleware(
             key.to_string()
         }
         None => {
-            warn!(method = %method, "Missing Idempotency-Key for write operation");
-            return Err(StatusCode::BAD_REQUEST);
+            if method == Method::POST
+                || method == Method::PUT
+                || method == Method::DELETE
+                || method == Method::PATCH
+            {
+                warn!(method = %method, "Missing Idempotency-Key for write operation");
+                return Err(StatusCode::BAD_REQUEST);
+            }
+            return Ok(next.run(Request::from_parts(parts, body)).await);
         }
     };
 
