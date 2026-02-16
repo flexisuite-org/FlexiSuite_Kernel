@@ -20,11 +20,47 @@ use tracing::{error, info, instrument, warn};
 
 use crate::auth::TenantContext;
 
-const IDEMPOTENCY_TTL: Duration = Duration::from_secs(24 * 60 * 60);
-const ACTION_TTL: Duration = Duration::from_secs(24 * 60 * 60);
-const MAX_BODY_SIZE: usize = 10 * 1024 * 1024; // 10MB DoS protection
-const MAX_REPLAY_BODY_SIZE: usize = 10 * 1024 * 1024; // 10MB replay cache protection
-const INFLIGHT_WAIT_TIMEOUT: Duration = Duration::from_secs(5);
+#[derive(Clone, Debug)]
+pub struct MiddlewareConfig {
+    pub idempotency_ttl: Duration,
+    pub action_ttl: Duration,
+    pub max_body_size: usize,
+    pub max_replay_body_size: usize,
+    pub inflight_wait_timeout: Duration,
+}
+
+impl Default for MiddlewareConfig {
+    fn default() -> Self {
+        Self {
+            idempotency_ttl: Duration::from_secs(
+                std::env::var("IDEMPOTENCY_TTL_SECS")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(24 * 60 * 60),
+            ),
+            action_ttl: Duration::from_secs(
+                std::env::var("ACTION_TTL_SECS")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(24 * 60 * 60),
+            ),
+            max_body_size: std::env::var("MAX_BODY_SIZE_BYTES")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(10 * 1024 * 1024),
+            max_replay_body_size: std::env::var("MAX_REPLAY_BODY_SIZE_BYTES")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(10 * 1024 * 1024),
+            inflight_wait_timeout: Duration::from_secs(
+                std::env::var("INFLIGHT_WAIT_TIMEOUT_SECS")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(5),
+            ),
+        }
+    }
+}
 
 #[derive(Clone, Debug)]
 pub struct IdempotencyRecord {
@@ -63,6 +99,7 @@ pub trait IdempotencyStore: Send + Sync {
         &self,
         key: IdempotencyScopeKey,
         body_hash: String,
+        ttl: Duration,
     ) -> Option<IdempotencyEntry>;
     async fn complete(&self, key: IdempotencyScopeKey, record: IdempotencyRecord);
     async fn release_inflight(&self, key: &IdempotencyScopeKey);
@@ -91,6 +128,7 @@ impl IdempotencyStore for InMemoryIdempotencyStore {
         &self,
         key: IdempotencyScopeKey,
         body_hash: String,
+        ttl: Duration,
     ) -> Option<IdempotencyEntry> {
         let mut lock = self.inner.lock().await;
         if let Some(entry) = lock.get(&key) {
@@ -102,7 +140,7 @@ impl IdempotencyStore for InMemoryIdempotencyStore {
             IdempotencyEntry::InFlight {
                 body_hash,
                 notify: Arc::new(Notify::new()),
-                expires_at: Instant::now() + IDEMPOTENCY_TTL,
+                expires_at: Instant::now() + ttl,
             },
         );
         None
@@ -180,14 +218,19 @@ pub type ActionStore = Arc<Mutex<HashMap<ActionScopeKey, ActionRecord>>>;
 pub struct MiddlewareState {
     pub idempotency_store: Arc<dyn IdempotencyStore>,
     pub action_store: ActionStore,
+    pub config: MiddlewareConfig,
 }
 
 impl MiddlewareState {
-    pub fn new() -> Self {
+    pub fn new(config: MiddlewareConfig) -> Self {
+        Self::with_store(config, Arc::new(InMemoryIdempotencyStore::new()))
+    }
+
+    pub fn with_store(config: MiddlewareConfig, idempotency_store: Arc<dyn IdempotencyStore>) -> Self {
         Self {
-            // Default to InMemory, but ready for Redis injection
-            idempotency_store: Arc::new(InMemoryIdempotencyStore::new()),
+            idempotency_store,
             action_store: Arc::new(Mutex::new(HashMap::new())),
+            config,
         }
     }
 
@@ -215,12 +258,12 @@ impl MiddlewareState {
 }
 
 pub async fn record_action(
-    store: &ActionStore,
+    state: &MiddlewareState,
     tenant_id: &str,
     action_id: &str,
     status: ActionStatus,
 ) {
-    let mut lock = store.lock().await;
+    let mut lock = state.action_store.lock().await;
     // O(N) cleanup removed from critical path
     lock.insert(
         ActionScopeKey {
@@ -229,17 +272,17 @@ pub async fn record_action(
         },
         ActionRecord {
             status,
-            expires_at: Instant::now() + ACTION_TTL,
+            expires_at: Instant::now() + state.config.action_ttl,
         },
     );
 }
 
 pub async fn get_action(
-    store: &ActionStore,
+    state: &MiddlewareState,
     tenant_id: &str,
     action_id: &str,
 ) -> Option<ActionRecord> {
-    let lock = store.lock().await;
+    let lock = state.action_store.lock().await;
     // O(N) cleanup removed from critical path
     lock.get(&ActionScopeKey {
         tenant_id: tenant_id.to_string(),
@@ -309,10 +352,18 @@ pub async fn idempotency_middleware(
     // Body hash MUST be derived from the actual request body.
     // DoS Protection: Limit body size
     // Note: This forces buffering. For streams > 10MB, Idempotency is not supported by this middleware.
-    let body_bytes = match to_bytes(body, MAX_BODY_SIZE).await {
+    
+    // Check Store
+    let state = parts
+        .extensions
+        .get::<MiddlewareState>()
+        .cloned()
+        .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let body_bytes = match to_bytes(body, state.config.max_body_size).await {
         Ok(b) => b,
         Err(_) => {
-            warn!("Request body exceeded MAX_BODY_SIZE ({})", MAX_BODY_SIZE);
+            warn!("Request body exceeded max_body_size ({})", state.config.max_body_size);
             return Err(StatusCode::BAD_REQUEST);
         }
     };
@@ -320,19 +371,12 @@ pub async fn idempotency_middleware(
     let body_hash = compute_body_hash(&body_bytes);
     let req = Request::from_parts(parts, Body::from(body_bytes));
 
-    // Check Store
-    let state = req
-        .extensions()
-        .get::<MiddlewareState>()
-        .cloned()
-        .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
-
     let store = &state.idempotency_store;
 
     loop {
         // Atomic check-and-acquire
         match store
-            .try_acquire(scope_key.clone(), body_hash.clone())
+            .try_acquire(scope_key.clone(), body_hash.clone(), state.config.idempotency_ttl)
             .await
         {
             None => {
@@ -376,16 +420,21 @@ pub async fn idempotency_middleware(
                             return Err(StatusCode::CONFLICT);
                         }
                         // Wait for the in-flight request to complete
-                        if tokio::time::timeout(INFLIGHT_WAIT_TIMEOUT, notify.notified())
+                        if tokio::time::timeout(state.config.inflight_wait_timeout, notify.notified())
                             .await
                             .is_err()
                         {
                             warn!(
                                 key = %idempotency_key,
-                                timeout_ms = INFLIGHT_WAIT_TIMEOUT.as_millis() as u64,
+                                timeout_ms = state.config.inflight_wait_timeout.as_millis() as u64,
                                 "Timed out waiting for in-flight idempotent request"
                             );
-                            return Err(StatusCode::CONFLICT);
+                            let mut res = StatusCode::SERVICE_UNAVAILABLE.into_response();
+                            let retry_after = state.config.inflight_wait_timeout.as_secs().max(1).to_string();
+                            if let Ok(val) = HeaderValue::from_str(&retry_after) {
+                                res.headers_mut().insert(axum::http::header::RETRY_AFTER, val);
+                            }
+                            return Ok(res);
                         }
                         continue; // Retry loop
                     }
@@ -400,10 +449,10 @@ pub async fn idempotency_middleware(
     // Store successful result
     if response.status().is_success() {
         let (parts, body) = response.into_parts();
-        if response_not_cacheable_for_replay(&parts.headers) {
+        if response_not_cacheable_for_replay(&parts.headers, state.config.max_replay_body_size) {
             info!(
                 "Skipping idempotency replay cache due to Content-Length > {}",
-                MAX_REPLAY_BODY_SIZE
+                state.config.max_replay_body_size
             );
             store.release_inflight(&scope_key).await;
             return Ok(Response::from_parts(parts, body));
@@ -423,10 +472,10 @@ pub async fn idempotency_middleware(
                 return Ok(res);
             }
         };
-        if body_bytes.len() > MAX_REPLAY_BODY_SIZE {
+        if body_bytes.len() > state.config.max_replay_body_size {
             info!(
                 "Skipping idempotency replay cache due to response body > {} bytes",
-                MAX_REPLAY_BODY_SIZE
+                state.config.max_replay_body_size
             );
             store.release_inflight(&scope_key).await;
             return Ok(Response::from_parts(parts, Body::from(body_bytes)));
@@ -443,7 +492,7 @@ pub async fn idempotency_middleware(
             status: parts.status,
             headers: snapshot_headers(&parts.headers),
             body: body_bytes.to_vec(),
-            expires_at: Instant::now() + IDEMPOTENCY_TTL,
+            expires_at: Instant::now() + state.config.idempotency_ttl,
         };
         store.complete(scope_key.clone(), stored).await;
         return Ok(Response::from_parts(parts, Body::from(body_bytes)));
@@ -558,12 +607,12 @@ pub async fn quota_middleware(req: Request<Body>, next: Next) -> Result<Response
     Ok(next.run(req).await)
 }
 
-fn response_not_cacheable_for_replay(headers: &HeaderMap) -> bool {
+fn response_not_cacheable_for_replay(headers: &HeaderMap, max_size: usize) -> bool {
     headers
         .get(CONTENT_LENGTH)
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.parse::<usize>().ok())
-        .is_some_and(|n| n > MAX_REPLAY_BODY_SIZE)
+        .is_some_and(|n| n > max_size)
 }
 
 fn violation_to_status(v: &QuotaViolation) -> StatusCode {

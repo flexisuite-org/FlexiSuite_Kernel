@@ -5,6 +5,7 @@ use axum::{
     response::Response,
 };
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+use chrono::DateTime;
 use rusty_paseto::prelude::*;
 use serde::Deserialize;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -25,8 +26,8 @@ enum AuthError {
 struct PasetoClaims {
     tenant_id: String,
     user_id: Option<String>,
-    exp: u64,
-    nbf: Option<u64>,
+    exp: String,
+    nbf: Option<String>,
 }
 
 /// REQ-AUTH-SOURCE: Extract TenantContext from token or dev-headers (if debug)
@@ -125,12 +126,20 @@ fn validate_claims(claims: PasetoClaims) -> Result<TenantContext, AuthError> {
     }
 
     let now = unix_now();
-    if let Some(nbf) = claims.nbf {
+    if let Some(nbf_str) = claims.nbf {
+        let nbf = DateTime::parse_from_rfc3339(&nbf_str)
+            .map_err(|_| AuthError::Unauthorized)?
+            .timestamp() as u64;
         if now < nbf {
             return Err(AuthError::Unauthorized);
         }
     }
-    if now >= claims.exp {
+    
+    let exp = DateTime::parse_from_rfc3339(&claims.exp)
+        .map_err(|_| AuthError::Unauthorized)?
+        .timestamp() as u64;
+    
+    if now >= exp {
         return Err(AuthError::Unauthorized);
     }
 
@@ -153,7 +162,10 @@ fn unix_now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
-        .unwrap_or(0)
+        .unwrap_or_else(|e| {
+            tracing::error!("SystemTime clock error: {e}");
+            u64::MAX
+        })
 }
 
 fn extract_bearer_token(auth_header: &str) -> Option<&str> {
