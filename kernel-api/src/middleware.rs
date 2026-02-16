@@ -9,6 +9,7 @@ use axum::{
 };
 use http_body_util::BodyExt;
 use kernel_core::idempotency::canonicalize_request_target;
+#[cfg(any(test, feature = "test-utils"))]
 use kernel_core::quota::{QuotaLayer, QuotaViolation};
 use ring::digest::{SHA256, digest};
 use serde::{Deserialize, Serialize};
@@ -603,6 +604,7 @@ fn build_replay_response(record: &IdempotencyRecord) -> Response {
     res
 }
 
+#[cfg(any(test, feature = "test-utils"))]
 fn violation_to_response(v: &QuotaViolation) -> Response {
     let mut res = violation_to_status(v).into_response();
     for (name, val) in v.headers() {
@@ -618,7 +620,7 @@ fn violation_to_response(v: &QuotaViolation) -> Response {
 
 /// REQ-QUOTA-HTTP-CONTRACT: Evaluation Priority (System > Tenant > API)
 pub async fn quota_middleware(req: Request<Body>, next: Next) -> Result<Response, Response> {
-    #[cfg(debug_assertions)]
+    #[cfg(any(test, feature = "test-utils"))]
     {
         // 1. System Hard Limit (Critical Protection)
         if req.headers().contains_key("X-Mock-Quota-System") {
@@ -662,6 +664,7 @@ fn response_not_cacheable_for_replay(headers: &HeaderMap, max_size: usize) -> bo
         .is_some_and(|n| n > max_size)
 }
 
+#[cfg(any(test, feature = "test-utils"))]
 fn violation_to_status(v: &QuotaViolation) -> StatusCode {
     match v.layer {
         QuotaLayer::SystemHardLimit => StatusCode::SERVICE_UNAVAILABLE,
