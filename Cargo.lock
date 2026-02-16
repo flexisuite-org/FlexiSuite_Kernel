@@ -1757,6 +1757,7 @@ dependencies = [
  "chrono",
  "futures",
  "kernel-core",
+ "migration",
  "sea-orm",
  "sea-orm-migration",
  "serde",

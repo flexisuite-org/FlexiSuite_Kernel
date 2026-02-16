@@ -18,6 +18,7 @@ uuid = { version = "1.21.0", features = ["v7", "serde"] }
 futures = "0.3.32"
 
 [dev-dependencies]
+migration = { path = "./migration" }
 sea-orm-migration = "1.1.0"
 tokio = { version = "1", features = ["full"] }
 testcontainers = "0.15"
