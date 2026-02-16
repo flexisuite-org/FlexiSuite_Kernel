@@ -6,6 +6,7 @@ use sea_orm::{
 };
 use tracing::{error, warn};
 use uuid::Uuid;
+use futures::future::BoxFuture;
 
 // Sealed Internal Wrapper
 pub struct RawConnection(pub(crate) DatabaseTransaction);
@@ -38,14 +39,13 @@ impl super::repository::private::Sealed for TenantScoped<RawConnection> {}
 // TenantRepository implementation is in repository.rs
 
 /// Executes a closure within a tenant-scoped transaction.
-pub async fn with_tenant_tx<F, R, Fut>(
+pub async fn with_tenant_tx<F, R>(
     pool: &DatabaseConnection,
     ctx: &TenantContext,
     f: F,
 ) -> kernel::Result<R>
 where
-    F: FnOnce(&TenantScoped<RawConnection>) -> Fut + Send,
-    Fut: std::future::Future<Output = kernel::Result<R>> + Send,
+    F: for<'c> FnOnce(&'c TenantScoped<RawConnection>) -> BoxFuture<'c, kernel::Result<R>> + Send,
     R: Send,
 {
     let txn = pool.begin().await.map_err(KernelError::DbError)?;
@@ -56,13 +56,13 @@ where
     let token = format!(
         "v2:master:{}:{}:{}:mock_sig",
         now,             // ts
-        Uuid::now_v7().to_string(), // nonce (unique per call)
+        Uuid::now_v7(), // nonce (unique per call)
         ctx.tenant_id,   // tenant_id
     );
 
     txn.execute(Statement::from_sql_and_values(
         DbBackend::Postgres,
-        "SET LOCAL flexi.tenant_token = $1",
+        "SELECT set_config('flexi.tenant_token', $1, true)",
         [token.into()],
     ))
     .await
