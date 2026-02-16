@@ -55,7 +55,7 @@ impl TenantRepository for TenantScoped<RawConnection> {
         };
 
         // User ID
-        let user_id_str = self.user_id.as_ref().map(|u| u.to_string());
+        let user_id_str = self.user_id.as_ref().map(|u| u.as_str().to_string());
 
         // 1. Insert Entity
         let result = active_model.insert(&self.inner.txn).await.map_err(KernelError::db_error)?;
@@ -89,7 +89,7 @@ impl TenantRepository for TenantScoped<RawConnection> {
         };
 
         // User ID
-        let user_id_str = self.user_id.as_ref().map(|u| u.to_string());
+        let user_id_str = self.user_id.as_ref().map(|u| u.as_str().to_string());
 
         // 1. Update Entity
         let result = active_model.update(&self.inner.txn).await.map_err(KernelError::db_error)?;
@@ -123,7 +123,7 @@ impl TenantRepository for TenantScoped<RawConnection> {
     }
 
     async fn log_audit(&self, action: String, resource: String, details: serde_json::Value) -> kernel::Result<()> {
-        let user_id_str = self.user_id.as_ref().map(|u| u.to_string()).unwrap_or_else(|| "unknown".to_string());
+        let user_id_str = self.user_id.as_ref().map(|u| u.as_str().to_string()).unwrap_or_else(|| "unknown".to_string());
 
         let log = audit_log::ActiveModel {
             id: ActiveValue::Set(Uuid::now_v7().to_string()),
