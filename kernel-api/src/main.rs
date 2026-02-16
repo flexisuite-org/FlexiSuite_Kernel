@@ -26,7 +26,7 @@ async fn main() {
         eprintln!("Invalid bind address: {addr_str}");
         std::process::exit(1);
     });
-    println!("Listening on http://{}", addr);
+    tracing::info!("Listening on http://{}", addr);
 
     let listener = TcpListener::bind(addr).await.unwrap_or_else(|e| {
         eprintln!("Failed to bind to {addr}: {e}");
