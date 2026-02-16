@@ -145,11 +145,10 @@ fn validate_claims(claims: PasetoClaims) -> Result<TenantContext, AuthError> {
     if !is_valid_principal(&claims.tenant_id) {
         return Err(AuthError::Forbidden);
     }
-    if let Some(user_id) = &claims.user_id {
-        if !is_valid_principal(user_id) {
+    if let Some(user_id) = &claims.user_id
+        && !is_valid_principal(user_id) {
             return Err(AuthError::Forbidden);
         }
-    }
 
     let now = unix_now();
     if let Some(nbf_str) = claims.nbf {

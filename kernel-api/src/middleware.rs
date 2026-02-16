@@ -115,6 +115,12 @@ pub struct InMemoryIdempotencyStore {
     inner: Mutex<HashMap<IdempotencyScopeKey, IdempotencyEntry>>,
 }
 
+impl Default for InMemoryIdempotencyStore {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl InMemoryIdempotencyStore {
     pub fn new() -> Self {
         Self {
@@ -178,11 +184,10 @@ impl IdempotencyStore for InMemoryIdempotencyStore {
                 IdempotencyEntry::InFlight { expires_at, .. } => *expires_at > now,
                 IdempotencyEntry::Completed(record) => record.expires_at > now,
             };
-            if !keep {
-                if let IdempotencyEntry::InFlight { notify, .. } = entry {
+            if !keep
+                && let IdempotencyEntry::InFlight { notify, .. } = entry {
                     expired_inflight_notifies.push(notify.clone());
                 }
-            }
             keep
         });
         drop(lock);
@@ -320,7 +325,7 @@ pub async fn idempotency_middleware(
                     return Err(StatusCode::BAD_REQUEST);
                 }
             };
-            if let Err(_) = validate_idempotency_key(key) {
+            if validate_idempotency_key(key).is_err() {
                 warn!(key = %key, "Invalid Idempotency-Key format");
                 return Err(StatusCode::BAD_REQUEST);
             }
