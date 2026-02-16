@@ -80,29 +80,23 @@ impl MigrationTrait for Migration {
                     RAISE EXCEPTION 'Token timestamp expired or future (skew > 30s)';
                 END IF;
 
-                -- 4. Check Nonce (Consumption)
-                -- INSERT into nonce table. If conflict/exists, it fails.
-                -- Note: concurrency handling needs ON CONFLICT or just rely on PK unique constraint.
+                -- 4. Verify Signature (Mock for now, REAL IMPLEMENTATION needed via pgcrypto/plrust)
+                -- We enforce strict equality to the mock signature used by the kernel.
+                IF sig != 'mock_sig' THEN
+                    RAISE EXCEPTION 'Invalid signature';
+                END IF;
+
+                -- 5. Check Nonce (Consumption)
+                -- INSERT into nonce table using the TOKEN'S timestamp.
+                -- Since PK is (nonce, created_at), using the token's timestamp ensures that
+                -- reusing the same token (same nonce + same ts) constitutes a PK violation,
+                -- preventing replay.
                 BEGIN
-                    INSERT INTO flexi.flexi_nonce (nonce, created_at) VALUES (nonce_val, now());
+                    INSERT INTO flexi.flexi_nonce (nonce, created_at) 
+                    VALUES (nonce_val, to_timestamp(ts::double precision));
                 EXCEPTION WHEN unique_violation THEN
                     RAISE EXCEPTION 'Nonce already used: %', nonce_val;
                 END;
-
-                -- 5. Verify Signature (Mock for now, REAL IMPLEMENTATION needed via pgcrypto/plrust)
-                -- In this migration, we assume the signature is valid if it matches logic.
-                -- For real security, we need the public key loaded in DB or a C-extension.
-                -- Here, we skip strict sig verification solely for the initial migration text,
-                -- but in production this MUST call a signature verification function.
-                -- To match the Rust mock: "v2:mock_signature:{tenant}:{nonce}" we check strict equality for now.
-                -- WAIT, the Rust mock was: format!("v2:mock_signature:{}:{}", ctx.tenant_id, "nonce");
-                -- The parser above expects 6 parts: v2:kid:ts:nonce:tenant_id:sig
-                -- So the mock in connection.rs needs to match this format!
-                -- I will update connection.rs later to match this format.
-                
-                -- Mock Validation:
-                -- Check if sig starts with 'sig_' or similar if we want.
-                -- For now, pass.
 
                 -- 6. Set Context
                 PERFORM set_config('flexi.current_tenant', tenant_id_val, true);
