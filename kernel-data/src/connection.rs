@@ -18,8 +18,8 @@ pub fn init_hmac_secret() -> Result<(), String> {
     let secret = std::env::var("FLEXI_HMAC_SECRET")
         .map_err(|_| "FLEXI_HMAC_SECRET is not set".to_string())?;
     
-    if secret.is_empty() {
-        return Err("FLEXI_HMAC_SECRET cannot be empty".to_string());
+    if secret.as_bytes().len() < 32 {
+        return Err("FLEXI_HMAC_SECRET must be at least 32 bytes".to_string());
     }
 
     HMAC_SECRET.set(secret.into_bytes())
@@ -101,18 +101,11 @@ where
         ver, kid, ts_str, nonce, ctx.tenant_id(), sig
     );
 
+    // 2. Authorize
     txn.execute(Statement::from_sql_and_values(
         DbBackend::Postgres,
-        "SELECT set_config('flexi.tenant_token', $1, true)",
+        "SELECT flexi.authorize_tenant($1)",
         [token.into()],
-    ))
-    .await
-    .map_err(KernelError::db_error)?;
-
-    // 2. Authorize
-    txn.execute(Statement::from_string(
-        DbBackend::Postgres,
-        "SELECT flexi.authorize_tenant()".to_owned(),
     ))
     .await
     .map_err(|e| {
