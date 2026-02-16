@@ -3,5 +3,5 @@ resolver = "2"
 members = [
     "kernel-core",
     "kernel-api",
-    "tests/contract",
+    "tests/contract", "kernel-data",
 ]
