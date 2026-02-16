@@ -61,11 +61,12 @@ impl RawConnection {
 pub struct TenantScoped<C> {
     pub(crate) inner: C,
     pub(crate) tenant_id: kernel_core::auth::TenantId,
+    pub(crate) user_id: Option<kernel_core::auth::UserId>,
 }
 
 impl<C> TenantScoped<C> {
-    pub(super) fn new(inner: C, tenant_id: kernel_core::auth::TenantId) -> Self {
-        Self { inner, tenant_id }
+    pub(super) fn new(inner: C, tenant_id: kernel_core::auth::TenantId, user_id: Option<kernel_core::auth::UserId>) -> Self {
+        Self { inner, tenant_id, user_id }
     }
 }
 
@@ -139,7 +140,7 @@ where
         KernelError::TenantAuthorizationFailed(e.to_string())
     })?;
 
-    let scoped = TenantScoped::new(RawConnection::new(txn), ctx.tenant_id().clone());
+    let scoped = TenantScoped::new(RawConnection::new(txn), ctx.tenant_id().clone(), ctx.user_id().cloned());
 
     match f(&scoped).await {
         Ok(result) => {

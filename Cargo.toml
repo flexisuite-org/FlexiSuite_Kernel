@@ -4,4 +4,5 @@ members = [
     "kernel-core",
     "kernel-api",
     "tests/contract", "kernel-data", "kernel-data/migration",
+    "kernel-archiver",
 ]
