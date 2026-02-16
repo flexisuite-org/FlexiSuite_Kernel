@@ -22,7 +22,7 @@ async fn main() {
     }
 
     let config = MiddlewareConfig::default();
-    let (app, _cleanup_handle) = build_app(config);
+    let (app, _cleanup_handle) = build_app(config).await;
 
     let host = std::env::var("KERNEL_API_HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
     let port = std::env::var("KERNEL_API_PORT").unwrap_or_else(|_| "3000".to_string());
