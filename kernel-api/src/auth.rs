@@ -192,7 +192,7 @@ fn is_valid_principal(value: &str) -> bool {
     !bytes.is_empty()
         && bytes.len() <= 128
         && bytes.iter().all(
-            |b| matches!(*b, b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'-' | b'_' | b':' | b'.'),
+            |b| matches!(*b, b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'-' | b'_' | b'.'),
         )
 }
 
@@ -216,7 +216,7 @@ fn extract_bearer_token(auth_header: &str) -> Option<&str> {
 
 #[cfg(test)]
 mod tests {
-    use super::extract_bearer_token;
+    use super::{extract_bearer_token, is_valid_principal};
 
     #[test]
     fn extract_bearer_token_accepts_case_insensitive_scheme() {
@@ -230,5 +230,28 @@ mod tests {
         assert_eq!(extract_bearer_token("Token abc"), None);
         assert_eq!(extract_bearer_token("Bearer "), None);
         assert_eq!(extract_bearer_token("Bearer"), None);
+    }
+
+    #[test]
+    fn is_valid_principal_allows_valid_chars() {
+        assert!(is_valid_principal("tenant-1"));
+        assert!(is_valid_principal("user.name"));
+        assert!(is_valid_principal("system_admin"));
+        assert!(is_valid_principal("1234567890"));
+    }
+
+    #[test]
+    fn is_valid_principal_rejects_colon() {
+        assert!(!is_valid_principal("tenant:1"));
+        assert!(!is_valid_principal("urn:uuid:123"));
+    }
+
+    #[test]
+    fn is_valid_principal_rejects_invalid_inputs() {
+        assert!(!is_valid_principal("")); // Empty
+        assert!(!is_valid_principal("a".repeat(129).as_str())); // Too long
+        assert!(!is_valid_principal("tenant/1")); // Slash
+        assert!(!is_valid_principal("tenant 1")); // Space
+        assert!(!is_valid_principal("tenant@1")); // At
     }
 }
