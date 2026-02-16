@@ -10,11 +10,7 @@ use rusty_paseto::prelude::*;
 use serde::Deserialize;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-#[derive(Clone, Debug)]
-pub struct TenantContext {
-    pub tenant_id: String,
-    pub user_id: Option<String>,
-}
+pub use kernel_core::auth::{TenantContext, TenantId, UserId};
 
 #[derive(Debug)]
 enum AuthError {
@@ -52,33 +48,29 @@ pub async fn auth_middleware(mut req: Request<Body>, next: Next) -> Result<Respo
         #[cfg(debug_assertions)]
         {
             if let Some(tenant_id_header) = req.headers().get("X-Tenant-Id") {
-                let tenant_id = tenant_id_header.to_str().map_err(|_| {
+                let tenant_id_str = tenant_id_header.to_str().map_err(|_| {
                     tracing::warn!("Invalid X-Tenant-Id header encoding");
                     StatusCode::FORBIDDEN
                 })?;
-                if !is_valid_principal(tenant_id) {
-                    tracing::warn!(tenant_id = %tenant_id, "Invalid tenant_id in X-Tenant-Id");
-                    return Err(StatusCode::FORBIDDEN);
-                }
+                let tenant_id = TenantId::new(tenant_id_str).map_err(|_| {
+                    tracing::warn!(tenant_id = %tenant_id_str, "Invalid tenant_id in X-Tenant-Id");
+                    StatusCode::FORBIDDEN
+                })?;
 
                 let user_id = if let Some(user_id_header) = req.headers().get("X-User-Id") {
-                    let id = user_id_header.to_str().map_err(|_| {
+                    let id_str = user_id_header.to_str().map_err(|_| {
                         tracing::warn!("Invalid X-User-Id header encoding");
                         StatusCode::FORBIDDEN
                     })?;
-                    if !is_valid_principal(id) {
-                        tracing::warn!(user_id = %id, "Invalid user_id in X-User-Id");
-                        return Err(StatusCode::FORBIDDEN);
-                    }
-                    Some(id.to_string())
+                    Some(UserId::new(id_str).map_err(|_| {
+                        tracing::warn!(user_id = %id_str, "Invalid user_id in X-User-Id");
+                        StatusCode::FORBIDDEN
+                    })?)
                 } else {
                     None
                 };
 
-                TenantContext {
-                    tenant_id: tenant_id.to_string(),
-                    user_id,
-                }
+                TenantContext::new(tenant_id, user_id)
             } else {
                 tracing::warn!("Missing Authorization header (and no X-Tenant-Id for debug bypass)");
                 return Err(StatusCode::UNAUTHORIZED);
@@ -145,15 +137,14 @@ fn verify_paseto_v4_public_token(
     validate_claims(claims)
 }
 
+
 fn validate_claims(claims: PasetoClaims) -> Result<TenantContext, AuthError> {
-    if !is_valid_principal(&claims.tenant_id) {
-        return Err(AuthError::Forbidden);
-    }
-    if let Some(user_id) = &claims.user_id {
-        if !is_valid_principal(user_id) {
-            return Err(AuthError::Forbidden);
-        }
-    }
+    let tenant_id = TenantId::new(&claims.tenant_id).map_err(|_| AuthError::Forbidden)?;
+    let user_id = if let Some(uid) = claims.user_id {
+        Some(UserId::new(uid).map_err(|_| AuthError::Forbidden)?)
+    } else {
+        None
+    };
 
     let now = unix_now();
     if let Some(nbf_str) = claims.nbf {
@@ -181,19 +172,7 @@ fn validate_claims(claims: PasetoClaims) -> Result<TenantContext, AuthError> {
         return Err(AuthError::Unauthorized);
     }
 
-    Ok(TenantContext {
-        tenant_id: claims.tenant_id,
-        user_id: claims.user_id,
-    })
-}
-
-fn is_valid_principal(value: &str) -> bool {
-    let bytes = value.as_bytes();
-    !bytes.is_empty()
-        && bytes.len() <= 128
-        && bytes.iter().all(
-            |b| matches!(*b, b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'-' | b'_' | b'.'),
-        )
+    Ok(TenantContext::new(tenant_id, user_id))
 }
 
 fn unix_now() -> u64 {
@@ -216,7 +195,7 @@ fn extract_bearer_token(auth_header: &str) -> Option<&str> {
 
 #[cfg(test)]
 mod tests {
-    use super::{extract_bearer_token, is_valid_principal};
+    use super::*;
 
     #[test]
     fn extract_bearer_token_accepts_case_insensitive_scheme() {
