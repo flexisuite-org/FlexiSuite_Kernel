@@ -22,8 +22,6 @@ async fn test_tenant_isolation_rls() {
     // 1. Connect
     let db = Database::connect(&connection_string).await.expect("Failed to connect to DB");
 
-    // Initialize HMAC Secret for tests
-    // Initialize HMAC Secret for tests (using deterministic secret specific to tests)
     // Initialize HMAC Secret for tests (using deterministic secret specific to tests)
     if let Err(e) = kernel_data::init_hmac_secret_for_test(TEST_HMAC_SECRET) {
         // Assert it's the expected "already initialized" error if it fails
@@ -36,81 +34,18 @@ async fn test_tenant_isolation_rls() {
     // 2. Run Migrations
     migration::Migrator::up(&db, None).await.expect("Failed to run migrations");
 
-    // Mock Authorize Function (Simpler for test, or copy exact one)
-    // NOTE: This mock intentionally skips signature verification and format validation
-    // to simplify testing RLS isolation. It does NOT exercise the HMAC signing path fully.
-    db.execute_unprepared(r#"
-        DROP FUNCTION IF EXISTS flexi.authorize_tenant();
-        DROP FUNCTION IF EXISTS flexi.authorize_tenant(text);
-        CREATE OR REPLACE FUNCTION flexi.authorize_tenant(token_val text) RETURNS void AS $$
-        DECLARE
-            parts text[];
-            tenant_id_val text;
-            nonce_val text;
-            ts bigint;
-            secret text;
-        BEGIN
-            IF token_val IS NULL OR token_val = '' THEN
-                RAISE EXCEPTION 'Missing or empty tenant token';
-            END IF;
-            
-            parts := string_to_array(token_val, ':');
-            -- v2:kid:ts:nonce:tenant_id:sig
-            ts := parts[3]::bigint;
-            nonce_val := parts[4];
-            tenant_id_val := parts[5];
-            
-            BEGIN
-                INSERT INTO flexi.flexi_nonce (nonce, created_at) 
-                VALUES (nonce_val, to_timestamp(ts::double precision));
-            EXCEPTION WHEN unique_violation THEN
-                RAISE EXCEPTION 'Nonce already used: %', nonce_val;
-            END;
-            
-            secret := current_setting('flexi.hmac_secret', true);
-            PERFORM set_config('flexi.current_tenant', tenant_id_val, true);
-            PERFORM set_config('flexi.ctx_sig', encode(hmac(tenant_id_val, secret, 'sha256'), 'hex'), true);
-        END;
-        $$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = flexi, pg_catalog, pg_temp;
-    "#).await.unwrap();
+    // 3. Configure Database Secret
+    // We must set the secret in the database so the real `authorize_tenant` can verify the signature.
+    // We use ALTER ROLE ... SET so it persists for all future sessions in this test instance.
+    db.execute_unprepared(&format!("ALTER ROLE postgres SET flexi.hmac_secret = '{}'", TEST_HMAC_SECRET))
+        .await
+        .expect("Failed to set flexi.hmac_secret for role");
 
-    db.execute_unprepared(r#"
-        CREATE OR REPLACE FUNCTION flexi.authorized_tenant_id() RETURNS text AS $$
-        DECLARE
-            tid text;
-            sig text;
-            secret text;
-        BEGIN
-            tid := current_setting('flexi.current_tenant', true);
-            if tid IS NULL OR tid = '' THEN RETURN NULL; END IF;
+    // 4. Reconnect to ensure all pool connections pick up the new GUC
+    drop(db);
+    let db = Database::connect(&connection_string).await.expect("Failed to reconnect to DB");
 
-            sig := current_setting('flexi.ctx_sig', true);
-            secret := current_setting('flexi.hmac_secret', true);
-
-            IF secret IS NULL OR secret = '' THEN
-                RAISE EXCEPTION 'HMAC secret not set';
-            END IF;
-
-            IF sig IS DISTINCT FROM encode(hmac(tid, secret, 'sha256'), 'hex') THEN
-                RAISE EXCEPTION 'Tenant context integrity check failed';
-            END IF;
-
-            RETURN tid;
-        END;
-        $$ LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = flexi, pg_catalog, pg_temp;
-    "#).await.unwrap();
-
-    // Table
-    db.execute_unprepared(r#"
-        -- Table is created by migration, but we ensure RLS is on for the test
-        ALTER TABLE flexi.entity_records DISABLE ROW LEVEL SECURITY;
-        ALTER TABLE flexi.entity_records ENABLE ROW LEVEL SECURITY;
-        DROP POLICY IF EXISTS tenant_isolation_policy ON flexi.entity_records;
-        CREATE POLICY tenant_isolation_policy ON flexi.entity_records
-            FOR ALL TO PUBLIC
-            USING (tenant_id = flexi.authorized_tenant_id());
-    "#).await.unwrap();
-    // 3. Test Logic
+    // 5. Test Logic
     use kernel_core::auth::{TenantId, UserId};
     let tenant_a = TenantContext::new(TenantId::new("tenant-a").unwrap(), Some(UserId::new("user-1").unwrap()));
     let tenant_b = TenantContext::new(TenantId::new("tenant-b").unwrap(), Some(UserId::new("user-2").unwrap()));
