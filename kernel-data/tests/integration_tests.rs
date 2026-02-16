@@ -9,6 +9,8 @@ use testcontainers_modules::postgres::Postgres;
 use uuid::Uuid;
 use kernel_data::entities::entity_record;
 
+const TEST_HMAC_SECRET: &str = "test_secret_for_integration_tests_shared";
+
 #[tokio::test(flavor = "multi_thread")]
 async fn test_tenant_isolation_rls() {
     let docker = clients::Cli::default();
@@ -22,7 +24,8 @@ async fn test_tenant_isolation_rls() {
 
     // Initialize HMAC Secret for tests
     // Initialize HMAC Secret for tests (using deterministic secret specific to tests)
-    if let Err(e) = kernel_data::init_hmac_secret_for_test("test_secret_for_integration_tests") {
+    // Initialize HMAC Secret for tests (using deterministic secret specific to tests)
+    if let Err(e) = kernel_data::init_hmac_secret_for_test(TEST_HMAC_SECRET) {
         // Assert it's the expected "already initialized" error if it fails
         assert!(e.contains("already initialized"), "Unexpected error from init_hmac_secret: {}", e);
     }
@@ -84,7 +87,11 @@ async fn test_tenant_isolation_rls() {
             sig := current_setting('flexi.ctx_sig', true);
             secret := current_setting('flexi.hmac_secret', true);
 
-            IF sig != encode(hmac(tid, secret, 'sha256'), 'hex') THEN
+            IF secret IS NULL OR secret = '' THEN
+                RAISE EXCEPTION 'HMAC secret not set';
+            END IF;
+
+            IF sig IS DISTINCT FROM encode(hmac(tid, secret, 'sha256'), 'hex') THEN
                 RAISE EXCEPTION 'Tenant context integrity check failed';
             END IF;
 
@@ -296,7 +303,7 @@ async fn test_connection_rejects_colon_injection() {
 
     // Initialize HMAC Secret for tests (using deterministic secret specific to tests)
     // We need this because authorization expects it
-    let _ = kernel_data::init_hmac_secret_for_test("test_secret_for_integration_tests_colons");
+    let _ = kernel_data::init_hmac_secret_for_test(TEST_HMAC_SECRET);
 
     // We can verify TenantId prevents creation.
     // The previous implementation used unsafe transmute which is hard to simplify. 
