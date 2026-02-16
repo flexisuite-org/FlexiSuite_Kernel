@@ -82,6 +82,10 @@ impl super::repository::private::Sealed for TenantScoped<RawConnection> {}
 // TenantRepository implementation is in repository.rs
 
 /// Executes a closure within a tenant-scoped transaction.
+///
+/// **Note:** This function relies on the `flexi.authorize_tenant` PL/pgSQL function, which
+/// requires the `flexi.hmac_secret` GUC to be set in the database (e.g., via `ALTER DATABASE ... SET ...`).
+/// If the secret is not set, authorization will fail.
 pub async fn with_tenant_tx<F, R>(
     pool: &DatabaseConnection,
     ctx: &TenantContext,
