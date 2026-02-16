@@ -1,0 +1,13 @@
+[package]
+name = "kernel-data"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+tokio = { version = "1.32", features = ["full"] }
+tracing = "0.1.44"
+kernel-core = { path = "../kernel-core" }
+sea-orm = { version = "1.1.0", features = ["sqlx-postgres", "runtime-tokio-rustls", "macros"] }
+async-trait = "0.1"
+thiserror = "1.0"
+
