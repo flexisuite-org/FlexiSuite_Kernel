@@ -1,23 +1,24 @@
-use crate::repository::TenantRepository;
-use kernel_api::auth::TenantContext;
+use kernel_core::auth::TenantContext;
 use kernel_core::kernel::{self, KernelError};
 use sea_orm::{
-    ConnectionTrait, DatabaseBackend, DatabaseConnection, DatabaseTransaction, DbBackend, DbErr,
+    ConnectionTrait, DatabaseConnection, DatabaseTransaction, DbBackend, DbErr,
     Statement, TransactionTrait,
 };
-use tracing::{warn, error}; // Added error import
+use tracing::{error, warn};
+use uuid::Uuid;
 
 // Sealed Internal Wrapper
-pub(crate) struct RawConnection(pub(crate) DatabaseTransaction);
+pub struct RawConnection(pub(crate) DatabaseTransaction);
 
 /// A wrapper around a database transaction that is guaranteed to be scoped to a specific tenant.
 pub struct TenantScoped<C> {
-    inner: C,
+    pub(crate) inner: C,
+    pub(crate) tenant_id: String,
 }
 
 impl<C> TenantScoped<C> {
-    pub(crate) fn new(inner: C) -> Self {
-        Self { inner }
+    pub(crate) fn new(inner: C, tenant_id: String) -> Self {
+        Self { inner, tenant_id }
     }
 }
 
@@ -34,14 +35,7 @@ impl TenantScoped<RawConnection> {
 // Implement Sealed trait for TenantScoped
 impl super::repository::private::Sealed for TenantScoped<RawConnection> {}
 
-#[async_trait::async_trait]
-impl TenantRepository for TenantScoped<RawConnection> {
-    // Implementation of repository methods will go here
-    // Example:
-    // async fn find_by_id(&self, id: &str) -> Result<Option<Entity>, KernelError> {
-    //     ...
-    // }
-}
+// TenantRepository implementation is in repository.rs
 
 /// Executes a closure within a tenant-scoped transaction.
 pub async fn with_tenant_tx<F, R, Fut>(
@@ -56,10 +50,16 @@ where
 {
     let txn = pool.begin().await.map_err(KernelError::DbError)?;
 
-    // Mock token generation (Must be replaced with real crypto in future)
-    let token = format!("v2:mock_signature:{}:{}", ctx.tenant_id, "nonce");
-
     // 1. Set Token
+    // Format: v2:kid:ts:nonce:tenant_id:sig
+    let now = chrono::Utc::now().timestamp();
+    let token = format!(
+        "v2:master:{}:{}:{}:mock_sig",
+        now,             // ts
+        Uuid::now_v7().to_string(), // nonce (unique per call)
+        ctx.tenant_id,   // tenant_id
+    );
+
     txn.execute(Statement::from_sql_and_values(
         DbBackend::Postgres,
         "SET LOCAL flexi.tenant_token = $1",
@@ -79,7 +79,7 @@ where
         KernelError::TenantAuthorizationFailed(e.to_string())
     })?;
 
-    let scoped = TenantScoped::new(RawConnection(txn));
+    let scoped = TenantScoped::new(RawConnection(txn), ctx.tenant_id.to_string());
 
     match f(&scoped).await {
         Ok(result) => {
