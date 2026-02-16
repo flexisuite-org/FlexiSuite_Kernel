@@ -1,11 +1,12 @@
 use axum::{
     Json, Router,
     extract::{Extension, Path},
-    http::StatusCode,
+    http::{HeaderName, HeaderValue, StatusCode},
     middleware::from_fn,
     routing::{get, post},
 };
 use serde::Serialize;
+use tokio::task::JoinHandle;
 use uuid::Uuid;
 
 use crate::auth::{TenantContext, auth_middleware};
@@ -30,12 +31,12 @@ pub struct ActionStatusResponse {
     pub status: ActionStatus,
 }
 
-pub fn build_app(config: MiddlewareConfig) -> Router {
+pub fn build_app(config: MiddlewareConfig) -> (Router, JoinHandle<()>) {
     build_app_with_state(MiddlewareState::new(config))
 }
 
-pub fn build_app_with_state(state: MiddlewareState) -> Router {
-    state.start_cleanup_task();
+pub fn build_app_with_state(state: MiddlewareState) -> (Router, JoinHandle<()>) {
+    let cleanup_handle = state.start_cleanup_task();
 
     let public_router = Router::new().route("/health", get(|| async { "OK" }));
 
@@ -47,16 +48,23 @@ pub fn build_app_with_state(state: MiddlewareState) -> Router {
         .layer(from_fn(idempotency_middleware))
         .layer(from_fn(auth_middleware));
 
-    Router::new()
-        .merge(public_router)
-        .merge(protected_router)
-        .layer(Extension(state))
+    (
+        Router::new()
+            .merge(public_router)
+            .merge(protected_router)
+            .layer(Extension(state)),
+        cleanup_handle,
+    )
 }
 
 pub async fn write_test(
     Extension(state): Extension<MiddlewareState>,
     Extension(ctx): Extension<TenantContext>,
-) -> (StatusCode, [(String, String); 2], Json<TestWriteResponse>) {
+) -> (
+    StatusCode,
+    [(HeaderName, HeaderValue); 2],
+    Json<TestWriteResponse>,
+) {
     let action_id = Uuid::now_v7().to_string();
     record_action(
         &state,
@@ -75,8 +83,14 @@ pub async fn write_test(
     (
         StatusCode::CREATED,
         [
-            ("X-Action-Id".to_string(), action_id),
-            ("X-Result-Version".to_string(), "v1".to_string()),
+            (
+                HeaderName::from_static("x-action-id"),
+                HeaderValue::from_str(&action_id).unwrap(),
+            ),
+            (
+                HeaderName::from_static("x-result-version"),
+                HeaderValue::from_static("v1"),
+            ),
         ],
         Json(body),
     )

@@ -25,8 +25,6 @@ mod tests {
         let now = 100000;
         let retired_at_ok = now - 50; // 50s ago (within 86400s)
 
-        // Remove unused variable retired_at_old
-
         let retired_at_fail = now - 90000; // 90000s ago (> 86400)
 
         // Trusted Keys

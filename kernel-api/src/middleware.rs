@@ -234,7 +234,7 @@ impl MiddlewareState {
         }
     }
 
-    pub fn start_cleanup_task(&self) {
+    pub fn start_cleanup_task(&self) -> tokio::task::JoinHandle<()> {
         let idempotency_store = self.idempotency_store.clone();
         let action_store = self.action_store.clone();
 
@@ -253,7 +253,7 @@ impl MiddlewareState {
                     lock.retain(|_, record| record.expires_at > now);
                 }
             }
-        });
+        })
     }
 }
 
