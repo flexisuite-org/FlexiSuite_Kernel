@@ -27,7 +27,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Init S3 Client
     let region_provider = RegionProviderChain::first_try(Region::new(region_name));
-    let config = aws_config::from_env().region(region_provider).load().await;
+    let config = aws_config::defaults(aws_config::BehaviorVersion::latest())
+        .region(region_provider)
+        .load()
+        .await;
     let s3_client = Client::new(&config);
 
     let interval_secs = env::var("ARCHIVER_INTERVAL").unwrap_or_else(|_| "60".to_string()).parse::<u64>().unwrap_or(60);
