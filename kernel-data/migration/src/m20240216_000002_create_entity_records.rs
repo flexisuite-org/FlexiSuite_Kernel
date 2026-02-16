@@ -25,21 +25,30 @@ impl MigrationTrait for Migration {
             "#,
         ).await?;
 
-        // 2. Setup RLS
+        // 2. Enable RLS
         db.execute_unprepared(
             r#"
-            -- RLS Policy
             ALTER TABLE flexi.entity_records ENABLE ROW LEVEL SECURITY;
             ALTER TABLE flexi.entity_records FORCE ROW LEVEL SECURITY;
+            "#,
+        ).await?;
 
+        // 3. Create RLS Policy (drop-if-exists for idempotency)
+        db.execute_unprepared(
+            r#"
             DROP POLICY IF EXISTS tenant_isolation_policy ON flexi.entity_records;
             CREATE POLICY tenant_isolation_policy ON flexi.entity_records
                 FOR ALL
                 TO PUBLIC
                 USING (tenant_id = flexi.authorized_tenant_id());
-            
-            -- Index for performance
-            CREATE INDEX IF NOT EXISTS idx_entity_records_type ON flexi.entity_records (tenant_id, entity_type);
+            "#,
+        ).await?;
+
+        // 4. Create Index
+        db.execute_unprepared(
+            r#"
+            CREATE INDEX IF NOT EXISTS idx_entity_records_type
+                ON flexi.entity_records (tenant_id, entity_type);
             "#,
         ).await?;
 
