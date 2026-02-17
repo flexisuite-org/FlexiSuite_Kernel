@@ -216,6 +216,23 @@ async function run() {
 
     console.log(`Processing PR #${prNumber} in ${repoOwner}/${repoName}`);
 
+    // Resolve PR properties (like head ref) if missing from payload
+    let headRef = payload.pull_request?.head?.ref;
+    if (!headRef && prNumber) {
+        try {
+            const pr = await octokit.pulls.get({
+                owner: repoOwner,
+                repo: repoName,
+                pull_number: prNumber,
+            });
+            headRef = pr.data.head.ref;
+        } catch (e) {
+            console.error("Failed to fetch PR details for ref resolution:", e);
+        }
+    }
+    // Fallback
+    const targetRef = headRef || payload.ref || 'main';
+
     // Fetch PR comments to find Digest and Jules Report
     const comments = await octokit.paginate(octokit.issues.listComments, {
         owner: repoOwner,
@@ -223,7 +240,10 @@ async function run() {
         issue_number: prNumber,
     });
 
-    let digestComment = comments.find(c => c.body && (c.body.includes(DIGEST_HEADER) || c.body.includes(UNRESOLVED_HEADER)));
+    // Helper for type narrowing
+    const hasBody = (c: { body?: string | null }): c is { body: string } => !!c.body;
+
+    const digestComment = comments.find((c) => hasBody(c) && (c.body.includes(DIGEST_HEADER) || c.body.includes(UNRESOLVED_HEADER)));
     let existingItems = new Map<string, ReviewItem>();
 
     if (digestComment && digestComment.body) {
@@ -231,7 +251,7 @@ async function run() {
     }
 
     // Parse Jules Reports to update status
-    const julesReports = comments.filter(c => c.body && c.body.includes(JULES_REPORT_HEADER));
+    const julesReports = comments.filter((c) => hasBody(c) && c.body.includes(JULES_REPORT_HEADER));
     for (const report of julesReports) {
         if (!report.body) continue;
         const statuses = parseJulesReport(report.body);
@@ -297,9 +317,12 @@ async function run() {
         // If exists, we keep the status (managed by check/report)
     }
 
-    // Remove stale items
-    // Remove stale items
-    if (newItemIds.size > 0) {
+    // Remove stale items ONLY if doing a full reconciliation
+    // For now, we assume partial updates to be safe and avoid deleting items unless explicitly flagged.
+    // TODO: Determine if we can reliably detect a full scan (e.g. via input or event type).
+    const isFullReconciliation = false; // Default to false for safety as requested
+
+    if (isFullReconciliation && newItemIds.size > 0) {
         for (const id of existingItems.keys()) {
             if (!newItemIds.has(id)) {
                 existingItems.delete(id);
@@ -334,21 +357,13 @@ async function run() {
     }
 
     // Sweep logic: If we are in a sweep mode (e.g. specialized trigger) or just always hinting
-    const existingBody = digestComment?.body || '';
-    const alreadyMentioned = existingBody.includes('@Jules');
-
     if (hasOpenItems) {
-        // Only prepend @Jules if it's absent (to notify)
-        if (!alreadyMentioned) {
-            newBody = `@Jules\n` + newBody.replace(DIGEST_HEADER, UNRESOLVED_HEADER);
-        } else {
-            // Leave without mention if it was already there (user instruction to avoid repeated notifications)
-            newBody = newBody.replace(DIGEST_HEADER, UNRESOLVED_HEADER);
-        }
-        newBody += `\n\nThere are unresolved items. Please review and update status (Fix/Skip/Defer) for the unchecked items.`;
+        newBody = newBody.replace(DIGEST_HEADER, UNRESOLVED_HEADER);
     } else {
         newBody += `\n\nAll items resolved! code review complete.`;
     }
+
+    let digestChanged = false;
 
     // Post/Update
     if (digestComment) {
@@ -362,6 +377,7 @@ async function run() {
                 body: newBody
             });
             console.log("Updated Digest comment.");
+            digestChanged = true;
         } else {
             console.log("Digest up to date.");
         }
@@ -374,6 +390,44 @@ async function run() {
                 body: newBody
             });
             console.log("Created Digest comment.");
+            digestChanged = true;
+        }
+    }
+
+    // Trigger Jules if there are open items and (digest changed OR explicitly requested)
+    // For now, we trigger if there are open items and we just updated the digest, OR if it's a manual run.
+    const shouldTriggerJules = hasOpenItems && (digestChanged || eventName === 'workflow_dispatch');
+
+    await checkAndTriggerJules(octokit, shouldTriggerJules, repoOwner!, repoName!, targetRef, prNumber);
+}
+
+async function checkAndTriggerJules(
+    octokit: Octokit,
+    shouldTrigger: boolean,
+    owner: string,
+    repo: string,
+    ref: string,
+    prNumber: number
+) {
+    if (shouldTrigger) {
+        console.log("Triggering Jules Process...");
+        try {
+            await octokit.actions.createWorkflowDispatch({
+                owner,
+                repo,
+                workflow_id: 'jules-process.yml',
+                ref,
+                inputs: {
+                    pr_number: prNumber.toString(),
+                    // digest_body removed to avoid size limits. 
+                    // The workflow will fetch the digest from the PR comments.
+                }
+            });
+            console.log("Successfully triggered jules-process workflow.");
+        } catch (error) {
+            console.error("Failed to trigger Jules workflow:", error);
+            // Ensure failure is surfaced
+            Deno.exit(1);
         }
     }
 }
@@ -384,7 +438,8 @@ export {
     extractSections,
     generateStableId,
     parseDigestComment,
-    parseJulesReport
+    parseJulesReport,
+    checkAndTriggerJules
 };
 
 // Run the script
