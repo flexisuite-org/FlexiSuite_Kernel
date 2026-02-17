@@ -38,11 +38,12 @@ fn main() -> Result<()> {
 
     // 2. Load Implementation Plan REQs
     let impl_path = root.join("docs/implementation_plan.md");
-    let impl_reqs = if impl_path.exists() {
-        let impl_content = fs::read_to_string(&impl_path).context("Failed to read implementation_plan.md")?;
-        extract_reqs(&impl_content, &re_req)
-    } else {
-        HashSet::new()
+    let (impl_reqs, impl_loaded) = match fs::read_to_string(&impl_path) {
+        Ok(impl_content) => (extract_reqs(&impl_content, &re_req), true),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => (HashSet::new(), false),
+        Err(err) => {
+            return Err(err).context("Failed to read implementation_plan.md");
+        }
     };
 
     let mut errors = false;
@@ -51,7 +52,7 @@ fn main() -> Result<()> {
     // The existing script enforced strict equality. We will maintain that.
     // However, if implementation_plan doesn't exist, we might skip or warn.
     // Assuming strict equality if impl exists.
-    if impl_path.exists() {
+    if impl_loaded {
         let missing_in_matrix: Vec<_> = impl_reqs.difference(&matrix_reqs).collect();
         let missing_in_impl: Vec<_> = matrix_reqs.difference(&impl_reqs).collect();
 
@@ -73,13 +74,29 @@ fn main() -> Result<()> {
     }
 
     // 4. Scan Codebase
-    for entry in WalkDir::new(root).into_iter().filter_map(|e| e.ok()) {
+    for entry in WalkDir::new(root).into_iter() {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(err) => {
+                eprintln!("Error: Failed to traverse directory: {err}");
+                errors = true;
+                continue;
+            }
+        };
+
         let path = entry.path();
-        let path_str = path.to_string_lossy();
+        let mut prev_was_ops = false;
+        let is_ops_linters_path = path.components().any(|component| {
+            let is_ops = component.as_os_str() == "ops";
+            let is_linters = component.as_os_str() == "linters";
+            let matched = prev_was_ops && is_linters;
+            prev_was_ops = is_ops;
+            matched
+        });
 
         // Skip hidden directories, target, source docs, and linters source
         if path.components().any(|c| c.as_os_str() == "target") ||
-            path_str.contains("ops/linters") ||
+            is_ops_linters_path ||
             path.components().any(|c| { // Hidden files
                 let s = c.as_os_str().to_string_lossy();
                 s.starts_with('.') && s != "." && s != ".."
@@ -95,7 +112,8 @@ fn main() -> Result<()> {
             let should_scan = match path.extension().and_then(|ext| ext.to_str()) {
                 // Whitelist text extensions to skip binary files.
                 Some(ext_str) => ["rs", "sql", "md", "txt", "toml", "sh", "yaml", "yml", "json"]
-                    .contains(&ext_str),
+                    .iter()
+                    .any(|allowed| allowed.eq_ignore_ascii_case(ext_str)),
                 // Also scan small files without extensions (e.g., Makefile-like files).
                 None => path
                     .metadata()
