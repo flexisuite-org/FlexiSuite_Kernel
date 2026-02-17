@@ -196,6 +196,7 @@ fn extract_bearer_token(auth_header: &str) -> Option<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use kernel_core::auth::is_valid_principal;
 
     #[test]
     fn extract_bearer_token_accepts_case_insensitive_scheme() {
