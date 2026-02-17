@@ -16,6 +16,14 @@ pub struct RegistryStorage {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
+/// Digest payload for `manifest_payload_digest`.
+///
+/// Hash stability depends on the serde serialization shape of this payload and
+/// all nested types referenced here (`Route`, `Dependencies`, `Kind`).
+/// Changing serde attributes (for example `rename_all`, field/variant renames,
+/// or ordering-affecting schema changes) can silently change computed digests.
+/// Treat such serde-shape changes as breaking: update stored manifests, add
+/// migration steps, and add digest regression tests.
 struct ManifestDigestPayload<'a> {
     schema_version: &'a str,
     id: &'a str,
@@ -85,6 +93,14 @@ impl RegistryStorage {
         ))
     }
 
+    /// Computes a digest from the JSON serialization of `ManifestDigestPayload`.
+    ///
+    /// Maintenance note: digest stability is tied to serde configuration of
+    /// nested payload types (`Route`, `Dependencies`, `Kind`) and this payload's
+    /// own serde shape. Any serde change (including `rename_all`, field/variant
+    /// renames, or ordering-affecting schema edits) must be treated as breaking:
+    /// update stored manifests, add migration steps, and add digest regression
+    /// tests.
     fn manifest_payload_digest(manifest: &DistManifest) -> Result<String, RegistryError> {
         let payload = ManifestDigestPayload {
             schema_version: &manifest.schema_version,
