@@ -3,5 +3,9 @@ resolver = "2"
 members = [
     "kernel-core",
     "kernel-api",
-    "tests/contract", "kernel-data", "kernel-data/migration",
+    "tests/contract",
+    "kernel-data",
+    "kernel-data/migration",
+    "ops/linters",
+    "kernel-archiver",
 ]

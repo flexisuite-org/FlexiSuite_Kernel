@@ -2,6 +2,7 @@ pub use sea_orm_migration::prelude::*;
 
 mod m20240216_000001_init_rls;
 mod m20240216_000002_create_entity_records;
+mod m20240216_000003_create_audit_tables;
 mod m20250521_000001_key_management;
 
 pub struct Migrator;
@@ -12,6 +13,7 @@ impl MigratorTrait for Migrator {
         vec![
             Box::new(m20240216_000001_init_rls::Migration),
             Box::new(m20240216_000002_create_entity_records::Migration),
+            Box::new(m20240216_000003_create_audit_tables::Migration),
             Box::new(m20250521_000001_key_management::Migration),
         ]
     }
