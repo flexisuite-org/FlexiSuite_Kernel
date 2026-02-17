@@ -72,7 +72,9 @@ pub async fn auth_middleware(mut req: Request<Body>, next: Next) -> Result<Respo
 
                 TenantContext::new(tenant_id, user_id)
             } else {
-                tracing::warn!("Missing Authorization header (and no X-Tenant-Id for debug bypass)");
+                tracing::warn!(
+                    "Missing Authorization header (and no X-Tenant-Id for debug bypass)"
+                );
                 return Err(StatusCode::UNAUTHORIZED);
             }
         }
@@ -136,7 +138,6 @@ fn verify_paseto_v4_public_token(
         serde_json::from_value(verified_payload).map_err(|_| AuthError::Unauthorized)?;
     validate_claims(claims)
 }
-
 
 fn validate_claims(claims: PasetoClaims) -> Result<TenantContext, AuthError> {
     let tenant_id = TenantId::new(&claims.tenant_id).map_err(|_| AuthError::Forbidden)?;

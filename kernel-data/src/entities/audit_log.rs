@@ -9,9 +9,9 @@ pub struct Model {
     #[sea_orm(primary_key, auto_increment = false)]
     pub tenant_id: String, // Partition Key / RLS Scope
     pub actor_id: String, // User ID or API Key ID
-    pub action: String, // e.g., "auth.login", "entity.create"
+    pub action: String,   // e.g., "auth.login", "entity.create"
     pub resource: String, // e.g., "user:123", "entity:456"
-    pub details: Json, // Context, diff, etc.
+    pub details: Json,    // Context, diff, etc.
     pub ip_address: Option<String>,
     pub user_agent: Option<String>,
     pub created_at: DateTimeWithTimeZone,
