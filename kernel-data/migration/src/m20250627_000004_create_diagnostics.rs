@@ -45,7 +45,7 @@ impl MigrationTrait for Migration {
             ALTER TABLE flexi.diagnostic_reports FORCE ROW LEVEL SECURITY;
             DROP POLICY IF EXISTS tenant_isolation ON flexi.diagnostic_reports;
             DROP POLICY IF EXISTS tenant_isolation_policy ON flexi.diagnostic_reports;
-            CREATE POLICY tenant_isolation_policy ON flexi.diagnostic_reports
+            CREATE POLICY tenant_isolation ON flexi.diagnostic_reports
                 FOR ALL
                 TO PUBLIC
                 USING (tenant_id = flexi.authorized_tenant_id());
@@ -60,7 +60,7 @@ impl MigrationTrait for Migration {
             ALTER TABLE flexi.diagnostic_policies FORCE ROW LEVEL SECURITY;
             DROP POLICY IF EXISTS tenant_isolation ON flexi.diagnostic_policies;
             DROP POLICY IF EXISTS tenant_isolation_policy ON flexi.diagnostic_policies;
-            CREATE POLICY tenant_isolation_policy ON flexi.diagnostic_policies
+            CREATE POLICY tenant_isolation ON flexi.diagnostic_policies
                 FOR ALL
                 TO PUBLIC
                 USING (tenant_id = flexi.authorized_tenant_id());
@@ -73,6 +73,8 @@ impl MigrationTrait for Migration {
             r#"
             CREATE INDEX IF NOT EXISTS idx_diagnostic_reports_tenant_id
                 ON flexi.diagnostic_reports (tenant_id, created_at);
+            CREATE INDEX IF NOT EXISTS idx_diagnostic_policies_tenant_id
+                ON flexi.diagnostic_policies (tenant_id, updated_at);
             "#,
         )
         .await?;
