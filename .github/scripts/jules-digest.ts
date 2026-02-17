@@ -62,8 +62,10 @@ function extractSections(body: string): { actionable: string[], nitpick: string[
             currentSection = 'none';
         }
 
-        if (currentSection !== 'none' && (line.trim().startsWith('- ') || line.trim().startsWith('* '))) {
-            let content = line.trim().substring(2).trim(); // Remove bullet point
+        const trimmed = line.trim();
+        // Check for new item
+        if (currentSection !== 'none' && (trimmed.startsWith('- ') || trimmed.startsWith('* '))) {
+            let content = trimmed.substring(2).trim(); // Remove bullet point
             // Remove checkbox if present (e.g. from Actionable items)
             content = content.replace(/^\[[ xX]\]\s*/, '');
 
@@ -71,6 +73,13 @@ function extractSections(body: string): { actionable: string[], nitpick: string[
                 actionableItems.push(content);
             } else {
                 nitpickItems.push(content);
+            }
+        } else if (currentSection !== 'none' && trimmed !== '' && !line.startsWith('## ')) {
+            // Continuation or Indented Line logic
+            const targetList = currentSection === 'actionable' ? actionableItems : nitpickItems;
+            if (targetList.length > 0) {
+                // Append to last item, preserving newline
+                targetList[targetList.length - 1] += '\n' + line;
             }
         }
     }
@@ -87,13 +96,16 @@ function parseDigestComment(body: string): Map<string, ReviewItem> {
         if (match) {
             const isChecked = match[1].toLowerCase() === 'x';
             const id = match[2];
-            const statusToken = match[3]?.toLowerCase(); // e.g. 'skipped', 'deferred'
+            const metaContent = match[3]?.toLowerCase() || ''; // e.g. 'skipped', 'nitpick', 'nitpick, skipped'
             const content = match[4];
+
+            // determine type
+            const type = metaContent.includes('nitpick') ? 'nitpick' : 'actionable';
 
             let status: 'open' | 'fixed' | 'skipped' | 'deferred' = 'open';
             if (isChecked) {
-                if (statusToken === 'skipped') status = 'skipped';
-                else if (statusToken === 'deferred') status = 'deferred';
+                if (metaContent.includes('skipped')) status = 'skipped';
+                else if (metaContent.includes('deferred')) status = 'deferred';
                 else status = 'fixed';
             } else {
                 status = 'open';
@@ -101,7 +113,7 @@ function parseDigestComment(body: string): Map<string, ReviewItem> {
 
             items.set(id, {
                 id,
-                type: 'actionable', // Type is lost in serialization, default to actionable
+                type,
                 content,
                 status,
             });
@@ -153,7 +165,20 @@ async function run() {
         Deno.exit(1);
     }
 
-    const payload = JSON.parse(await Deno.readTextFile(eventPath));
+    let payload;
+    try {
+        const text = await Deno.readTextFile(eventPath);
+        payload = JSON.parse(text);
+    } catch (error: any) {
+        if (error instanceof Deno.errors.NotFound) {
+            console.error(`Failed to read event file at ${eventPath}:`, error);
+        } else if (error instanceof SyntaxError) {
+            console.error(`Invalid JSON in event file at ${eventPath}:`, error);
+        } else {
+            console.error(`Error reading event payload at ${eventPath}:`, error);
+        }
+        Deno.exit(1);
+    }
 
     let prNumber: number | undefined;
     let repoOwner: string | undefined;
@@ -163,6 +188,10 @@ async function run() {
     const inputPrNumber = Deno.env.get("INPUT_PR_NUMBER");
     if (inputPrNumber) {
         prNumber = parseInt(inputPrNumber, 10);
+        if (Number.isNaN(prNumber)) {
+            console.error(`Invalid INPUT_PR_NUMBER: ${inputPrNumber}`);
+            Deno.exit(1);
+        }
     }
 
     // Extract PR context from payload if not manually provided
@@ -229,7 +258,8 @@ async function run() {
         pull_number: prNumber,
     });
 
-    const codeRabbitReviews = reviews.filter((r: any) => r.user?.login === 'coderabbitai' || r.user?.login?.includes('coderabbit'));
+    const CODERABBIT_LOGINS = new Set(['coderabbitai', 'coderabbitai[bot]', 'coderabbit']);
+    const codeRabbitReviews = reviews.filter((r: any) => CODERABBIT_LOGINS.has(r.user?.login));
 
     // Process ALL CodeRabbit reviews to ensure we don't miss anything.
     // Use a Set to avoid duplicates if CodeRabbit posts multiple times or edits.
@@ -257,11 +287,21 @@ async function run() {
     }
 
     // Reconcile
+    const newItemIds = new Set(newItems.map(i => i.id));
+
+    // Add new items
     for (const item of newItems) {
         if (!existingItems.has(item.id)) {
             existingItems.set(item.id, item);
         }
-        // If it exists, we keep the status (managed by check/report)
+        // If exists, we keep the status (managed by check/report)
+    }
+
+    // Remove stale items
+    for (const id of existingItems.keys()) {
+        if (!newItemIds.has(id)) {
+            existingItems.delete(id);
+        }
     }
 
     // Generate New Digest Body
@@ -289,8 +329,17 @@ async function run() {
     }
 
     // Sweep logic: If we are in a sweep mode (e.g. specialized trigger) or just always hinting
+    const existingBody = digestComment?.body || '';
+    const alreadyMentioned = existingBody.includes('@Jules');
+
     if (hasOpenItems) {
-        newBody = `@Jules\n` + newBody.replace(DIGEST_HEADER, UNRESOLVED_HEADER);
+        // Only prepend @Jules if it's absent (to notify)
+        if (!alreadyMentioned) {
+            newBody = `@Jules\n` + newBody.replace(DIGEST_HEADER, UNRESOLVED_HEADER);
+        } else {
+            // Leave without mention if it was already there (user instruction to avoid repeated notifications)
+            newBody = newBody.replace(DIGEST_HEADER, UNRESOLVED_HEADER);
+        }
         newBody += `\n\nThere are unresolved items. Please review and update status (Fix/Skip/Defer) for the unchecked items.`;
     } else {
         newBody += `\n\nAll items resolved! code review complete.`;
