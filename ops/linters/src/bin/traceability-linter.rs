@@ -6,6 +6,8 @@ use regex::Regex;
 use anyhow::{Result, Context};
 use clap::Parser;
 
+const EXTENSIONLESS_TEXT_MAX_BYTES: u64 = 256 * 1024;
+
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 struct Args {
@@ -73,11 +75,11 @@ fn main() -> Result<()> {
     // 4. Scan Codebase
     for entry in WalkDir::new(root).into_iter().filter_map(|e| e.ok()) {
         let path = entry.path();
+        let path_str = path.to_string_lossy();
 
         // Skip hidden directories, target, source docs, and linters source
         if path.components().any(|c| c.as_os_str() == "target") ||
-            // Check for ops/linters sequence more robustly
-            path.components().collect::<Vec<_>>().windows(2).any(|w| w[0].as_os_str() == "ops" && w[1].as_os_str() == "linters") ||
+            path_str.contains("ops/linters") ||
             path.components().any(|c| { // Hidden files
                 let s = c.as_os_str().to_string_lossy();
                 s.starts_with('.') && s != "." && s != ".."
@@ -90,24 +92,31 @@ fn main() -> Result<()> {
         if path.is_file() {
             // Check text files only roughly based on extension or content
             // We'll trust utf8 read for now
-            if let Some(ext) = path.extension() {
-                let ext_str = ext.to_string_lossy();
-                // Whitelist text extensions to skip binary files
-                if ["rs", "sql", "md", "txt", "toml", "sh", "yaml", "yml", "json"].contains(&ext_str.as_ref()) {
-                     let content = match fs::read_to_string(path) {
-                        Ok(c) => c,
-                        Err(e) => {
-                            eprintln!("Warning: Failed to read file {}: {}", path.display(), e);
-                            continue;
-                        }
-                    };
+            let should_scan = match path.extension().and_then(|ext| ext.to_str()) {
+                // Whitelist text extensions to skip binary files.
+                Some(ext_str) => ["rs", "sql", "md", "txt", "toml", "sh", "yaml", "yml", "json"]
+                    .contains(&ext_str),
+                // Also scan small files without extensions (e.g., Makefile-like files).
+                None => path
+                    .metadata()
+                    .map(|m| m.len() <= EXTENSIONLESS_TEXT_MAX_BYTES)
+                    .unwrap_or(false),
+            };
 
-                    let file_reqs = extract_reqs(&content, &re_req);
-                    for req in file_reqs {
-                        if !matrix_reqs.contains(&req) {
-                            eprintln!("Error: Undefined REQ ID '{}' found in {}", req, path.display());
-                            errors = true;
-                        }
+            if should_scan {
+                let content = match fs::read_to_string(path) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        eprintln!("Warning: Failed to read file {}: {}", path.display(), e);
+                        continue;
+                    }
+                };
+
+                let file_reqs = extract_reqs(&content, &re_req);
+                for req in file_reqs {
+                    if !matrix_reqs.contains(&req) {
+                        eprintln!("Error: Undefined REQ ID '{}' found in {}", req, path.display());
+                        errors = true;
                     }
                 }
             }
