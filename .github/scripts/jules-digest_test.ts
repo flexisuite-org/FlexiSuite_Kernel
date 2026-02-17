@@ -108,6 +108,8 @@ Deno.test("parseDigestComment - handles malformed lines", () => {
 
     // Let's test checking logic resilience
     const items = parseDigestComment(body);
+    // Should be empty as no lines match the strict regex
+    assertEquals(items.size, 0);
     // Should be empty or only contain valid ones if we happened to construct one
     // 'CR-valid1234' is 12 chars (CR- + 10). Wait.
     // Logic: CR-[a-f0-9]{10} means CR- followed by 10 hex.

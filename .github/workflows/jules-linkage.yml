@@ -25,7 +25,7 @@ jobs:
     runs-on: ubuntu-latest
     if: |
       (github.event_name == 'pull_request_review' && contains(github.event.review.body, 'CodeRabbit')) ||
-      (github.event_name == 'pull_request_review_comment' && github.event.comment.user.type == 'Bot') ||
+      (github.event_name == 'pull_request_review_comment' && (github.event.comment.user.login == 'coderabbitai' || github.event.comment.user.login == 'coderabbit' || github.event.comment.user.login == 'coderabbitai[bot]')) ||
       (github.event_name == 'issue_comment' && github.event.issue.pull_request && contains(github.event.comment.body, 'Jules Review Result')) ||
       contains(github.event.pull_request.labels.*.name, 'run-jules') ||
       contains(github.event.issue.labels.*.name, 'run-jules') ||
