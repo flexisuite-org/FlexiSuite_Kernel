@@ -99,16 +99,18 @@ where
     F: for<'c> FnOnce(&'c TenantScoped<RawConnection>) -> BoxFuture<'c, kernel::Result<R>> + Send,
     R: Send,
 {
-    let txn = pool.begin().await.map_err(KernelError::db_error)?;
-
-    // 1. Set Token
-    // Format: v2:kid:ts:nonce:tenant_id:sig
-
+    // Fail fast on configuration/validation errors before acquiring a connection
     if ctx.tenant_id().as_str().contains(':') {
         return Err(KernelError::TenantAuthorizationFailed(
             "tenant_id must not contain ':'".into(),
         ));
     }
+    let secret = get_hmac_secret()?;
+
+    let txn = pool.begin().await.map_err(KernelError::db_error)?;
+
+    // 1. Set Token
+    // Format: v2:kid:ts:nonce:tenant_id:sig
 
     let now = chrono::Utc::now().timestamp();
     let ts_str = now.to_string();
@@ -117,7 +119,6 @@ where
     let ver = "v2";
 
     // HMAC Signature Calculation
-    let secret = get_hmac_secret()?;
     let key = hmac::Key::new(hmac::HMAC_SHA256, secret);
     let msg = format!("{}:{}:{}:{}:{}", ver, kid, ts_str, nonce, ctx.tenant_id());
     let tag = hmac::sign(&key, msg.as_bytes());
