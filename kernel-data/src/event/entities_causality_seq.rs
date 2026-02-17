@@ -2,8 +2,10 @@ use sea_orm::entity::prelude::*;
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel, Deserialize, Serialize)]
-#[sea_orm(table_name = "causality_event_seq")]
+#[sea_orm(table_name = "causality_event_seq", schema_name = "flexi")]
 pub struct Model {
+    #[sea_orm(primary_key, auto_increment = false)]
+    pub tenant_id: String,
     #[sea_orm(primary_key, auto_increment = false)]
     pub causality_key: String,
     pub last_seq: i64,
