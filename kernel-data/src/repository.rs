@@ -27,7 +27,7 @@ pub trait TenantRepository: private::Sealed + Send + Sync {
 // In reality, DB writes are safe from log injection, but this ensures no control chars.
 fn sanitize_for_log(s: &str) -> String {
     s.chars()
-        .map(|c| if c.is_control() { ' ' } else { c })
+        .flat_map(|c| c.escape_debug())
         .collect()
 }
 
