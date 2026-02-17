@@ -82,7 +82,12 @@ pub trait ReliableConsumer: Send + Sync {
         max_count: usize,
     ) -> Result<Vec<Delivery>, EventError>;
 
-    async fn ack(&self, stream: &str, consumer_group: &str, delivery_id: &str) -> Result<(), EventError>;
+    async fn ack(
+        &self,
+        stream: &str,
+        consumer_group: &str,
+        delivery_id: &str,
+    ) -> Result<(), EventError>;
 
     async fn nack(
         &self,

@@ -1,7 +1,7 @@
-use kernel_core::event::{EventEnvelope, OrderMode, ReliableProducer, PublishAck, EventError};
 use async_trait::async_trait;
-use redis::{Client, AsyncCommands};
+use kernel_core::event::{EventEnvelope, EventError, OrderMode, PublishAck, ReliableProducer};
 use redis::aio::ConnectionManager;
+use redis::{AsyncCommands, Client};
 use ring::digest::{Context, SHA256};
 
 #[derive(Clone)]
@@ -11,8 +11,9 @@ pub struct RedisProducer {
 
 impl RedisProducer {
     pub async fn new(client: Client) -> Result<Self, EventError> {
-        let connection_manager = client.get_connection_manager().await
-            .map_err(|e| EventError::Producer(format!("failed to create connection manager: {}", e)))?;
+        let connection_manager = client.get_connection_manager().await.map_err(|e| {
+            EventError::Producer(format!("failed to create connection manager: {}", e))
+        })?;
         Ok(Self { connection_manager })
     }
 
@@ -31,7 +32,11 @@ impl RedisProducer {
 
 #[async_trait]
 impl ReliableProducer for RedisProducer {
-    async fn publish(&self, stream_base: &str, event: EventEnvelope) -> Result<PublishAck, EventError> {
+    async fn publish(
+        &self,
+        stream_base: &str,
+        event: EventEnvelope,
+    ) -> Result<PublishAck, EventError> {
         let key_str = match &event.order_mode {
             OrderMode::Entity { entity_id, .. } => entity_id.to_string(),
             OrderMode::Causality { key, .. } => key.clone(),
@@ -40,13 +45,13 @@ impl ReliableProducer for RedisProducer {
         let shard = Self::calculate_shard(&key_str);
         let stream_key = format!("{}:{}", stream_base, shard);
 
-        let payload_json = serde_json::to_string(&event)
-            .map_err(EventError::Serialization)?;
+        let payload_json = serde_json::to_string(&event).map_err(EventError::Serialization)?;
 
         // ConnectionManager handles reconnections and multiplexing.
         let mut conn = self.connection_manager.clone();
 
-        let id: String = conn.xadd(&stream_key, "*", &[("data", payload_json)])
+        let id: String = conn
+            .xadd(&stream_key, "*", &[("data", payload_json)])
             .await
             .map_err(|e| EventError::Producer(format!("failed to xadd: {}", e)))?;
 
