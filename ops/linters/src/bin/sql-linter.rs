@@ -65,33 +65,35 @@ fn main() -> Result<()> {
                         }
                     }
 
-                    // Check SECURITY DEFINER template
-                    let mut security_definer_found = false;
+                    // Check SECURITY DEFINER template vs REVOKE count
+                    let security_definer_count = re_security_definer.find_iter(&content).count();
+                    let revoke_count = re_revoke.find_iter(&content).count();
+
+                    if security_definer_count > revoke_count {
+                        eprintln!("{}: SECURITY DEFINER found {} times but 'REVOKE ... FROM PUBLIC' found only {} times.", path.display(), security_definer_count, revoke_count);
+                        errors = true;
+                    }
+
                     for cap in re_security_definer.find_iter(&content) {
-                        security_definer_found = true;
                         let start = cap.start();
                         let line = get_line_number(&content, start);
 
-                        // Check search_path in the vicinity (e.g., next 500 chars)
-                        // This assumes the SET clause is near the SECURITY DEFINER keyword
+                        // Check search_path in the vicinity (bidirectional 500 chars)
+                        let mut start_search = if start > 500 { start - 500 } else { 0 };
+                        while !content.is_char_boundary(start_search) {
+                            start_search = start_search. saturating_sub(1);
+                        }
+
                         let mut end_search = std::cmp::min(content.len(), start + 500);
                         // Ensure we slice at a valid char boundary
                         while !content.is_char_boundary(end_search) {
                             end_search -= 1;
                         }
-                        let window = &content[start..end_search];
+                        let window = &content[start_search..end_search];
 
                         if !re_search_path.is_match(window) {
                             eprintln!("{}:{}: SECURITY DEFINER found without 'SET search_path = flexi, pg_catalog, pg_temp' nearby", path.display(), line);
                             errors = true;
-                        }
-                    }
-
-                    if security_definer_found {
-                        // Check for REVOKE in the whole file if SECURITY DEFINER is present
-                        if !re_revoke.is_match(&content) {
-                             eprintln!("{}: SECURITY DEFINER used but 'REVOKE ... FROM PUBLIC' is missing in file", path.display());
-                             errors = true;
                         }
                     }
                 }
@@ -100,7 +102,7 @@ fn main() -> Result<()> {
     }
 
     if errors {
-        std::process::exit(1);
+        anyhow::bail!("SQL Security Linter found errors");
     }
 
     println!("SQL Security Linter Passed");

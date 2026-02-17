@@ -23,14 +23,13 @@ fn main() -> Result<()> {
     let args = Args::parse();
     let root = Path::new(&args.path);
 
-    // REQ ID must consist of alphanumeric segments separated by single hyphens
-    let re_req = Regex::new(r"REQ-[A-Z0-9]+(?:-[A-Z0-9]+)*").unwrap();
+    // REQ ID must consist of alphanumeric segments separated by single hyphens, anchored to word boundaries
+    let re_req = Regex::new(r"\bREQ-[A-Z0-9]+(?:-[A-Z0-9]+)*\b").unwrap();
 
     // 1. Load Matrix REQs
     let matrix_path = root.join("docs/verification_matrix.md");
     if !matrix_path.exists() {
-        eprintln!("Error: docs/verification_matrix.md not found");
-        std::process::exit(1);
+        anyhow::bail!("Error: docs/verification_matrix.md not found");
     }
     let matrix_content = fs::read_to_string(&matrix_path).context("Failed to read verification_matrix.md")?;
     let matrix_reqs = extract_reqs(&matrix_content, &re_req);
@@ -76,39 +75,47 @@ fn main() -> Result<()> {
         let path = entry.path();
 
         // Skip hidden directories, target, source docs, and linters source
-        if path.components().any(|c| {
-            let s = c.as_os_str().to_string_lossy();
-            s.starts_with('.') && s != "." && s != ".."
-        }) || path.components().any(|c| c.as_os_str() == "target") ||
+        if path.components().any(|c| c.as_os_str() == "target") ||
+            // Check for ops/linters sequence more robustly
+            path.components().collect::<Vec<_>>().windows(2).any(|w| w[0].as_os_str() == "ops" && w[1].as_os_str() == "linters") ||
+            path.components().any(|c| { // Hidden files
+                let s = c.as_os_str().to_string_lossy();
+                s.starts_with('.') && s != "." && s != ".."
+            }) ||
            path == matrix_path ||
-           path == impl_path ||
-           path.to_string_lossy().contains("ops/linters") {
+           path == impl_path {
             continue;
         }
 
         if path.is_file() {
             // Check text files only roughly based on extension or content
             // We'll trust utf8 read for now
-             let content = match fs::read_to_string(path) {
-                Ok(c) => c,
-                Err(e) => {
-                    eprintln!("Warning: Failed to read file {}: {}", path.display(), e);
-                    continue;
-                }
-            };
+            if let Some(ext) = path.extension() {
+                let ext_str = ext.to_string_lossy();
+                // Whitelist text extensions to skip binary files
+                if ["rs", "sql", "md", "txt", "toml", "sh", "yaml", "yml", "json"].contains(&ext_str.as_ref()) {
+                     let content = match fs::read_to_string(path) {
+                        Ok(c) => c,
+                        Err(e) => {
+                            eprintln!("Warning: Failed to read file {}: {}", path.display(), e);
+                            continue;
+                        }
+                    };
 
-            let file_reqs = extract_reqs(&content, &re_req);
-            for req in file_reqs {
-                if !matrix_reqs.contains(&req) {
-                    eprintln!("Error: Undefined REQ ID '{}' found in {}", req, path.display());
-                    errors = true;
+                    let file_reqs = extract_reqs(&content, &re_req);
+                    for req in file_reqs {
+                        if !matrix_reqs.contains(&req) {
+                            eprintln!("Error: Undefined REQ ID '{}' found in {}", req, path.display());
+                            errors = true;
+                        }
+                    }
                 }
             }
         }
     }
 
     if errors {
-        std::process::exit(1);
+        anyhow::bail!("Traceability Linter found errors");
     }
 
     println!("Traceability Linter Passed");
