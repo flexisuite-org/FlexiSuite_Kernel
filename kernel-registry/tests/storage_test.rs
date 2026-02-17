@@ -12,6 +12,33 @@ fn test_tenant_ctx() -> TenantContext {
     TenantContext::new(TenantId::new("tenant_test").expect("valid tenant id"), None)
 }
 
+fn test_manifest(id: &str, version: &str) -> DistManifest {
+    DistManifest {
+        schema_version: "1.0".to_string(),
+        id: id.to_string(),
+        version: version.into(),
+        kind: Kind::Composition,
+        name: "Test App".to_string(),
+        protected: false,
+        composition_root: "main.tsx".to_string(),
+        routes: vec![Route {
+            path: "/".to_string(),
+            component: "layout".to_string(),
+        }],
+        dependencies: Dependencies {
+            components: BTreeMap::new(),
+            permissions: vec![],
+        },
+        configuration: BTreeMap::new(),
+        security: Security {
+            manifest_digest: "".to_string(),
+            manifest_signature: "sig_default".to_string(),
+            manifest_signature_kid: "kid_default".to_string(),
+            trust_root_version: "v1".to_string(),
+        },
+    }
+}
+
 #[tokio::test]
 async fn test_save_and_get_artifact() {
     let store = Arc::new(InMemory::new());
@@ -50,30 +77,9 @@ async fn test_save_and_get_manifest() {
     let store = Arc::new(InMemory::new());
     let registry = RegistryStorage::new(store, &test_tenant_ctx());
 
-    let manifest = DistManifest {
-        schema_version: "1.0".to_string(),
-        id: "app_test".to_string(),
-        version: "1.0.0".to_string(),
-        kind: Kind::Composition,
-        name: "Test App".to_string(),
-        protected: false,
-        composition_root: "main.tsx".to_string(),
-        routes: vec![Route {
-            path: "/".to_string(),
-            component: "layout".to_string(),
-        }],
-        dependencies: Dependencies {
-            components: BTreeMap::new(),
-            permissions: vec![],
-        },
-        configuration: BTreeMap::new(),
-        security: Security {
-            manifest_digest: "".to_string(),
-            manifest_signature: "sig_...".to_string(),
-            manifest_signature_kid: "key1".to_string(),
-            trust_root_version: "v1".to_string(),
-        },
-    };
+    let mut manifest = test_manifest("app_test", "1.0.0");
+    manifest.security.manifest_signature = "sig_...".to_string();
+    manifest.security.manifest_signature_kid = "key1".to_string();
 
     let (digest, persisted) = registry.save_manifest(&manifest).await.unwrap();
     assert_eq!(digest.len(), 96); // SHA-384 hex string length
@@ -107,46 +113,27 @@ async fn test_save_and_get_manifest() {
 
 #[tokio::test]
 async fn test_manifest_digest_excludes_security_section() {
-    let store = Arc::new(InMemory::new());
-    let registry = RegistryStorage::new(store, &test_tenant_ctx());
+    let store_a = Arc::new(InMemory::new());
+    let registry_a = RegistryStorage::new(store_a, &test_tenant_ctx());
 
-    let manifest_a = DistManifest {
-        schema_version: "1.0".to_string(),
-        id: "app_security_digest".to_string(),
-        version: "1.0.0".to_string(),
-        kind: Kind::Composition,
-        name: "Security Digest Test".to_string(),
-        protected: false,
-        composition_root: "main.tsx".to_string(),
-        routes: vec![Route {
-            path: "/".to_string(),
-            component: "layout".to_string(),
-        }],
-        dependencies: Dependencies {
-            components: BTreeMap::new(),
-            permissions: vec![],
-        },
-        configuration: BTreeMap::new(),
-        security: Security {
-            manifest_digest: "".to_string(),
-            manifest_signature: "sig_A".to_string(),
-            manifest_signature_kid: "kid_A".to_string(),
-            trust_root_version: "v1".to_string(),
-        },
-    };
+    let store_b = Arc::new(InMemory::new());
+    let registry_b = RegistryStorage::new(store_b, &test_tenant_ctx());
+
+    let mut manifest_a = test_manifest("app_security_digest", "1.0.0");
+    manifest_a.name = "Security Digest Test".to_string();
+    manifest_a.security.manifest_signature = "sig_A".to_string();
+    manifest_a.security.manifest_signature_kid = "kid_A".to_string();
 
     let mut manifest_b = manifest_a.clone();
-    // Intentionally keep `manifest_b` with the same id/version as `manifest_a`.
-    // In RegistryStorage::save_manifest this overwrites the same manifest path,
-    // and this test's goal is only to assert that digest computation ignores
-    // Security-field differences between manifest_a and manifest_b.
+    // Intentionally keep `manifest_b` with the same id/version/payload as `manifest_a`.
+    // We utilize separate registry stores (`registry_a` and `registry_b`) to avoid logic relying on overwrite behavior,
+    // while ensuring both digests are computed from the same payload despite differing security fields.
     manifest_b.security.manifest_signature = "sig_B".to_string();
     manifest_b.security.manifest_signature_kid = "kid_B".to_string();
     manifest_b.security.trust_root_version = "v2".to_string();
 
-    // These two save_manifest calls intentionally target the same RegistryStorage path.
-    let (digest_a, _) = registry.save_manifest(&manifest_a).await.unwrap();
-    let (digest_b, _) = registry.save_manifest(&manifest_b).await.unwrap();
+    let (digest_a, _) = registry_a.save_manifest(&manifest_a).await.unwrap();
+    let (digest_b, _) = registry_b.save_manifest(&manifest_b).await.unwrap();
 
     assert_eq!(digest_a, digest_b);
 }
@@ -170,30 +157,10 @@ async fn test_save_manifest_rejects_empty_security_fields() {
     let store = Arc::new(InMemory::new());
     let registry = RegistryStorage::new(store, &test_tenant_ctx());
 
-    let manifest = DistManifest {
-        schema_version: "1.0".to_string(),
-        id: "app_invalid_security".to_string(),
-        version: "1.0.0".to_string(),
-        kind: Kind::Composition,
-        name: "Invalid Security".to_string(),
-        protected: false,
-        composition_root: "main.tsx".to_string(),
-        routes: vec![Route {
-            path: "/".to_string(),
-            component: "layout".to_string(),
-        }],
-        dependencies: Dependencies {
-            components: BTreeMap::new(),
-            permissions: vec![],
-        },
-        configuration: BTreeMap::new(),
-        security: Security {
-            manifest_digest: "".to_string(),
-            manifest_signature: "".to_string(),
-            manifest_signature_kid: "key1".to_string(),
-            trust_root_version: "v1".to_string(),
-        },
-    };
+    let mut manifest = test_manifest("app_invalid_security", "1.0.0");
+    manifest.name = "Invalid Security".to_string();
+    manifest.security.manifest_signature = "".to_string();
+    manifest.security.manifest_signature_kid = "key1".to_string();
 
     let result = registry.save_manifest(&manifest).await;
     match result {
@@ -209,30 +176,10 @@ async fn test_save_manifest_rejects_empty_security_kid() {
     let store = Arc::new(InMemory::new());
     let registry = RegistryStorage::new(store, &test_tenant_ctx());
 
-    let manifest = DistManifest {
-        schema_version: "1.0".to_string(),
-        id: "app_invalid_security_kid".to_string(),
-        version: "1.0.0".to_string(),
-        kind: Kind::Composition,
-        name: "Invalid Security Kid".to_string(),
-        protected: false,
-        composition_root: "main.tsx".to_string(),
-        routes: vec![Route {
-            path: "/".to_string(),
-            component: "layout".to_string(),
-        }],
-        dependencies: Dependencies {
-            components: BTreeMap::new(),
-            permissions: vec![],
-        },
-        configuration: BTreeMap::new(),
-        security: Security {
-            manifest_digest: "".to_string(),
-            manifest_signature: "sig_...".to_string(),
-            manifest_signature_kid: "".to_string(),
-            trust_root_version: "v1".to_string(),
-        },
-    };
+    let mut manifest = test_manifest("app_invalid_security_kid", "1.0.0");
+    manifest.name = "Invalid Security Kid".to_string();
+    manifest.security.manifest_signature = "sig_...".to_string();
+    manifest.security.manifest_signature_kid = "".to_string();
 
     let result = registry.save_manifest(&manifest).await;
     match result {
@@ -248,30 +195,11 @@ async fn test_save_manifest_rejects_empty_trust_root_version() {
     let store = Arc::new(InMemory::new());
     let registry = RegistryStorage::new(store, &test_tenant_ctx());
 
-    let manifest = DistManifest {
-        schema_version: "1.0".to_string(),
-        id: "app_invalid_trust_root_version".to_string(),
-        version: "1.0.0".to_string(),
-        kind: Kind::Composition,
-        name: "Invalid Trust Root Version".to_string(),
-        protected: false,
-        composition_root: "main.tsx".to_string(),
-        routes: vec![Route {
-            path: "/".to_string(),
-            component: "layout".to_string(),
-        }],
-        dependencies: Dependencies {
-            components: BTreeMap::new(),
-            permissions: vec![],
-        },
-        configuration: BTreeMap::new(),
-        security: Security {
-            manifest_digest: "".to_string(),
-            manifest_signature: "sig_...".to_string(),
-            manifest_signature_kid: "key1".to_string(),
-            trust_root_version: "".to_string(),
-        },
-    };
+    let mut manifest = test_manifest("app_invalid_trust_root_version", "1.0.0");
+    manifest.name = "Invalid Trust Root Version".to_string();
+    manifest.security.manifest_signature = "sig_...".to_string();
+    manifest.security.manifest_signature_kid = "key1".to_string();
+    manifest.security.trust_root_version = "".to_string();
 
     let result = registry.save_manifest(&manifest).await;
     match result {
@@ -288,30 +216,10 @@ async fn test_get_manifest_detects_tampered_stored_json() {
     let tenant_ctx = test_tenant_ctx();
     let registry = RegistryStorage::new(store.clone(), &tenant_ctx);
 
-    let manifest = DistManifest {
-        schema_version: "1.0".to_string(),
-        id: "app_tamper_test".to_string(),
-        version: "1.0.0".to_string(),
-        kind: Kind::Composition,
-        name: "Tamper Test".to_string(),
-        protected: false,
-        composition_root: "main.tsx".to_string(),
-        routes: vec![Route {
-            path: "/".to_string(),
-            component: "layout".to_string(),
-        }],
-        dependencies: Dependencies {
-            components: BTreeMap::new(),
-            permissions: vec![],
-        },
-        configuration: BTreeMap::new(),
-        security: Security {
-            manifest_digest: "".to_string(),
-            manifest_signature: "sig_...".to_string(),
-            manifest_signature_kid: "key1".to_string(),
-            trust_root_version: "v1".to_string(),
-        },
-    };
+    let mut manifest = test_manifest("app_tamper_test", "1.0.0");
+    manifest.name = "Tamper Test".to_string();
+    manifest.security.manifest_signature = "sig_...".to_string();
+    manifest.security.manifest_signature_kid = "key1".to_string();
 
     let (_, persisted) = registry.save_manifest(&manifest).await.unwrap();
 
@@ -338,30 +246,10 @@ async fn test_save_manifest_rejects_control_character_in_id() {
     let store = Arc::new(InMemory::new());
     let registry = RegistryStorage::new(store, &test_tenant_ctx());
 
-    let manifest = DistManifest {
-        schema_version: "1.0".to_string(),
-        id: "app_\0_test".to_string(),
-        version: "1.0.0".to_string(),
-        kind: Kind::Composition,
-        name: "Invalid Key".to_string(),
-        protected: false,
-        composition_root: "main.tsx".to_string(),
-        routes: vec![Route {
-            path: "/".to_string(),
-            component: "layout".to_string(),
-        }],
-        dependencies: Dependencies {
-            components: BTreeMap::new(),
-            permissions: vec![],
-        },
-        configuration: BTreeMap::new(),
-        security: Security {
-            manifest_digest: "".to_string(),
-            manifest_signature: "sig".to_string(),
-            manifest_signature_kid: "kid".to_string(),
-            trust_root_version: "v1".to_string(),
-        },
-    };
+    let mut manifest = test_manifest("app_\0_test", "1.0.0");
+    manifest.name = "Invalid Key".to_string();
+    manifest.security.manifest_signature = "sig".to_string();
+    manifest.security.manifest_signature_kid = "kid".to_string();
 
     let result = registry.save_manifest(&manifest).await;
     match result {
@@ -373,4 +261,30 @@ async fn test_save_manifest_rejects_control_character_in_id() {
         }
         other => panic!("expected InvalidPath, got {other:?}"),
     }
+}
+
+#[tokio::test]
+async fn test_manifest_digest_numeric_normalization() {
+    let store_a = Arc::new(InMemory::new());
+    let registry_a = RegistryStorage::new(store_a, &test_tenant_ctx());
+
+    let store_b = Arc::new(InMemory::new());
+    let registry_b = RegistryStorage::new(store_b, &test_tenant_ctx());
+
+    // Both must use SAME ID/Version/etc for digest to match
+    let mut manifest_int = test_manifest("app_numeric", "1.0.0");
+    manifest_int.configuration.insert("count".to_string(), serde_json::json!(1));
+
+    let mut manifest_float = test_manifest("app_numeric", "1.0.0");
+    manifest_float.configuration.insert("count".to_string(), serde_json::json!(1.0));
+
+    // Ensure our input assumption is correct: json!(1) != json!(1.0) usually in serde_json Value representation
+    // (though partial_eq might say they are equal, their serialization might differ without normalization)
+    // Actually, serde_json::to_vec(json!(1)) -> "1", to_vec(json!(1.0)) -> "1.0". 
+    // We want to ensure the digests are identical.
+
+    let (digest_int, _) = registry_a.save_manifest(&manifest_int).await.unwrap();
+    let (digest_float, _) = registry_b.save_manifest(&manifest_float).await.unwrap();
+
+    assert_eq!(digest_int, digest_float, "Digests should match for 1 and 1.0");
 }
