@@ -23,12 +23,10 @@ pub trait TenantRepository: private::Sealed + Send + Sync {
     async fn log_audit(&self, action: String, resource: String, details: serde_json::Value) -> kernel::Result<()>;
 }
 
-// Helper to sanitize log entries to satisfy CodeQL.
-// In reality, DB writes are safe from log injection, but this ensures no control chars.
-fn sanitize_for_log(s: &str) -> String {
-    s.chars()
-        .flat_map(|c| c.escape_debug())
-        .collect()
+// Helper to sanitize string for log safety (CWE-117).
+// Explicitly replaces newlines to prevent log injection.
+fn sanitize_string(s: &str) -> String {
+    s.replace('\n', " ").replace('\r', " ")
 }
 
 #[async_trait]
@@ -63,7 +61,7 @@ impl TenantRepository for TenantScoped<RawConnection> {
         };
 
         // User ID
-        let user_id_str = self.user_id.as_ref().map(|u| sanitize_for_log(u.as_str()));
+        let user_id_str = self.user_id.as_ref().map(|u| sanitize_string(u.as_str()));
 
         // 1. Insert Entity
         let result = active_model.insert(&self.inner.txn).await.map_err(KernelError::db_error)?;
@@ -97,7 +95,7 @@ impl TenantRepository for TenantScoped<RawConnection> {
         };
 
         // User ID
-        let user_id_str = self.user_id.as_ref().map(|u| sanitize_for_log(u.as_str()));
+        let user_id_str = self.user_id.as_ref().map(|u| sanitize_string(u.as_str()));
 
         // 1. Update Entity
         let result = active_model.update(&self.inner.txn).await.map_err(KernelError::db_error)?;
@@ -131,7 +129,7 @@ impl TenantRepository for TenantScoped<RawConnection> {
     }
 
     async fn log_audit(&self, action: String, resource: String, details: serde_json::Value) -> kernel::Result<()> {
-        let user_id_str = self.user_id.as_ref().map(|u| sanitize_for_log(u.as_str())).unwrap_or_else(|| "unknown".to_string());
+        let user_id_str = self.user_id.as_ref().map(|u| sanitize_string(u.as_str())).unwrap_or_else(|| "unknown".to_string());
 
         let log = audit_log::ActiveModel {
             id: ActiveValue::Set(Uuid::now_v7().to_string()),
