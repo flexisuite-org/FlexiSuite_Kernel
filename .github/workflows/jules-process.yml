@@ -7,10 +7,6 @@ on:
         description: 'PR Number to process'
         required: true
         type: string
-      digest_body:
-        description: 'Digest body content (instructions for Jules)'
-        required: true
-        type: string
 
 jobs:
   jules-process:
@@ -22,12 +18,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.inputs.pr_number && format('refs/pull/{0}/head', github.event.inputs.pr_number) || github.ref }}
+          # Improved checkout logic for forks and dispatch events
+          ref: ${{ github.event.pull_request.head.sha || github.event.inputs.pr_number && format('refs/pull/{0}/head', github.event.inputs.pr_number) || github.ref }}
+          repository: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
 
       - name: Run Jules
-        uses: google-github-actions/jules-action@v1
+        uses: google-labs-code/jules-action@main
         with:
           jules_api_key: ${{ secrets.JULES_API_KEY }}
-          model: "gemini-2.0-flash-001" # Or appropriate model
-          task: ${{ inputs.digest_body }}
+          model: "gemini-2.0-flash-001"
+          # digest_body is no longer passed; the action must fetch it logic
           pr_number: ${{ inputs.pr_number }}

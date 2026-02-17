@@ -181,7 +181,64 @@ Deno.test("parseDigestComment - round-trips type information", () => {
     assertEquals(deferred?.status, "deferred");
 });
 
-// Note: Testing the workflow dispatch logic requires mocking Octokit, which is complex in this simple test setup.
-// We rely on manual verification for the integration part (triggering the workflow).
+// --- Mock Octokit ---
+
+// Simple mock for Octokit to verify dispatch calls
+class MockOctokit {
+    public actions = {
+        createWorkflowDispatch: (args: any) => {
+            this.dispatchCalls.push(args);
+            return Promise.resolve();
+        }
+    };
+    public dispatchCalls: any[] = [];
+
+    constructor() { }
+}
+
+import { checkAndTriggerJules } from "./jules-digest.ts";
+
+Deno.test("checkAndTriggerJules - triggers when shouldTrigger is true", async () => {
+    // @ts-ignore - Mocking Octokit
+    const mockOctokit = new MockOctokit() as unknown as any;
+
+    await checkAndTriggerJules(
+        mockOctokit,
+        true, // shouldTrigger
+        "owner",
+        "repo",
+        "main",
+        123,
+        "digest content"
+    );
+
+    assertEquals(mockOctokit.dispatchCalls.length, 1);
+    const call = mockOctokit.dispatchCalls[0];
+    assertEquals(call.owner, "owner");
+    assertEquals(call.repo, "repo");
+    assertEquals(call.workflow_id, "jules-process.yml");
+    assertEquals(call.ref, "main");
+    assertEquals(call.inputs.pr_number, "123");
+    // Ensure digest_body is NOT passed
+    assertEquals(call.inputs.digest_body, undefined);
+});
+
+Deno.test("checkAndTriggerJules - does NOT trigger when shouldTrigger is false", async () => {
+    // @ts-ignore - Mocking Octokit
+    const mockOctokit = new MockOctokit() as unknown as any;
+
+    await checkAndTriggerJules(
+        mockOctokit,
+        false, // shouldTrigger
+        "owner",
+        "repo",
+        "main",
+        123,
+        "digest content"
+    );
+
+    assertEquals(mockOctokit.dispatchCalls.length, 0);
+});
+
 
 

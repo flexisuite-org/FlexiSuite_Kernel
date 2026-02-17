@@ -1,27 +1,27 @@
 # tasks: CodeRabbit → Jules 自動連携 (GitHubコメント状態管理版) v1.0.0
 
-- [ ] **Infrastructure Setup**
-  - [ ] `.github/workflows/jules-linkage.yml` の作成
-    - [ ] トリガー定義 (review, comment)
-    - [ ] Denoセットアップ
-    - [ ] スクリプト実行ステップ
+- [x] **Infrastructure Setup**
+  - [x] `.github/workflows/jules-linkage.yml` の作成
+    - [x] トリガー定義 (review, comment)
+    - [x] Denoセットアップ
+    - [x] スクリプト実行ステップ
 
-- [ ] **Script Implementation (`.github/scripts/jules-digest.ts`)**
-  - [ ] **Core Utilities**
-    - [ ] GitHub API Client setup (Octokit)
-    - [ ] ID Generator implementation (SHA-1)
-  - [ ] **Parsers**
-    - [ ] CodeRabbit Review Parser (Actionable/Nitpick extraction)
-    - [ ] Digest Comment Parser (Existing items & checkbox status)
-    - [ ] Jules Report Parser (Fixed/Skipped/Deferred extraction)
-  - [ ] **Logic**
-    - [ ] Reconciliation Logic (Merge incoming with existing status)
-    - [ ] Markdown Generator (Build Digest body)
-    - [ ] Sweep Logic (Identify unresolved items)
-  - [ ] **Main Loop**
-    - [ ] Event handling (Dispatch based on event type)
-    - [ ] API calls (Update/Create comment)
+- [x] **Script Implementation (`.github/scripts/jules-digest.ts`)**
+  - [x] **Core Utilities**
+    - [x] GitHub API Client setup (Octokit)
+    - [x] ID Generator implementation (SHA-1)
+  - [x] **Parsers**
+    - [x] CodeRabbit Review Parser (Actionable/Nitpick extraction)
+    - [x] Digest Comment Parser (Existing items & checkbox status)
+    - [x] Jules Report Parser (Fixed/Skipped/Deferred extraction)
+  - [x] **Logic**
+    - [x] Reconciliation Logic (Merge incoming with existing status)
+    - [x] Markdown Generator (Build Digest body)
+    - [x] Sweep Logic (Identify unresolved items)
+  - [x] **Main Loop**
+    - [x] Event handling (Dispatch based on event type)
+    - [x] API calls (Update/Create comment)
 
-- [ ] **Testing & Verification**
-  - [ ] Unit Tests for Parsers & ID Gen (using `deno test`)
-  - [ ] Manual verification with a mock PR
+- [x] **Testing & Verification**
+  - [x] Unit Tests for Parsers & ID Gen (using `deno test`)
+  - [x] Manual verification with a mock PR
