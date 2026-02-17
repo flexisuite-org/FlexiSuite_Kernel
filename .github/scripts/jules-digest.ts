@@ -240,7 +240,10 @@ async function run() {
         issue_number: prNumber,
     });
 
-    const digestComment = comments.find((c: any) => c.body && (c.body.includes(DIGEST_HEADER) || c.body.includes(UNRESOLVED_HEADER)));
+    // Helper for type narrowing
+    const hasBody = (c: { body?: string | null }): c is { body: string } => !!c.body;
+
+    const digestComment = comments.find((c) => hasBody(c) && (c.body.includes(DIGEST_HEADER) || c.body.includes(UNRESOLVED_HEADER)));
     let existingItems = new Map<string, ReviewItem>();
 
     if (digestComment && digestComment.body) {
@@ -248,7 +251,7 @@ async function run() {
     }
 
     // Parse Jules Reports to update status
-    const julesReports = comments.filter((c: any) => c.body && c.body.includes(JULES_REPORT_HEADER));
+    const julesReports = comments.filter((c) => hasBody(c) && c.body.includes(JULES_REPORT_HEADER));
     for (const report of julesReports) {
         if (!report.body) continue;
         const statuses = parseJulesReport(report.body);
@@ -395,7 +398,7 @@ async function run() {
     // For now, we trigger if there are open items and we just updated the digest, OR if it's a manual run.
     const shouldTriggerJules = hasOpenItems && (digestChanged || eventName === 'workflow_dispatch');
 
-    await checkAndTriggerJules(octokit, shouldTriggerJules, repoOwner!, repoName!, targetRef, prNumber, newBody);
+    await checkAndTriggerJules(octokit, shouldTriggerJules, repoOwner!, repoName!, targetRef, prNumber);
 }
 
 async function checkAndTriggerJules(
@@ -404,8 +407,7 @@ async function checkAndTriggerJules(
     owner: string,
     repo: string,
     ref: string,
-    prNumber: number,
-    digestBody: string
+    prNumber: number
 ) {
     if (shouldTrigger) {
         console.log("Triggering Jules Process...");

@@ -208,8 +208,7 @@ Deno.test("checkAndTriggerJules - triggers when shouldTrigger is true", async ()
         "owner",
         "repo",
         "main",
-        123,
-        "digest content"
+        123
     );
 
     assertEquals(mockOctokit.dispatchCalls.length, 1);
@@ -233,8 +232,7 @@ Deno.test("checkAndTriggerJules - does NOT trigger when shouldTrigger is false",
         "owner",
         "repo",
         "main",
-        123,
-        "digest content"
+        123
     );
 
     assertEquals(mockOctokit.dispatchCalls.length, 0);
