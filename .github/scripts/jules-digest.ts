@@ -1,0 +1,453 @@
+import { Octokit } from "npm:@octokit/rest@20.0.2";
+import { crypto } from "jsr:@std/crypto@0.224.0"; // Using standard library for hashing
+
+// --- Type Definitions ---
+
+export interface ReviewItem {
+    id: string;
+    type: 'actionable' | 'nitpick';
+    content: string; // Markdown content, preserved from CodeRabbit
+    status: 'open' | 'fixed' | 'skipped' | 'deferred';
+    url?: string;
+    filePath?: string;
+    line?: number;
+}
+
+
+
+// --- Configuration ---
+
+const DIGEST_HEADER = "## CodeRabbit Digest for Jules";
+const JULES_REPORT_HEADER = "### Jules Review Result";
+const UNRESOLVED_HEADER = "## CodeRabbit Digest for Jules (Unresolved Items)";
+
+// --- Helper Functions ---
+
+async function generateStableId(item: { type: string, content: string, filePath?: string, line?: number }): Promise<string> {
+    // Normalize content: trim and collapse whitespace
+    const normalizedContent = item.content.trim().replace(/\s+/g, ' ');
+    const key = `${item.type}:${item.filePath || ''}:${item.line || ''}:${normalizedContent}`;
+
+    const encoder = new TextEncoder();
+    const data = encoder.encode(key);
+    const hashBuffer = await crypto.subtle.digest("SHA-1", data);
+    const hashArray = Array.from(new Uint8Array(hashBuffer));
+    const hashHex = hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
+
+    return `CR-${hashHex.substring(0, 10)}`;
+}
+
+// --- Parsing Logic ---
+
+function extractSections(body: string): { actionable: string[], nitpick: string[] } {
+    // Simple regex-based extraction. 
+    // CodeRabbit format varies, but usually has "## Actionable..." and "## Nitpicks..."
+    // This is a simplified implementation. Real-world parsing might need to be more robust.
+
+    const actionableItems: string[] = [];
+    const nitpickItems: string[] = [];
+
+    // Split by potential headers
+    const lines = body.split('\n');
+    let currentSection: 'none' | 'actionable' | 'nitpick' = 'none';
+
+    for (const line of lines) {
+        if (line.match(/##.*Actionable/i) || line.match(/Fix all issues/i)) {
+            currentSection = 'actionable';
+            continue;
+        } else if (line.match(/##.*Nitpick/i)) {
+            currentSection = 'nitpick';
+            continue;
+        } else if (line.startsWith('## ')) {
+            currentSection = 'none';
+        }
+
+        const trimmed = line.trim();
+        // Check for new item
+        if (currentSection !== 'none' && (trimmed.startsWith('- ') || trimmed.startsWith('* '))) {
+            let content = trimmed.substring(2).trim(); // Remove bullet point
+            // Remove checkbox if present (e.g. from Actionable items)
+            content = content.replace(/^\[[ xX]\]\s*/, '');
+
+            if (currentSection === 'actionable') {
+                actionableItems.push(content);
+            } else {
+                nitpickItems.push(content);
+            }
+        } else if (currentSection !== 'none' && trimmed !== '' && !line.startsWith('## ')) {
+            // Continuation or Indented Line logic
+            const targetList = currentSection === 'actionable' ? actionableItems : nitpickItems;
+            if (targetList.length > 0) {
+                // Append to last item, preserving newline
+                targetList[targetList.length - 1] += '\n' + line;
+            }
+        }
+    }
+
+    return { actionable: actionableItems, nitpick: nitpickItems };
+}
+
+function parseDigestComment(body: string): Map<string, ReviewItem> {
+    const items = new Map<string, ReviewItem>();
+    const lines = body.split('\n');
+
+    for (const line of lines) {
+        const match = line.match(/^\s*-\s*\[([ xX])\]\s*(CR-[a-f0-9]{10})(?:\s*\(([^)]+)\))?\s*:\s*(.*)$/);
+        if (match) {
+            const isChecked = match[1].toLowerCase() === 'x';
+            const id = match[2];
+            const metaContent = match[3]?.toLowerCase() || ''; // e.g. 'skipped', 'nitpick', 'nitpick, skipped'
+            const content = match[4];
+
+            // determine type
+            const type = metaContent.includes('nitpick') ? 'nitpick' : 'actionable';
+
+            let status: 'open' | 'fixed' | 'skipped' | 'deferred' = 'open';
+            if (isChecked) {
+                if (metaContent.includes('skipped')) status = 'skipped';
+                else if (metaContent.includes('deferred')) status = 'deferred';
+                else status = 'fixed';
+            } else {
+                status = 'open';
+            }
+
+            items.set(id, {
+                id,
+                type,
+                content,
+                status,
+            });
+        }
+    }
+    return items;
+}
+
+
+function parseJulesReport(body: string): Map<string, 'fixed' | 'skipped' | 'deferred'> {
+    const statusMap = new Map<string, 'fixed' | 'skipped' | 'deferred'>();
+    const lines = body.split('\n');
+    let currentStatus: 'fixed' | 'skipped' | 'deferred' | null = null;
+
+    for (const line of lines) {
+        if (line.match(/####.*Fixed/i)) currentStatus = 'fixed';
+        else if (line.match(/####.*Skipped/i)) currentStatus = 'skipped';
+        else if (line.match(/####.*Deferred/i)) currentStatus = 'deferred';
+        else if (line.startsWith('#')) currentStatus = null;
+
+        if (currentStatus) {
+            const match = line.match(/(CR-[a-f0-9]{10})/);
+            if (match) {
+                statusMap.set(match[1], currentStatus);
+            }
+        }
+    }
+    return statusMap;
+}
+
+// --- Verification/Sweep Logic ---
+
+async function run() {
+    const token = Deno.env.get("GITHUB_TOKEN");
+    if (!token) {
+        console.error("GITHUB_TOKEN is missing");
+        Deno.exit(1);
+    }
+    const octokit = new Octokit({ auth: token });
+
+    // Use workflow-provided vars (EVENT_PATH/NAME) or fallback to GITHUB_*
+    // This allows the script to work both in the workflow (where we set EVENT_PATH) 
+    // and in raw environments.
+    const eventPath = Deno.env.get("EVENT_PATH") || Deno.env.get("GITHUB_EVENT_PATH");
+    const eventName = Deno.env.get("EVENT_NAME") || Deno.env.get("GITHUB_EVENT_NAME");
+
+    if (!eventPath || !eventName) {
+        console.error("Missing event path or name");
+        Deno.exit(1);
+    }
+
+    let payload;
+    try {
+        const text = await Deno.readTextFile(eventPath);
+        payload = JSON.parse(text);
+    } catch (error: any) {
+        if (error instanceof Deno.errors.NotFound) {
+            console.error(`Failed to read event file at ${eventPath}:`, error);
+        } else if (error instanceof SyntaxError) {
+            console.error(`Invalid JSON in event file at ${eventPath}:`, error);
+        } else {
+            console.error(`Error reading event payload at ${eventPath}:`, error);
+        }
+        Deno.exit(1);
+    }
+
+    let prNumber: number | undefined;
+    let repoOwner: string | undefined;
+    let repoName: string | undefined;
+
+    // Check for manual input (via env var passed from workflow input)
+    const inputPrNumber = Deno.env.get("INPUT_PR_NUMBER");
+    if (inputPrNumber) {
+        prNumber = parseInt(inputPrNumber, 10);
+        if (Number.isNaN(prNumber)) {
+            console.error(`Invalid INPUT_PR_NUMBER: ${inputPrNumber}`);
+            Deno.exit(1);
+        }
+    }
+
+    // Extract PR context from payload if not manually provided
+    if (!prNumber) {
+        if (payload.pull_request) {
+            prNumber = payload.pull_request.number;
+        } else if (payload.issue && payload.issue.pull_request) {
+            prNumber = payload.issue.number;
+        }
+    }
+
+    // Always get repo info from payload
+    if (payload.repository) {
+        repoOwner = payload.repository.owner.login;
+        repoName = payload.repository.name;
+    }
+
+    if (!prNumber || !repoOwner || !repoName) {
+        console.log("Not a PR event or manual PR number provided, skipping.");
+        return;
+    }
+
+    console.log(`Processing PR #${prNumber} in ${repoOwner}/${repoName}`);
+
+    // Resolve PR properties (like head ref) if missing from payload
+    let headRef = payload.pull_request?.head?.ref;
+    if (!headRef && prNumber) {
+        try {
+            const pr = await octokit.pulls.get({
+                owner: repoOwner,
+                repo: repoName,
+                pull_number: prNumber,
+            });
+            headRef = pr.data.head.ref;
+        } catch (e) {
+            console.error("Failed to fetch PR details for ref resolution:", e);
+        }
+    }
+    // Fallback
+    const targetRef = headRef || payload.ref || 'main';
+
+    // Fetch PR comments to find Digest and Jules Report
+    const comments = await octokit.paginate(octokit.issues.listComments, {
+        owner: repoOwner,
+        repo: repoName,
+        issue_number: prNumber,
+    });
+
+    // Helper for type narrowing
+    const hasBody = (c: { body?: string | null }): c is { body: string } => !!c.body;
+
+    const digestComment = comments.find((c) => hasBody(c) && (c.body.includes(DIGEST_HEADER) || c.body.includes(UNRESOLVED_HEADER)));
+    let existingItems = new Map<string, ReviewItem>();
+
+    if (digestComment && digestComment.body) {
+        existingItems = parseDigestComment(digestComment.body);
+    }
+
+    // Parse Jules Reports to update status
+    const julesReports = comments.filter((c) => hasBody(c) && c.body.includes(JULES_REPORT_HEADER));
+    for (const report of julesReports) {
+        if (!report.body) continue;
+        const statuses = parseJulesReport(report.body);
+        for (const [id, status] of statuses) {
+            if (existingItems.has(id)) {
+                const item = existingItems.get(id)!;
+                // Report status overrides check status unless it's 'open'
+                item.status = status;
+            }
+        }
+    }
+
+    // If this event is a CodeRabbit review, extract new items
+    const newItems: ReviewItem[] = [];
+
+    // Logic to fetch CodeRabbit comments/reviews if this is a review event
+    // For simplicity, we assume we fetch the latest review from CodeRabbit or process the event body if it's a review submission.
+    // Ideally, query recent reviews by bot user 'coderabbitai'.
+
+    // Fetch all reviews, paginated
+    const reviews = await octokit.paginate(octokit.pulls.listReviews, {
+        owner: repoOwner,
+        repo: repoName,
+        pull_number: prNumber,
+    });
+
+    const CODERABBIT_LOGINS = new Set(['coderabbitai', 'coderabbitai[bot]', 'coderabbit']);
+    const codeRabbitReviews = reviews.filter((r: any) => CODERABBIT_LOGINS.has(r.user?.login));
+
+    // Process ALL CodeRabbit reviews to ensure we don't miss anything.
+    // Use a Set to avoid duplicates if CodeRabbit posts multiple times or edits.
+    const seenIds = new Set<string>();
+
+    for (const review of codeRabbitReviews) {
+        if (review.body) {
+            const extracted = extractSections(review.body);
+
+            for (const content of extracted.actionable) {
+                const id = await generateStableId({ type: 'actionable', content });
+                if (!seenIds.has(id)) {
+                    newItems.push({ id, type: 'actionable', content, status: 'open' });
+                    seenIds.add(id);
+                }
+            }
+            for (const content of extracted.nitpick) {
+                const id = await generateStableId({ type: 'nitpick', content });
+                if (!seenIds.has(id)) {
+                    newItems.push({ id, type: 'nitpick', content, status: 'open' });
+                    seenIds.add(id);
+                }
+            }
+        }
+    }
+
+    // Reconcile
+    const newItemIds = new Set(newItems.map(i => i.id));
+
+    // Add new items
+    for (const item of newItems) {
+        if (!existingItems.has(item.id)) {
+            existingItems.set(item.id, item);
+        }
+        // If exists, we keep the status (managed by check/report)
+    }
+
+    // Remove stale items ONLY if doing a full reconciliation
+    // For now, we assume partial updates to be safe and avoid deleting items unless explicitly flagged.
+    // TODO: Determine if we can reliably detect a full scan (e.g. via input or event type).
+    const isFullReconciliation = false; // Default to false for safety as requested
+
+    if (isFullReconciliation && newItemIds.size > 0) {
+        for (const id of existingItems.keys()) {
+            if (!newItemIds.has(id)) {
+                existingItems.delete(id);
+            }
+        }
+    }
+
+    // Generate New Digest Body
+    const sortedItems = Array.from(existingItems.values()).sort((a, b) => {
+        // Sort open items first
+        if (a.status === 'open' && b.status !== 'open') return -1;
+        if (a.status !== 'open' && b.status === 'open') return 1;
+        return 0;
+    });
+
+    // Check list format
+    let newBody = `${DIGEST_HEADER}\n\n`;
+    newBody += `**Actionable & Nitpicks**\n`;
+
+    let hasOpenItems = false;
+
+    for (const item of sortedItems) {
+        const metaParts: string[] = [];
+        if (item.type === 'nitpick') metaParts.push('nitpick');
+        if (item.status === 'skipped') metaParts.push('skipped');
+        else if (item.status === 'deferred') metaParts.push('deferred');
+        const metaToken = metaParts.length > 0 ? ` (${metaParts.join(', ')})` : '';
+
+        const checked = (item.status === 'fixed' || item.status === 'skipped' || item.status === 'deferred') ? 'x' : ' ';
+        newBody += `- [${checked}] ${item.id}${metaToken}: ${item.content}\n`;
+        if (item.status === 'open') hasOpenItems = true;
+    }
+
+    // Sweep logic: If we are in a sweep mode (e.g. specialized trigger) or just always hinting
+    if (hasOpenItems) {
+        newBody = newBody.replace(DIGEST_HEADER, UNRESOLVED_HEADER);
+    } else {
+        newBody += `\n\nAll items resolved! code review complete.`;
+    }
+
+    let digestChanged = false;
+
+    // Post/Update
+    if (digestComment) {
+        // Don't update if content is identical to avoid spam, unless we need to poke (Sweep)
+        // Check if body essentially changed (ignoring timestamp or dynamic footer)
+        if (digestComment.body?.trim() !== newBody.trim()) {
+            await octokit.issues.updateComment({
+                owner: repoOwner,
+                repo: repoName,
+                comment_id: digestComment.id,
+                body: newBody
+            });
+            console.log("Updated Digest comment.");
+            digestChanged = true;
+        } else {
+            console.log("Digest up to date.");
+        }
+    } else {
+        if (sortedItems.length > 0) {
+            await octokit.issues.createComment({
+                owner: repoOwner,
+                repo: repoName,
+                issue_number: prNumber,
+                body: newBody
+            });
+            console.log("Created Digest comment.");
+            digestChanged = true;
+        }
+    }
+
+    // Trigger Jules if there are open items and (digest changed OR explicitly requested)
+    // For now, we trigger if there are open items and we just updated the digest, OR if it's a manual run.
+    const shouldTriggerJules = hasOpenItems && (digestChanged || eventName === 'workflow_dispatch');
+
+    await checkAndTriggerJules(octokit, shouldTriggerJules, repoOwner!, repoName!, targetRef, prNumber);
+}
+
+async function checkAndTriggerJules(
+    octokit: Octokit,
+    shouldTrigger: boolean,
+    owner: string,
+    repo: string,
+    ref: string,
+    prNumber: number
+) {
+    if (shouldTrigger) {
+        console.log("Triggering Jules Process...");
+        try {
+            await octokit.actions.createWorkflowDispatch({
+                owner,
+                repo,
+                workflow_id: 'jules-process.yml',
+                ref,
+                inputs: {
+                    pr_number: prNumber.toString(),
+                    // digest_body removed to avoid size limits. 
+                    // The workflow will fetch the digest from the PR comments.
+                }
+            });
+            console.log("Successfully triggered jules-process workflow.");
+        } catch (error) {
+            console.error("Failed to trigger Jules workflow:", error);
+            // Ensure failure is surfaced
+            Deno.exit(1);
+        }
+    }
+}
+
+// --- Exports for Testing ---
+
+export {
+    extractSections,
+    generateStableId,
+    parseDigestComment,
+    parseJulesReport,
+    checkAndTriggerJules
+};
+
+// Run the script
+if (import.meta.main) {
+    try {
+        await run();
+    } catch (error) {
+        console.error("Error running script:", error);
+        Deno.exit(1);
+    }
+}
