@@ -5,4 +5,4 @@ set -euo pipefail
 echo "Running SQL Security Linter..."
 cargo run --release -q -p ops-linters --bin sql-linter -- --path .
 
-echo "sql security lint passed"
+
