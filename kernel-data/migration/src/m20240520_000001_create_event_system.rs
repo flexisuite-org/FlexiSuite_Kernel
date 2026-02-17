@@ -71,7 +71,7 @@ impl MigrationTrait for Migration {
                 payload JSONB NOT NULL,
                 created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                 published_at TIMESTAMPTZ,
-                PRIMARY KEY (event_id, tenant_id)
+                PRIMARY KEY (tenant_id, event_id)
             );
             "#,
         )
@@ -107,6 +107,7 @@ impl MigrationTrait for Migration {
                 IF NOT EXISTS (
                     SELECT 1 FROM pg_constraint
                     WHERE conname = 'check_outbox_order_mode'
+                    AND conrelid = 'flexi.outbox'::regclass
                 ) THEN
                     ALTER TABLE flexi.outbox
                     ADD CONSTRAINT check_outbox_order_mode
@@ -124,6 +125,7 @@ impl MigrationTrait for Migration {
                 IF NOT EXISTS (
                     SELECT 1 FROM pg_constraint
                     WHERE conname = 'check_outbox_entity_fields'
+                    AND conrelid = 'flexi.outbox'::regclass
                 ) THEN
                     ALTER TABLE flexi.outbox
                     ADD CONSTRAINT check_outbox_entity_fields CHECK (
@@ -141,11 +143,11 @@ impl MigrationTrait for Migration {
 
     async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
         let db = manager.get_connection();
-        db.execute_unprepared("DROP TABLE IF EXISTS flexi.outbox")
+        db.execute_unprepared("DROP TABLE IF EXISTS flexi.outbox CASCADE")
             .await?;
-        db.execute_unprepared("DROP TABLE IF EXISTS flexi.causality_event_seq")
+        db.execute_unprepared("DROP TABLE IF EXISTS flexi.causality_event_seq CASCADE")
             .await?;
-        db.execute_unprepared("DROP TABLE IF EXISTS flexi.entity_event_seq")
+        db.execute_unprepared("DROP TABLE IF EXISTS flexi.entity_event_seq CASCADE")
             .await?;
         Ok(())
     }

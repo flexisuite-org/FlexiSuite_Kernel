@@ -3,6 +3,11 @@ use kernel_core::event::{EventEnvelope, EventError, OrderMode, PublishAck, Relia
 use redis::aio::ConnectionManager;
 use redis::{AsyncCommands, Client};
 use ring::digest::{Context, SHA256};
+use std::time::Duration;
+use tokio::time::timeout;
+use tracing::{debug, error, instrument};
+
+const SHARD_COUNT: u64 = 64;
 
 #[derive(Clone)]
 pub struct RedisProducer {
@@ -26,20 +31,25 @@ impl RedisProducer {
         let mut buf = [0u8; 8];
         buf.copy_from_slice(&bytes[0..8]);
         let num = u64::from_be_bytes(buf);
-        num % 64
+        num % SHARD_COUNT
     }
 }
 
 #[async_trait]
 impl ReliableProducer for RedisProducer {
+    #[instrument(skip(self, event), fields(event_id = %event.event_id, tenant_id = %event.tenant_id))]
     async fn publish(
         &self,
         stream_base: &str,
         event: EventEnvelope,
     ) -> Result<PublishAck, EventError> {
         let key_str = match &event.order_mode {
-            OrderMode::Entity { entity_id, .. } => entity_id.to_string(),
-            OrderMode::Causality { key, .. } => key.clone(),
+            OrderMode::Entity { entity_id, .. } => {
+                format!("{}:{}", event.tenant_id, entity_id)
+            }
+            OrderMode::Causality { key, .. } => {
+                format!("{}:{}", event.tenant_id, key)
+            }
         };
 
         let shard = Self::calculate_shard(&key_str);
@@ -50,10 +60,19 @@ impl ReliableProducer for RedisProducer {
         // ConnectionManager handles reconnections and multiplexing.
         let mut conn = self.connection_manager.clone();
 
-        let id: String = conn
-            .xadd(&stream_key, "*", &[("data", payload_json)])
-            .await
-            .map_err(|e| EventError::Producer(format!("failed to xadd: {}", e)))?;
+        let id: String = timeout(
+            Duration::from_secs(5),
+            conn.xadd(&stream_key, "*", &[("data", payload_json)]),
+        )
+        .await
+        .map_err(|_| EventError::Producer("redis publish timed out".to_string()))?
+        .map_err(|e| {
+            let err_msg = format!("failed to xadd: {}", e);
+            error!("{}", err_msg);
+            EventError::Producer(err_msg)
+        })?;
+
+        debug!(message_id = %id, stream_key = %stream_key, "successfully published event");
 
         Ok(PublishAck { message_id: id })
     }
@@ -75,8 +94,8 @@ mod tests {
 
         // Unlikely collision but possible, but we just check deterministic behavior primarily.
         // And range check.
-        assert!(shard1 < 64);
-        assert!(shard2 < 64);
+        assert!(shard1 < SHARD_COUNT);
+        assert!(shard2 < SHARD_COUNT);
     }
 
     #[test]

@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
 use uuid::Uuid;
+use crate::auth::TenantId;
 
 #[derive(Debug, Error)]
 pub enum EventError {
@@ -51,6 +52,7 @@ impl OrderMode {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EventEnvelope {
     pub event_id: Uuid,
+    pub tenant_id: TenantId,
     pub order_mode: OrderMode,
     pub payload: Value,
     pub created_at: DateTime<Utc>,
@@ -89,6 +91,15 @@ pub trait ReliableConsumer: Send + Sync {
         delivery_id: &str,
     ) -> Result<(), EventError>;
 
+    /// Nack (negative acknowledgement) a message for retry.
+    ///
+    /// The `retry_at` parameter defines when the message should be retried.
+    /// Implementations are expected to handle this based on the storage backend:
+    /// - For Redis Streams: This might involve implementing a delay queue or
+    ///   re-inserting the message with a delay, as Redis Streams doesn't natively
+    ///   support visibility timeouts per message.
+    /// - Callers can expect at-least-once delivery; however, ordering might
+    ///   be impacted during retries depending on the implementation.
     async fn nack(
         &self,
         stream: &str,
