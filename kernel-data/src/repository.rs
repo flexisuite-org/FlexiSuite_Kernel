@@ -3,11 +3,14 @@ use crate::entities::audit_log;
 use crate::entities::entity_history;
 use crate::entities::entity_record;
 use crate::entities::prelude::*;
-use crate::entities::{diagnostic_report, diagnostic_policy};
+use crate::entities::{diagnostic_policy, diagnostic_report};
 use async_trait::async_trait;
 use kernel_core::kernel::{self, KernelError};
-use sea_orm::{ActiveModelTrait, ActiveValue, EntityTrait, ColumnTrait, IntoActiveModel, QueryFilter, QueryOrder, QuerySelect};
 use sea_orm::sea_query::OnConflict;
+use sea_orm::{
+    ActiveModelTrait, ActiveValue, ColumnTrait, EntityTrait, IntoActiveModel, QueryFilter,
+    QueryOrder, QuerySelect,
+};
 use uuid::Uuid;
 
 /// Sealed trait to prevent external implementations.
@@ -29,12 +32,20 @@ pub trait TenantRepository: private::Sealed + Send + Sync {
     ) -> kernel::Result<entity_record::Model>;
     async fn get_entity(&self, id: &str) -> kernel::Result<Option<entity_record::Model>>;
 
-
     // Diagnostic methods
-    async fn create_diagnostic_report(&self, active_model: diagnostic_report::ActiveModel) -> kernel::Result<diagnostic_report::Model>;
-    async fn get_diagnostic_report(&self, trace_id: &str) -> kernel::Result<Option<diagnostic_report::Model>>;
+    async fn create_diagnostic_report(
+        &self,
+        active_model: diagnostic_report::ActiveModel,
+    ) -> kernel::Result<diagnostic_report::Model>;
+    async fn get_diagnostic_report(
+        &self,
+        trace_id: &str,
+    ) -> kernel::Result<Option<diagnostic_report::Model>>;
     async fn get_diagnostic_policy(&self) -> kernel::Result<Option<diagnostic_policy::Model>>;
-    async fn upsert_diagnostic_policy(&self, active_model: diagnostic_policy::ActiveModel) -> kernel::Result<diagnostic_policy::Model>;
+    async fn upsert_diagnostic_policy(
+        &self,
+        active_model: diagnostic_policy::ActiveModel,
+    ) -> kernel::Result<diagnostic_policy::Model>;
 
     async fn log_audit(
         &self,
@@ -44,12 +55,17 @@ pub trait TenantRepository: private::Sealed + Send + Sync {
     ) -> kernel::Result<()>;
 
     // Archive methods (for kernel-archiver)
-    async fn find_unarchived_entity_histories(&self, limit: u64) -> kernel::Result<Vec<entity_history::Model>>;
+    async fn find_unarchived_entity_histories(
+        &self,
+        limit: u64,
+    ) -> kernel::Result<Vec<entity_history::Model>>;
     async fn mark_entity_history_archived(&self, id: String) -> kernel::Result<()>;
-    async fn find_unarchived_audit_logs(&self, limit: u64) -> kernel::Result<Vec<audit_log::Model>>;
+    async fn find_unarchived_audit_logs(
+        &self,
+        limit: u64,
+    ) -> kernel::Result<Vec<audit_log::Model>>;
     async fn mark_audit_log_archived(&self, id: String) -> kernel::Result<()>;
 }
-
 
 fn pseudonymize_user_id_for_audit(tenant_id: &str, user_id: &str) -> String {
     let scoped = format!("{tenant_id}:{user_id}");
@@ -203,17 +219,27 @@ impl TenantRepository for TenantScoped<RawConnection> {
         Ok(result)
     }
 
-    async fn create_diagnostic_report(&self, mut active_model: diagnostic_report::ActiveModel) -> kernel::Result<diagnostic_report::Model> {
+    async fn create_diagnostic_report(
+        &self,
+        mut active_model: diagnostic_report::ActiveModel,
+    ) -> kernel::Result<diagnostic_report::Model> {
         active_model.tenant_id = sea_orm::ActiveValue::Set(self.tenant_id.to_string());
-        let result = active_model.insert(&self.inner.txn).await.map_err(KernelError::db_error)?;
+        let result = active_model
+            .insert(&self.inner.txn)
+            .await
+            .map_err(KernelError::db_error)?;
         Ok(result)
     }
 
-    async fn get_diagnostic_report(&self, trace_id: &str) -> kernel::Result<Option<diagnostic_report::Model>> {
-        let result = DiagnosticReport::find_by_id((trace_id.to_string(), self.tenant_id.to_string()))
-            .one(&self.inner.txn)
-            .await
-            .map_err(KernelError::db_error)?;
+    async fn get_diagnostic_report(
+        &self,
+        trace_id: &str,
+    ) -> kernel::Result<Option<diagnostic_report::Model>> {
+        let result =
+            DiagnosticReport::find_by_id((trace_id.to_string(), self.tenant_id.to_string()))
+                .one(&self.inner.txn)
+                .await
+                .map_err(KernelError::db_error)?;
         Ok(result)
     }
 
@@ -225,7 +251,10 @@ impl TenantRepository for TenantScoped<RawConnection> {
         Ok(result)
     }
 
-    async fn upsert_diagnostic_policy(&self, mut active_model: diagnostic_policy::ActiveModel) -> kernel::Result<diagnostic_policy::Model> {
+    async fn upsert_diagnostic_policy(
+        &self,
+        mut active_model: diagnostic_policy::ActiveModel,
+    ) -> kernel::Result<diagnostic_policy::Model> {
         active_model.tenant_id = sea_orm::ActiveValue::Set(self.tenant_id.to_string());
 
         let result = DiagnosticPolicy::insert(active_model)
@@ -234,9 +263,9 @@ impl TenantRepository for TenantScoped<RawConnection> {
                     .update_columns([
                         diagnostic_policy::Column::Enabled,
                         diagnostic_policy::Column::UpdatedAt,
-                        diagnostic_policy::Column::UpdatedBy
+                        diagnostic_policy::Column::UpdatedBy,
                     ])
-                    .to_owned()
+                    .to_owned(),
             )
             .exec_with_returning(&self.inner.txn)
             .await
@@ -274,8 +303,12 @@ impl TenantRepository for TenantScoped<RawConnection> {
         Ok(())
     }
 
-    async fn find_unarchived_entity_histories(&self, limit: u64) -> kernel::Result<Vec<entity_history::Model>> {
+    async fn find_unarchived_entity_histories(
+        &self,
+        limit: u64,
+    ) -> kernel::Result<Vec<entity_history::Model>> {
         EntityHistory::find()
+            .filter(entity_history::Column::TenantId.eq(self.tenant_id.to_string()))
             .filter(entity_history::Column::ArchivedAt.is_null())
             .order_by_asc(entity_history::Column::CreatedAt)
             .limit(limit)
@@ -289,18 +322,25 @@ impl TenantRepository for TenantScoped<RawConnection> {
             .one(&self.inner.txn)
             .await
             .map_err(KernelError::db_error)?
-            .ok_or_else(|| KernelError::ValidationError(format!("entity history {id} not found")))?;
+            .ok_or_else(|| {
+                KernelError::ValidationError(format!("entity history {id} not found"))
+            })?;
 
         let mut active: entity_history::ActiveModel = record.into_active_model();
         active.archived_at = ActiveValue::Set(Some(chrono::Utc::now().into()));
-        active.update(&self.inner.txn)
+        active
+            .update(&self.inner.txn)
             .await
             .map_err(KernelError::db_error)?;
         Ok(())
     }
 
-    async fn find_unarchived_audit_logs(&self, limit: u64) -> kernel::Result<Vec<audit_log::Model>> {
+    async fn find_unarchived_audit_logs(
+        &self,
+        limit: u64,
+    ) -> kernel::Result<Vec<audit_log::Model>> {
         AuditLog::find()
+            .filter(audit_log::Column::TenantId.eq(self.tenant_id.to_string()))
             .filter(audit_log::Column::ArchivedAt.is_null())
             .order_by_asc(audit_log::Column::CreatedAt)
             .limit(limit)
@@ -318,7 +358,8 @@ impl TenantRepository for TenantScoped<RawConnection> {
 
         let mut active: audit_log::ActiveModel = record.into_active_model();
         active.archived_at = ActiveValue::Set(Some(chrono::Utc::now().into()));
-        active.update(&self.inner.txn)
+        active
+            .update(&self.inner.txn)
             .await
             .map_err(KernelError::db_error)?;
         Ok(())
