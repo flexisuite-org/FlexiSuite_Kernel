@@ -15,11 +15,11 @@ use async_trait::async_trait;
 use serde_json::Value;
 use tower::ServiceExt;
 
-fn setup_app() -> axum::Router {
+pub fn setup_app() -> axum::Router {
     setup_app_with_config(MiddlewareConfig::default(), None)
 }
 
-fn setup_app_with_config(config: MiddlewareConfig, store: Option<Arc<dyn IdempotencyStore>>) -> axum::Router {
+pub fn setup_app_with_config(config: MiddlewareConfig, store: Option<Arc<dyn IdempotencyStore>>) -> axum::Router {
     let state = if let Some(s) = store {
         MiddlewareState::with_store(config, s)
     } else {
