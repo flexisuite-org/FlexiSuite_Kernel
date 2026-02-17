@@ -1,3 +1,4 @@
+use async_trait::async_trait;
 #[cfg(debug_assertions)]
 use axum::body::to_bytes;
 #[cfg(debug_assertions)]
@@ -6,10 +7,13 @@ use axum::{
     body::Body,
     http::{Request, StatusCode},
 };
-use kernel_api::middleware::{MiddlewareConfig, MiddlewareState, IdempotencyStore, IdempotencyEntry, IdempotencyScopeKey, IdempotencyRecord};
+use kernel_api::middleware::{
+    IdempotencyEntry, IdempotencyRecord, IdempotencyScopeKey, IdempotencyStore, MiddlewareConfig,
+    MiddlewareState,
+};
 use std::sync::Arc;
 use tokio::sync::Notify;
-use async_trait::async_trait;
+
 use sea_orm::{MockDatabase, DatabaseBackend};
 
 #[cfg(debug_assertions)]
@@ -20,7 +24,10 @@ fn setup_app() -> axum::Router {
     setup_app_with_config(MiddlewareConfig::default(), None)
 }
 
-fn setup_app_with_config(config: MiddlewareConfig, store: Option<Arc<dyn IdempotencyStore>>) -> axum::Router {
+fn setup_app_with_config(
+    config: MiddlewareConfig,
+    store: Option<Arc<dyn IdempotencyStore>>,
+) -> axum::Router {
     let state = if let Some(s) = store {
         MiddlewareState::with_store(config, s)
     } else {
@@ -46,7 +53,12 @@ impl IdempotencyStore for NotifyingStore {
     async fn get(&self, key: &IdempotencyScopeKey) -> Option<IdempotencyEntry> {
         self.inner.get(key).await
     }
-    async fn try_acquire(&self, key: IdempotencyScopeKey, hash: String, ttl: std::time::Duration) -> Option<IdempotencyEntry> {
+    async fn try_acquire(
+        &self,
+        key: IdempotencyScopeKey,
+        hash: String,
+        ttl: std::time::Duration,
+    ) -> Option<IdempotencyEntry> {
         let res = self.inner.try_acquire(key, hash, ttl).await;
         if res.is_none() {
             self.notify.notify_one();
