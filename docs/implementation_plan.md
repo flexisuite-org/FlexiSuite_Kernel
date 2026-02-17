@@ -23,12 +23,16 @@
 | REQ-ID | 要件サマリ | 正本セクション |
 |---|---|---|
 | `REQ-TENANT-TOKEN-V2` | `tenant_token` は `kid` を含むv2形式で発行し、段階移行を行う | 3.1, 4.6 |
+| `REQ-AUTH-SOURCE` | `tenant_token` またはデバッグヘッダからのコンテキスト抽出を強制する | 3.1 |
 | `REQ-KEY-REVOCATION-SLO` | 緊急失効は全ノードへ迅速伝播し、旧鍵受理を停止する | 4.6 |
 | `REQ-QUOTA-HTTP-CONTRACT` | `429/503` の返却条件と `Retry-After` 算出を固定する | 4.7 |
 | `REQ-IDEMPOTENCY-HEADER` | `Idempotency-Key` ヘッダ仕様を固定し、衝突時 `409` を保証する | 4.8 |
+| `REQ-IDEMPOTENCY-CONFLICT` | 同一キー・異ボディの衝突を検知し `409 Conflict` を返却する | 4.8 |
 | `REQ-PROTOCOL-FALLBACK-UX` | `protocol.error` 後のUIフォールバックを標準化する | 4.2 |
 | `REQ-DIAG-CONSENT` | 診断データの既定 `opt-out` と明示同意、撤回即時反映を強制する | 8.2, 8.3 |
 | `REQ-MANIFEST-TRUST-ROOT` | 配布マニフェスト署名の信頼ルート・失効・検証順序を固定する | 4.3, 6 |
+| `REQ-SUPPLYCHAIN-DIGEST-FORMAT` | ダイジェスト形式（`sha256-`等）を強制する | 4.3 |
+| `REQ-SUPPLYCHAIN-DIGEST-MATCH` | アーティファクトとマニフェストのダイジェスト一致を強制する | 4.3 |
 | `REQ-SIDELOADING-WARNING` | Developer Mode時の非Verified導入に警告・同意・隔離維持を強制する | 4.3 |
 | `REQ-SLO-ENV-PROFILE` | SLO計測環境を固定プロファイルで再現可能にする | 7 |
 | `REQ-DR-REHEARSAL` | DRはCIではなく定期演習でRPO/RTO実測を継続する | 9 (Phase 8) |
