@@ -1,13 +1,13 @@
-use bytes::Bytes;
-use kernel_core::auth::TenantContext;
-use object_store::path::Path;
-use object_store::ObjectStore;
-use serde::Serialize;
-use sha2::{Digest, Sha384};
-use std::collections::HashMap;
-use std::sync::Arc;
 use crate::error::RegistryError;
 use crate::model::{Dependencies, DistManifest, Kind, Route};
+use bytes::Bytes;
+use kernel_core::auth::TenantContext;
+use object_store::ObjectStore;
+use object_store::path::Path;
+use serde::Serialize;
+use sha2::{Digest, Sha384};
+use std::collections::BTreeMap;
+use std::sync::Arc;
 
 pub struct RegistryStorage {
     store: Arc<dyn ObjectStore>,
@@ -26,7 +26,7 @@ struct ManifestDigestPayload<'a> {
     composition_root: &'a str,
     routes: &'a [Route],
     dependencies: &'a Dependencies,
-    configuration: &'a HashMap<String, serde_json::Value>,
+    configuration: &'a BTreeMap<String, serde_json::Value>,
 }
 
 impl RegistryStorage {
@@ -39,10 +39,19 @@ impl RegistryStorage {
 
     fn validate_key(key: &str) -> Result<(), RegistryError> {
         if key.is_empty() {
-            return Err(RegistryError::InvalidPath("key must not be empty".to_string()));
+            return Err(RegistryError::InvalidPath(
+                "key must not be empty".to_string(),
+            ));
+        }
+        if key.chars().any(char::is_control) {
+            return Err(RegistryError::InvalidPath(format!(
+                "invalid key contains control character: {key}"
+            )));
         }
         if key.contains('\\') {
-            return Err(RegistryError::InvalidPath(format!("invalid key contains backslash: {key}")));
+            return Err(RegistryError::InvalidPath(format!(
+                "invalid key contains backslash: {key}"
+            )));
         }
         let lower = key.to_ascii_lowercase();
         if lower.contains("%2f") || lower.contains("%5c") {
@@ -109,11 +118,17 @@ impl RegistryStorage {
     }
 
     /// Retrieves binary data. If expected_digest is provided, verifies SHA-384.
-    pub async fn get_artifact(&self, key: &str, expected_digest: Option<&str>) -> Result<Bytes, RegistryError> {
+    pub async fn get_artifact(
+        &self,
+        key: &str,
+        expected_digest: Option<&str>,
+    ) -> Result<Bytes, RegistryError> {
         Self::validate_key(key)?;
         let path = self.artifact_path(key);
         let result = self.store.get(&path).await.map_err(|e| match e {
-            object_store::Error::NotFound { .. } => RegistryError::ArtifactNotFound(key.to_string()),
+            object_store::Error::NotFound { .. } => {
+                RegistryError::ArtifactNotFound(key.to_string())
+            }
             _ => RegistryError::ObjectStore(e),
         })?;
 
@@ -135,10 +150,28 @@ impl RegistryStorage {
     }
 
     /// Saves a DistManifest to `manifests/{id}/{version}/manifest.json`.
-    /// Returns the SHA-384 digest of the stored manifest.
-    pub async fn save_manifest(&self, manifest: &DistManifest) -> Result<String, RegistryError> {
+    /// Returns the SHA-384 digest and persisted manifest with manifest_digest set.
+    pub async fn save_manifest(
+        &self,
+        manifest: &DistManifest,
+    ) -> Result<(String, DistManifest), RegistryError> {
         Self::validate_key(&manifest.id)?;
         Self::validate_key(&manifest.version)?;
+        if manifest.security.manifest_signature.trim().is_empty() {
+            return Err(RegistryError::InvalidManifest(
+                "security.manifest_signature must not be empty".to_string(),
+            ));
+        }
+        if manifest.security.manifest_signature_kid.trim().is_empty() {
+            return Err(RegistryError::InvalidManifest(
+                "security.manifest_signature_kid must not be empty".to_string(),
+            ));
+        }
+        if manifest.security.trust_root_version.trim().is_empty() {
+            return Err(RegistryError::InvalidManifest(
+                "security.trust_root_version must not be empty".to_string(),
+            ));
+        }
 
         // manifest_digest is computed from the manifest with the entire
         // security section excluded from the hashed payload.
@@ -149,11 +182,15 @@ impl RegistryStorage {
         let path = self.manifest_path(&manifest.id, &manifest.version);
         let data = serde_json::to_vec(&persisted)?;
         self.store.put(&path, data.into()).await?;
-        Ok(computed_digest)
+        Ok((computed_digest, persisted))
     }
 
     /// Retrieves a DistManifest from `manifests/{id}/{version}/manifest.json`.
-    pub async fn get_manifest(&self, id: &str, version: &str) -> Result<DistManifest, RegistryError> {
+    pub async fn get_manifest(
+        &self,
+        id: &str,
+        version: &str,
+    ) -> Result<DistManifest, RegistryError> {
         Self::validate_key(id)?;
         Self::validate_key(version)?;
         let path = self.manifest_path(id, version);

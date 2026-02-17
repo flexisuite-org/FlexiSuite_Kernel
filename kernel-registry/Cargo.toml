@@ -13,7 +13,6 @@ thiserror = "1.0"
 sha2 = "0.10"
 hex = "0.4"
 bytes = "1.5"
-futures = "0.3"
 kernel-core = { path = "../kernel-core" }
 
 [dev-dependencies]
