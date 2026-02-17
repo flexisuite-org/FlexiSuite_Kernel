@@ -14,7 +14,7 @@ impl MigrationTrait for Migration {
             CREATE TABLE IF NOT EXISTS flexi.diagnostic_policies (
                 tenant_id TEXT NOT NULL,
                 enabled BOOLEAN NOT NULL DEFAULT FALSE,
-                updated_at TIMESTAMPTZ NOT NULL,
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                 updated_by TEXT,
                 PRIMARY KEY (tenant_id)
             );

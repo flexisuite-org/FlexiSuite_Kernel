@@ -260,6 +260,7 @@ async fn run_archive_cycle(db: &DatabaseConnection, s3: &Client, config: &AppCon
                 s3,
                 &bucket,
                 lock_config.as_ref(),
+                &ctx.tenant_id().to_string(),
             )
             .await,
             audit_log_ids: archive_items(
@@ -269,6 +270,7 @@ async fn run_archive_cycle(db: &DatabaseConnection, s3: &Client, config: &AppCon
                 s3,
                 &bucket,
                 lock_config.as_ref(),
+                &ctx.tenant_id().to_string(),
             )
             .await,
         };
@@ -306,6 +308,7 @@ async fn archive_items<T>(
     s3: &Client,
     bucket: &str,
     lock_config: Option<&ObjectLockConfig>,
+    expected_tenant_id: &str,
 ) -> Vec<String>
 where
     T: ArchivableItem + serde::Serialize,
@@ -317,6 +320,16 @@ where
     let mut archived_ids = Vec::new();
     for item in items {
         let id = item.archive_id().to_string();
+        let item_tenant = item.archive_tenant_id();
+
+        if item_tenant != expected_tenant_id {
+            error!(
+                "Skipping archiving item {} (kind: {}) because tenant_id mismatch. Expected: {}, Found: {}",
+                id, record_kind, expected_tenant_id, item_tenant
+            );
+            continue;
+        }
+
         let key = item.archive_key(key_prefix);
 
         match s3_object_exists(s3, bucket, &key).await {
