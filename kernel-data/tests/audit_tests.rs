@@ -3,12 +3,20 @@ use kernel_data::connection::with_tenant_tx;
 use kernel_data::entities::{audit_log, entity_history, entity_record};
 use kernel_data::repository::TenantRepository;
 use migration::MigratorTrait;
-use sea_orm::{ActiveValue, ColumnTrait, ConnectionTrait, Database, EntityTrait, QueryFilter, QueryOrder};
+use sea_orm::{
+    ActiveValue, ColumnTrait, ConnectionTrait, Database, EntityTrait, QueryFilter, QueryOrder,
+};
 use testcontainers::{RunnableImage, clients};
 use testcontainers_modules::postgres::Postgres;
 use uuid::Uuid;
 
 const TEST_HMAC_SECRET: &str = "test_secret_for_audit_tests_shared";
+
+fn expected_actor_id(tenant_id: &TenantId, user_id: &UserId) -> String {
+    let scoped = format!("{}:{}", tenant_id.as_str(), user_id.as_str());
+    let digest = ring::digest::digest(&ring::digest::SHA256, scoped.as_bytes());
+    format!("uidh:{}", hex::encode(digest.as_ref()))
+}
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore] // Requires Docker
@@ -83,7 +91,10 @@ async fn test_audit_log_creation() {
 
     assert_eq!(histories.len(), 1, "Should have 1 history record");
     assert_eq!(histories[0].change_type, "CREATE");
-    assert_eq!(histories[0].created_by, Some(user_id.to_string()));
+    assert_eq!(
+        histories[0].created_by,
+        Some(expected_actor_id(&tenant_id, &user_id))
+    );
     assert_eq!(histories[0].archived_at, None);
 
     // 2. Update Entity -> Should create history
@@ -136,6 +147,6 @@ async fn test_audit_log_creation() {
 
     assert_eq!(logs.len(), 1);
     assert_eq!(logs[0].action, "test.action");
-    assert_eq!(logs[0].actor_id, user_id.to_string());
+    assert_eq!(logs[0].actor_id, expected_actor_id(&tenant_id, &user_id));
     assert_eq!(logs[0].archived_at, None);
 }

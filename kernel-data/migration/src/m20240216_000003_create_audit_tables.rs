@@ -28,6 +28,20 @@ impl MigrationTrait for Migration {
         )
         .await?;
 
+        // Enforce DB-level referential integrity and cascade behavior for entity history.
+        db.execute_unprepared(
+            r#"
+            ALTER TABLE flexi.entity_histories
+                DROP CONSTRAINT IF EXISTS fk_entity_histories_entity_record;
+            ALTER TABLE flexi.entity_histories
+                ADD CONSTRAINT fk_entity_histories_entity_record
+                FOREIGN KEY (entity_id, tenant_id)
+                REFERENCES flexi.entity_records (id, tenant_id)
+                ON DELETE CASCADE;
+            "#,
+        )
+        .await?;
+
         // 2. Create Audit Log Table
         db.execute_unprepared(
             r#"

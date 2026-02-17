@@ -8,8 +8,6 @@ use kernel_core::kernel::{self, KernelError};
 use sea_orm::{ActiveModelTrait, ActiveValue, EntityTrait};
 use uuid::Uuid;
 
-const MAX_LOG_CHARS: usize = 256;
-
 /// Sealed trait to prevent external implementations.
 pub(crate) mod private {
     pub trait Sealed {}
@@ -36,19 +34,13 @@ pub trait TenantRepository: private::Sealed + Send + Sync {
     ) -> kernel::Result<()>;
 }
 
-// Helper to sanitize log entries to satisfy CodeQL.
-// In reality, DB writes are safe from log injection, but this ensures no control chars.
-fn sanitize_for_log(s: &str) -> String {
-    s.chars()
-        .map(|c| if c.is_control() { ' ' } else { c })
-        .take(MAX_LOG_CHARS)
-        .collect()
+fn pseudonymize_user_id_for_audit(tenant_id: &str, user_id: &str) -> String {
+    let scoped = format!("{tenant_id}:{user_id}");
+    let digest = ring::digest::digest(&ring::digest::SHA256, scoped.as_bytes());
+    format!("uidh:{}", hex::encode(digest.as_ref()))
 }
 
-fn required_active_value<T: Clone>(
-    value: &ActiveValue<T>,
-    field_name: &str,
-) -> kernel::Result<T>
+fn required_active_value<T: Clone>(value: &ActiveValue<T>, field_name: &str) -> kernel::Result<T>
 where
     T: Into<sea_orm::Value>,
 {
@@ -85,8 +77,10 @@ impl TenantRepository for TenantScoped<RawConnection> {
         let content = required_active_value(&active_model.content, "Content")?;
         let version = active_value_or(&active_model.version, 1);
 
-        // User ID
-        let user_id_str = self.user_id.as_ref().map(|u| sanitize_for_log(u.as_str()));
+        let user_id_str = self
+            .user_id
+            .as_ref()
+            .map(|u| pseudonymize_user_id_for_audit(self.tenant_id.as_str(), u.as_str()));
 
         // 1. Insert Entity
         let result = active_model
@@ -137,8 +131,10 @@ impl TenantRepository for TenantScoped<RawConnection> {
         active_model.version = ActiveValue::Set(next_version);
         active_model.updated_at = ActiveValue::Set(chrono::Utc::now().into());
 
-        // User ID
-        let user_id_str = self.user_id.as_ref().map(|u| sanitize_for_log(u.as_str()));
+        let user_id_str = self
+            .user_id
+            .as_ref()
+            .map(|u| pseudonymize_user_id_for_audit(self.tenant_id.as_str(), u.as_str()));
 
         // 1. Update Entity
         let result = active_model
@@ -187,7 +183,7 @@ impl TenantRepository for TenantScoped<RawConnection> {
         let user_id = self.user_id.as_ref().ok_or_else(|| {
             KernelError::ValidationError("missing actor for audit log".to_string())
         })?;
-        let user_id_str = sanitize_for_log(user_id.as_str());
+        let user_id_str = pseudonymize_user_id_for_audit(self.tenant_id.as_str(), user_id.as_str());
 
         let log = audit_log::ActiveModel {
             id: ActiveValue::Set(Uuid::now_v7().to_string()),
