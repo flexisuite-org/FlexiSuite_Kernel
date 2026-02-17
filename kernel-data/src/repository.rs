@@ -23,12 +23,20 @@ pub trait TenantRepository: private::Sealed + Send + Sync {
     async fn log_audit(&self, action: String, resource: String, details: serde_json::Value) -> kernel::Result<()>;
 }
 
+// Helper to sanitize log entries to satisfy CodeQL.
+// In reality, DB writes are safe from log injection, but this ensures no control chars.
+fn sanitize_for_log(s: &str) -> String {
+    s.chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect()
+}
+
 #[async_trait]
 impl TenantRepository for TenantScoped<RawConnection> {
     async fn create_entity(&self, mut active_model: entity_record::ActiveModel) -> kernel::Result<entity_record::Model> {
         // Enforce tenant scoping by overriding the tenant_id field
         active_model.tenant_id = ActiveValue::Set(self.tenant_id.to_string());
-        
+
         // Ensure ID is set
         let entity_id = match active_model.id.clone() {
              ActiveValue::Set(v) => v,
@@ -55,7 +63,7 @@ impl TenantRepository for TenantScoped<RawConnection> {
         };
 
         // User ID
-        let user_id_str = self.user_id.as_ref().map(|u| u.as_str().to_string());
+        let user_id_str = self.user_id.as_ref().map(|u| sanitize_for_log(u.as_str()));
 
         // 1. Insert Entity
         let result = active_model.insert(&self.inner.txn).await.map_err(KernelError::db_error)?;
@@ -89,7 +97,7 @@ impl TenantRepository for TenantScoped<RawConnection> {
         };
 
         // User ID
-        let user_id_str = self.user_id.as_ref().map(|u| u.as_str().to_string());
+        let user_id_str = self.user_id.as_ref().map(|u| sanitize_for_log(u.as_str()));
 
         // 1. Update Entity
         let result = active_model.update(&self.inner.txn).await.map_err(KernelError::db_error)?;
@@ -123,7 +131,7 @@ impl TenantRepository for TenantScoped<RawConnection> {
     }
 
     async fn log_audit(&self, action: String, resource: String, details: serde_json::Value) -> kernel::Result<()> {
-        let user_id_str = self.user_id.as_ref().map(|u| u.as_str().to_string()).unwrap_or_else(|| "unknown".to_string());
+        let user_id_str = self.user_id.as_ref().map(|u| sanitize_for_log(u.as_str())).unwrap_or_else(|| "unknown".to_string());
 
         let log = audit_log::ActiveModel {
             id: ActiveValue::Set(Uuid::now_v7().to_string()),
