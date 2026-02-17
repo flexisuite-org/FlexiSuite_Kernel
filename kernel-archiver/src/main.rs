@@ -3,13 +3,13 @@ use std::io::Write;
 use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
-use base64::Engine as _;
 use aws_config::meta::region::RegionProviderChain;
 use aws_sdk_s3::error::ProvideErrorMetadata;
 use aws_sdk_s3::primitives::ByteStream;
 use aws_sdk_s3::types::ObjectLockMode;
 use aws_sdk_s3::{config::Region, Client};
 use aws_smithy_types::DateTime as SmithyDateTime;
+use base64::Engine as _;
 use flate2::write::GzEncoder;
 use flate2::Compression;
 use futures::future::BoxFuture;
@@ -322,7 +322,11 @@ where
         match s3_object_exists(s3, bucket, &key).await {
             Ok(true) => {
                 if let Err(e) = mark_archived(db, item).await {
-                    error!("Failed to mark already-uploaded {} archived: {}", M::LABEL, e);
+                    error!(
+                        "Failed to mark already-uploaded {} archived: {}",
+                        M::LABEL,
+                        e
+                    );
                 }
                 continue;
             }
