@@ -23,7 +23,8 @@ fn main() -> Result<()> {
     let re_security_definer = Regex::new(r"(?i)SECURITY\s+DEFINER").unwrap();
     // Allow variations in spacing and newlines
     let re_search_path = Regex::new(r"(?i)SET\s+search_path\s*=\s*flexi\s*,\s*pg_catalog\s*,\s*pg_temp").unwrap();
-    let re_revoke = Regex::new(r"(?i)REVOKE\s+.*FROM\s+PUBLIC").unwrap();
+    // Use (?s) to allow '.' to match newlines for multi-line REVOKE statements
+    let re_revoke = Regex::new(r"(?si)REVOKE\s+.*?FROM\s+PUBLIC").unwrap();
     let re_kernel_mode = Regex::new(r"flexi\.kernel_mode").unwrap();
 
     let mut errors = false;
@@ -47,7 +48,10 @@ fn main() -> Result<()> {
                 if ext_str == "rs" || ext_str == "sql" {
                     let content = match fs::read_to_string(path) {
                         Ok(c) => c,
-                        Err(_) => continue,
+                        Err(e) => {
+                            eprintln!("Warning: Failed to read file {}: {}", path.display(), e);
+                            continue;
+                        }
                     };
 
                     let is_migration = path.to_string_lossy().contains("migration");
@@ -70,7 +74,11 @@ fn main() -> Result<()> {
 
                         // Check search_path in the vicinity (e.g., next 500 chars)
                         // This assumes the SET clause is near the SECURITY DEFINER keyword
-                        let end_search = std::cmp::min(content.len(), start + 500);
+                        let mut end_search = std::cmp::min(content.len(), start + 500);
+                        // Ensure we slice at a valid char boundary
+                        while !content.is_char_boundary(end_search) {
+                            end_search -= 1;
+                        }
                         let window = &content[start..end_search];
 
                         if !re_search_path.is_match(window) {
