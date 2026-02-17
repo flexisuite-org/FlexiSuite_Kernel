@@ -153,3 +153,31 @@ Deno.test("parseDigestComment - captures status tokens", () => {
     assertEquals(items.get("CR-1122334455")?.status, "fixed");
 });
 
+Deno.test("parseDigestComment - round-trips type information", () => {
+    // Note: The parser is loose about what goes in (), e.g. (nitpick) or (nitpick, skipped)
+    // We want to verify that if "nitpick" is present, type is parsed as "nitpick"
+    const body = `
+    - [ ] CR-1234567890 (nitpick): Nitpick item
+    - [ ] CR-0987654321: Actionable item
+    - [x] CR-1122334455 (nitpick, skipped): Skipped nitpick
+    - [x] CR-6543210987 (deferred): Deferred actionable
+    `;
+    const items = parseDigestComment(body);
+
+    const nitpick = items.get("CR-1234567890");
+    assertEquals(nitpick?.type, "nitpick");
+    assertEquals(nitpick?.status, "open");
+
+    const actionable = items.get("CR-0987654321");
+    // Default is actionable if not specified
+    assertEquals(actionable?.type, "actionable");
+
+    const skippedNitpick = items.get("CR-1122334455");
+    assertEquals(skippedNitpick?.type, "nitpick");
+    assertEquals(skippedNitpick?.status, "skipped");
+
+    const deferred = items.get("CR-6543210987");
+    assertEquals(deferred?.type, "actionable"); // no "nitpick" token
+    assertEquals(deferred?.status, "deferred");
+});
+

@@ -298,9 +298,12 @@ async function run() {
     }
 
     // Remove stale items
-    for (const id of existingItems.keys()) {
-        if (!newItemIds.has(id)) {
-            existingItems.delete(id);
+    // Remove stale items
+    if (newItemIds.size > 0) {
+        for (const id of existingItems.keys()) {
+            if (!newItemIds.has(id)) {
+                existingItems.delete(id);
+            }
         }
     }
 
@@ -319,12 +322,14 @@ async function run() {
     let hasOpenItems = false;
 
     for (const item of sortedItems) {
-        let statusToken = '';
-        if (item.status === 'skipped') statusToken = ' (skipped)';
-        else if (item.status === 'deferred') statusToken = ' (deferred)';
+        const metaParts: string[] = [];
+        if (item.type === 'nitpick') metaParts.push('nitpick');
+        if (item.status === 'skipped') metaParts.push('skipped');
+        else if (item.status === 'deferred') metaParts.push('deferred');
+        const metaToken = metaParts.length > 0 ? ` (${metaParts.join(', ')})` : '';
 
         const checked = (item.status === 'fixed' || item.status === 'skipped' || item.status === 'deferred') ? 'x' : ' ';
-        newBody += `- [${checked}] ${item.id}${statusToken}: ${item.content}\n`;
+        newBody += `- [${checked}] ${item.id}${metaToken}: ${item.content}\n`;
         if (item.status === 'open') hasOpenItems = true;
     }
 
