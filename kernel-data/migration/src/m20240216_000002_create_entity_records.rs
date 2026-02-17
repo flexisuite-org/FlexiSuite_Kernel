@@ -23,7 +23,8 @@ impl MigrationTrait for Migration {
                 PRIMARY KEY (id, tenant_id)
             );
             "#,
-        ).await?;
+        )
+        .await?;
 
         // 2. Enable RLS
         db.execute_unprepared(
@@ -31,7 +32,8 @@ impl MigrationTrait for Migration {
             ALTER TABLE flexi.entity_records ENABLE ROW LEVEL SECURITY;
             ALTER TABLE flexi.entity_records FORCE ROW LEVEL SECURITY;
             "#,
-        ).await?;
+        )
+        .await?;
 
         // 3. Create RLS Policy (drop-if-exists for idempotency)
         db.execute_unprepared(
@@ -42,7 +44,8 @@ impl MigrationTrait for Migration {
                 TO PUBLIC
                 USING (tenant_id = flexi.authorized_tenant_id());
             "#,
-        ).await?;
+        )
+        .await?;
 
         // 4. Create Index
         db.execute_unprepared(
@@ -50,14 +53,16 @@ impl MigrationTrait for Migration {
             CREATE INDEX IF NOT EXISTS idx_entity_records_type
                 ON flexi.entity_records (tenant_id, entity_type);
             "#,
-        ).await?;
+        )
+        .await?;
 
         Ok(())
     }
 
     async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
         let db = manager.get_connection();
-        db.execute_unprepared("DROP TABLE IF EXISTS flexi.entity_records").await?;
+        db.execute_unprepared("DROP TABLE IF EXISTS flexi.entity_records")
+            .await?;
         Ok(())
     }
 }
