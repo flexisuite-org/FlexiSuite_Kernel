@@ -13,10 +13,7 @@ export interface ReviewItem {
     line?: number;
 }
 
-interface DigestContext {
-    digestCommentId?: number;
-    items: Map<string, ReviewItem>;
-}
+
 
 // --- Configuration ---
 
@@ -86,19 +83,27 @@ function parseDigestComment(body: string): Map<string, ReviewItem> {
     const lines = body.split('\n');
 
     for (const line of lines) {
-        // Regex to capture: - [x] CR-abcdef1234: Content...
-        const match = line.match(/^\s*-\s*\[([ xX])\]\s*(CR-[a-f0-9]{10}):\s*(.*)$/);
+        const match = line.match(/^\s*-\s*\[([ xX])\]\s*(CR-[a-f0-9]{10})(?:\s*\(([^)]+)\))?\s*:\s*(.*)$/);
         if (match) {
             const isChecked = match[1].toLowerCase() === 'x';
             const id = match[2];
-            const content = match[3];
+            const statusToken = match[3]?.toLowerCase(); // e.g. 'skipped', 'deferred'
+            const content = match[4];
+
+            let status: 'open' | 'fixed' | 'skipped' | 'deferred' = 'open';
+            if (isChecked) {
+                if (statusToken === 'skipped') status = 'skipped';
+                else if (statusToken === 'deferred') status = 'deferred';
+                else status = 'fixed';
+            } else {
+                status = 'open';
+            }
 
             items.set(id, {
                 id,
-                type: 'actionable', // We lose type info in serialized form, assume actionable or maintain via context? 
-                // Actually, type isn't strictly needed for status tracking.
+                type: 'actionable', // Type is lost in serialization, default to actionable
                 content,
-                status: isChecked ? 'fixed' : 'open',
+                status,
             });
         }
     }
@@ -137,8 +142,11 @@ async function run() {
     }
     const octokit = new Octokit({ auth: token });
 
-    const eventPath = Deno.env.get("GITHUB_EVENT_PATH");
-    const eventName = Deno.env.get("GITHUB_EVENT_NAME");
+    // Use workflow-provided vars (EVENT_PATH/NAME) or fallback to GITHUB_*
+    // This allows the script to work both in the workflow (where we set EVENT_PATH) 
+    // and in raw environments.
+    const eventPath = Deno.env.get("EVENT_PATH") || Deno.env.get("GITHUB_EVENT_PATH");
+    const eventName = Deno.env.get("EVENT_NAME") || Deno.env.get("GITHUB_EVENT_NAME");
 
     if (!eventPath || !eventName) {
         console.error("Missing event path or name");
@@ -151,19 +159,29 @@ async function run() {
     let repoOwner: string | undefined;
     let repoName: string | undefined;
 
-    // Extract PR context
-    if (payload.pull_request) {
-        prNumber = payload.pull_request.number;
-        repoOwner = payload.repository.owner.login;
-        repoName = payload.repository.name;
-    } else if (payload.issue && payload.issue.pull_request) {
-        prNumber = payload.issue.number;
+    // Check for manual input (via env var passed from workflow input)
+    const inputPrNumber = Deno.env.get("INPUT_PR_NUMBER");
+    if (inputPrNumber) {
+        prNumber = parseInt(inputPrNumber, 10);
+    }
+
+    // Extract PR context from payload if not manually provided
+    if (!prNumber) {
+        if (payload.pull_request) {
+            prNumber = payload.pull_request.number;
+        } else if (payload.issue && payload.issue.pull_request) {
+            prNumber = payload.issue.number;
+        }
+    }
+
+    // Always get repo info from payload
+    if (payload.repository) {
         repoOwner = payload.repository.owner.login;
         repoName = payload.repository.name;
     }
 
     if (!prNumber || !repoOwner || !repoName) {
-        console.log("Not a PR event, skipping.");
+        console.log("Not a PR event or manual PR number provided, skipping.");
         return;
     }
 
@@ -204,33 +222,36 @@ async function run() {
     // For simplicity, we assume we fetch the latest review from CodeRabbit or process the event body if it's a review submission.
     // Ideally, query recent reviews by bot user 'coderabbitai'.
 
-    const reviews = await octokit.pulls.listReviews({
+    // Fetch all reviews, paginated
+    const reviews = await octokit.paginate(octokit.pulls.listReviews, {
         owner: repoOwner,
         repo: repoName,
         pull_number: prNumber,
     });
 
-    const codeRabbitReviews = reviews.data.filter(r => r.user?.login === 'coderabbitai' || r.user?.login?.includes('coderabbit')); // Adjust bot name
+    const codeRabbitReviews = reviews.filter((r: any) => r.user?.login === 'coderabbitai' || r.user?.login?.includes('coderabbit'));
 
-    // Process the latest review body
-    if (codeRabbitReviews.length > 0) {
-        // Get the latest one or all of them? 
-        // Strategy: Collect ALL items from ALL valid CodeRabbit reviews to ensure we have a complete picture, 
-        // or just the latest?
-        // Requirement says "Accumulate". Let's process the latest one for now, or maybe loop all.
-        // Better to process the latest *submitted* review content.
+    // Process ALL CodeRabbit reviews to ensure we don't miss anything.
+    // Use a Set to avoid duplicates if CodeRabbit posts multiple times or edits.
+    const seenIds = new Set<string>();
 
-        const latestReview = codeRabbitReviews[codeRabbitReviews.length - 1]; // Simply last
-        if (latestReview.body) {
-            const extracted = extractSections(latestReview.body);
+    for (const review of codeRabbitReviews) {
+        if (review.body) {
+            const extracted = extractSections(review.body);
 
             for (const content of extracted.actionable) {
                 const id = await generateStableId({ type: 'actionable', content });
-                newItems.push({ id, type: 'actionable', content, status: 'open' });
+                if (!seenIds.has(id)) {
+                    newItems.push({ id, type: 'actionable', content, status: 'open' });
+                    seenIds.add(id);
+                }
             }
             for (const content of extracted.nitpick) {
                 const id = await generateStableId({ type: 'nitpick', content });
-                newItems.push({ id, type: 'nitpick', content, status: 'open' });
+                if (!seenIds.has(id)) {
+                    newItems.push({ id, type: 'nitpick', content, status: 'open' });
+                    seenIds.add(id);
+                }
             }
         }
     }
@@ -258,8 +279,12 @@ async function run() {
     let hasOpenItems = false;
 
     for (const item of sortedItems) {
+        let statusToken = '';
+        if (item.status === 'skipped') statusToken = ' (skipped)';
+        else if (item.status === 'deferred') statusToken = ' (deferred)';
+
         const checked = (item.status === 'fixed' || item.status === 'skipped' || item.status === 'deferred') ? 'x' : ' ';
-        newBody += `- [${checked}] ${item.id}: ${item.content}\n`; // Link would be ideal here
+        newBody += `- [${checked}] ${item.id}${statusToken}: ${item.content}\n`;
         if (item.status === 'open') hasOpenItems = true;
     }
 
@@ -299,7 +324,6 @@ async function run() {
     }
 }
 
-// Run the script
 // --- Exports for Testing ---
 
 export {

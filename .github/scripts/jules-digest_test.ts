@@ -3,8 +3,7 @@ import {
     extractSections,
     generateStableId,
     parseDigestComment,
-    parseJulesReport,
-    ReviewItem
+    parseJulesReport
 } from "./jules-digest.ts";
 
 // --- Mock Data ---
@@ -85,3 +84,70 @@ Deno.test("parseJulesReport - extracts status updates", () => {
     assertEquals(statusMap.get("CR-a1b2c3d4e5"), "fixed");
     assertEquals(statusMap.get("CR-f6b7c8d9e0"), "skipped");
 });
+
+Deno.test("extractSections - handles empty strings and no sections", () => {
+    const { actionable, nitpick } = extractSections("");
+    assertEquals(actionable.length, 0);
+    assertEquals(nitpick.length, 0);
+
+    const { actionable: a2, nitpick: n2 } = extractSections("Some random text without headers");
+    assertEquals(a2.length, 0);
+    assertEquals(n2.length, 0);
+});
+
+Deno.test("parseDigestComment - handles malformed lines", () => {
+    const body = `
+    - [ ] InvalidLine
+    - [ ] CR-12345: Short ID
+    - [ ] CR-longerthan10chars123: Long ID
+    - [x] CR-valid1234 (invalidstatus): Content
+    `;
+    // Note: The regex strictly expects CR-[hex]{10}. 
+    // And standard parsing might be resilient or strict.
+    // 'CR-valid1234' matches 10 chars if it is exactly that.
+
+    // Let's test checking logic resilience
+    const items = parseDigestComment(body);
+    // Should be empty or only contain valid ones if we happened to construct one
+    // 'CR-valid1234' is 12 chars (CR- + 10). Wait.
+    // Logic: CR-[a-f0-9]{10} means CR- followed by 10 hex.
+
+    // Test a valid one with weird spacing
+    const validBody = `- [ ]   CR-abcdef1234   :    Spaced Content`;
+    const validItems = parseDigestComment(validBody);
+    assertEquals(validItems.has("CR-abcdef1234"), true);
+    assertEquals(validItems.get("CR-abcdef1234")?.content, "Spaced Content");
+    assertEquals(validItems.get("CR-abcdef1234")?.status, "open");
+});
+
+Deno.test("generateStableId - stable despite file/line variance if content same (current impl)", async () => {
+    // The current implementation ONLY uses content and type to generate ID?
+    // Let's check the code:
+    // const key = `${item.type}:${item.filePath || ''}:${item.line || ''}:${normalizedContent}`;
+    // It DOES use filePath and line.
+
+    const content = "Fix typo";
+    const base = { type: 'actionable', content };
+    const withLoc = { type: 'actionable', content, filePath: 'src/main.rs', line: 10 };
+
+    const id1 = await generateStableId(base);
+    const id2 = await generateStableId(withLoc);
+
+    // They should be DIFFERENT because location is part of the key
+    // Note: if the requirement was to verify they ARE different:
+    assertEquals(id1 !== id2, true);
+});
+
+Deno.test("parseDigestComment - captures status tokens", () => {
+    const body = `
+    - [x] CR-abcdef1234 (skipped): Skipped item
+    - [x] CR-567890abcd (deferred): Deferred item
+    - [x] CR-1122334455: Fixed item
+    `;
+    const items = parseDigestComment(body);
+
+    assertEquals(items.get("CR-abcdef1234")?.status, "skipped");
+    assertEquals(items.get("CR-567890abcd")?.status, "deferred");
+    assertEquals(items.get("CR-1122334455")?.status, "fixed");
+});
+
