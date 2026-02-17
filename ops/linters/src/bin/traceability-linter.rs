@@ -82,21 +82,28 @@ fn main() -> Result<()> {
         let mut components = p.components();
         let mut prev = None;
         let mut is_ops_linters_path = false;
+        let mut has_target = false;
+        let mut has_hidden_dot = false;
+
         while let Some(component) = components.next() {
             let current = component.as_os_str();
             if prev == Some(OsStr::new("ops")) && current == OsStr::new("linters") {
                 is_ops_linters_path = true;
-                break;
             }
+
+            if current == OsStr::new("target") {
+                has_target = true;
+            }
+
+            let s = current.to_string_lossy();
+            if s.starts_with('.') && s != "." && s != ".." {
+                has_hidden_dot = true;
+            }
+
             prev = Some(current);
         }
 
-        !p.components().any(|c| c.as_os_str() == "target")
-            && !is_ops_linters_path
-            && !p.components().any(|c| {
-                let s = c.as_os_str().to_string_lossy();
-                s.starts_with('.') && s != "." && s != ".."
-            })
+        !has_target && !is_ops_linters_path && !has_hidden_dot
     }) {
         let entry = match entry {
             Ok(entry) => entry,
