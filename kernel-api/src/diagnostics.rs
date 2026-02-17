@@ -77,12 +77,6 @@ async fn report_diagnostic(
     if let Err(status) = validate_string_length(&payload.error_code, "error_code") {
         return status.into_response();
     }
-    if let Some(suggestion) = payload.suggestion.as_ref()
-        && let Err(status) = validate_string_length(suggestion, "suggestion")
-    {
-        return status.into_response();
-    }
-
     if let Err(status) = validate_string_length(&payload.context.dom_snapshot, "dom_snapshot") {
         return status.into_response();
     }
@@ -94,9 +88,16 @@ async fn report_diagnostic(
         PIISanitizer::sanitize_value(metrics);
     }
     payload.error_code = PIISanitizer::sanitize_text(&payload.error_code);
-    payload.suggestion = payload
-        .suggestion
-        .map(|suggestion| PIISanitizer::sanitize_text(&suggestion));
+    payload.suggestion = if let Some(suggestion) = payload.suggestion.take() {
+        // Keep the bound check in the same control flow as allocation/sanitization
+        // so static analyzers can prove this operation is size-limited.
+        if let Err(status) = validate_string_length(&suggestion, "suggestion") {
+            return status.into_response();
+        }
+        Some(PIISanitizer::sanitize_text(&suggestion))
+    } else {
+        None
+    };
 
     let trace_id = Uuid::now_v7();
 
