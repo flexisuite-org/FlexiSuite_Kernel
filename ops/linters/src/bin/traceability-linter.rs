@@ -1,5 +1,6 @@
 use std::fs;
 use std::path::Path;
+use std::ffi::OsStr;
 use std::collections::HashSet;
 use walkdir::WalkDir;
 use regex::Regex;
@@ -53,8 +54,10 @@ fn main() -> Result<()> {
     // However, if implementation_plan doesn't exist, we might skip or warn.
     // Assuming strict equality if impl exists.
     if impl_loaded {
-        let missing_in_matrix: Vec<_> = impl_reqs.difference(&matrix_reqs).collect();
-        let missing_in_impl: Vec<_> = matrix_reqs.difference(&impl_reqs).collect();
+        let mut missing_in_matrix: Vec<String> = impl_reqs.difference(&matrix_reqs).cloned().collect();
+        missing_in_matrix.sort();
+        let mut missing_in_impl: Vec<String> = matrix_reqs.difference(&impl_reqs).cloned().collect();
+        missing_in_impl.sort();
 
         if !missing_in_matrix.is_empty() {
             eprintln!("Error: REQs found in implementation_plan but missing in verification_matrix:");
@@ -78,21 +81,26 @@ fn main() -> Result<()> {
         let entry = match entry {
             Ok(entry) => entry,
             Err(err) => {
-                eprintln!("Error: Failed to traverse directory: {err}");
-                errors = true;
+                let is_benign = err
+                    .io_error()
+                    .map(|io_err| matches!(io_err.kind(), std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::NotFound))
+                    .unwrap_or(false);
+
+                if is_benign {
+                    eprintln!("Warning: Failed to traverse directory: {err}");
+                } else {
+                    eprintln!("Error: Failed to traverse directory: {err}");
+                    errors = true;
+                }
                 continue;
             }
         };
 
         let path = entry.path();
-        let mut prev_was_ops = false;
-        let is_ops_linters_path = path.components().any(|component| {
-            let is_ops = component.as_os_str() == "ops";
-            let is_linters = component.as_os_str() == "linters";
-            let matched = prev_was_ops && is_linters;
-            prev_was_ops = is_ops;
-            matched
-        });
+        let components: Vec<_> = path.components().map(|component| component.as_os_str()).collect();
+        let is_ops_linters_path = components
+            .windows(2)
+            .any(|pair| pair[0] == OsStr::new("ops") && pair[1] == OsStr::new("linters"));
 
         // Skip hidden directories, target, source docs, and linters source
         if path.components().any(|c| c.as_os_str() == "target") ||
@@ -107,8 +115,8 @@ fn main() -> Result<()> {
         }
 
         if path.is_file() {
-            // Check text files only roughly based on extension or content
-            // We'll trust utf8 read for now
+            // Scan likely text files: whitelisted extensions, or extensionless files whose size is
+            // <= EXTENSIONLESS_TEXT_MAX_BYTES. If read_to_string() fails, we emit a warning and continue.
             let should_scan = match path.extension().and_then(|ext| ext.to_str()) {
                 // Whitelist text extensions to skip binary files.
                 Some(ext_str) => ["rs", "sql", "md", "txt", "toml", "sh", "yaml", "yml", "json"]
