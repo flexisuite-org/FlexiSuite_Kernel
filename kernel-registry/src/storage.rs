@@ -2,14 +2,31 @@ use bytes::Bytes;
 use kernel_core::auth::TenantContext;
 use object_store::path::Path;
 use object_store::ObjectStore;
+use serde::Serialize;
 use sha2::{Digest, Sha384};
+use std::collections::HashMap;
 use std::sync::Arc;
 use crate::error::RegistryError;
-use crate::model::DistManifest;
+use crate::model::{Dependencies, DistManifest, Kind, Route};
 
 pub struct RegistryStorage {
     store: Arc<dyn ObjectStore>,
     prefix: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ManifestDigestPayload<'a> {
+    schema_version: &'a str,
+    id: &'a str,
+    version: &'a str,
+    kind: &'a Kind,
+    name: &'a str,
+    protected: bool,
+    composition_root: &'a str,
+    routes: &'a [Route],
+    dependencies: &'a Dependencies,
+    configuration: &'a HashMap<String, serde_json::Value>,
 }
 
 impl RegistryStorage {
@@ -60,8 +77,18 @@ impl RegistryStorage {
     }
 
     fn manifest_payload_digest(manifest: &DistManifest) -> Result<String, RegistryError> {
-        let mut payload = manifest.clone();
-        payload.security.manifest_digest.clear();
+        let payload = ManifestDigestPayload {
+            schema_version: &manifest.schema_version,
+            id: &manifest.id,
+            version: &manifest.version,
+            kind: &manifest.kind,
+            name: &manifest.name,
+            protected: manifest.protected,
+            composition_root: &manifest.composition_root,
+            routes: &manifest.routes,
+            dependencies: &manifest.dependencies,
+            configuration: &manifest.configuration,
+        };
         let payload_bytes = serde_json::to_vec(&payload)?;
         let mut hasher = Sha384::new();
         hasher.update(payload_bytes);
@@ -113,7 +140,8 @@ impl RegistryStorage {
         Self::validate_key(&manifest.id)?;
         Self::validate_key(&manifest.version)?;
 
-        // manifest_digest is computed from the manifest where this field is excluded.
+        // manifest_digest is computed from the manifest with the entire
+        // security section excluded from the hashed payload.
         let computed_digest = Self::manifest_payload_digest(manifest)?;
         let mut persisted = manifest.clone();
         persisted.security.manifest_digest = computed_digest.clone();
