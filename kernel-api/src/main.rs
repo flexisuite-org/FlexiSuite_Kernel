@@ -1,9 +1,10 @@
 use kernel_api::build_app;
 use kernel_api::middleware::MiddlewareConfig;
+use sea_orm::{ConnectOptions, Database};
 use std::net::SocketAddr;
+use std::time::Duration;
 use tokio::net::TcpListener;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
-use sea_orm::{Database, ConnectOptions};
 
 #[tokio::main]
 async fn main() {
@@ -26,11 +27,15 @@ async fn main() {
     }
 
     // Initialize Database
-    let db_url = std::env::var("DATABASE_URL")
-        .expect("DATABASE_URL must be set");
+    let db_url = std::env::var("DATABASE_URL").unwrap_or_else(|e| {
+        eprintln!("DATABASE_URL must be set: {e}");
+        std::process::exit(1);
+    });
     let mut opt = ConnectOptions::new(db_url);
     opt.max_connections(100)
         .min_connections(5)
+        .connect_timeout(Duration::from_secs(5))
+        .acquire_timeout(Duration::from_secs(30))
         .sqlx_logging(false);
 
     let db = Database::connect(opt).await.unwrap_or_else(|e| {

@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
 use aws_config::meta::region::RegionProviderChain;
-use aws_sdk_s3::error::ProvideErrorMetadata;
+use aws_sdk_s3::operation::head_object::HeadObjectError;
 use aws_sdk_s3::primitives::ByteStream;
 use aws_sdk_s3::types::ObjectLockMode;
 use aws_sdk_s3::{config::Region, Client};
@@ -13,7 +13,7 @@ use base64::Engine as _;
 use flate2::write::GzEncoder;
 use flate2::Compression;
 use kernel_core::auth::{TenantContext, TenantId};
-use kernel_core::kernel::KernelError;
+use kernel_data::entities::{audit_log, entity_history};
 use kernel_data::{init_hmac_secret, with_tenant_tx, TenantRepository};
 use sea_orm::{Database, DatabaseConnection};
 use sha2::{Digest, Sha256};
@@ -36,6 +36,54 @@ struct AppConfig {
     object_lock: Option<ObjectLockConfig>,
 }
 
+struct MarkPlan {
+    entity_history_ids: Vec<String>,
+    audit_log_ids: Vec<String>,
+}
+
+trait ArchivableItem {
+    fn archive_id(&self) -> &str;
+    fn archive_tenant_id(&self) -> &str;
+    fn archive_created_at(&self) -> &chrono::DateTime<chrono::FixedOffset>;
+
+    fn archive_key(&self, key_prefix: &str) -> String {
+        format!(
+            "{}/{}/{}/{}.json.gz",
+            key_prefix,
+            sanitize_tenant_id_for_key(self.archive_tenant_id()),
+            self.archive_created_at().format("%Y/%m/%d"),
+            self.archive_id()
+        )
+    }
+}
+
+impl ArchivableItem for entity_history::Model {
+    fn archive_id(&self) -> &str {
+        &self.id
+    }
+
+    fn archive_tenant_id(&self) -> &str {
+        &self.tenant_id
+    }
+
+    fn archive_created_at(&self) -> &chrono::DateTime<chrono::FixedOffset> {
+        &self.created_at
+    }
+}
+
+impl ArchivableItem for audit_log::Model {
+    fn archive_id(&self) -> &str {
+        &self.id
+    }
+
+    fn archive_tenant_id(&self) -> &str {
+        &self.tenant_id
+    }
+
+    fn archive_created_at(&self) -> &chrono::DateTime<chrono::FixedOffset> {
+        &self.created_at
+    }
+}
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -184,108 +232,132 @@ async fn run_archive_cycle(db: &DatabaseConnection, s3: &Client, config: &AppCon
         let bucket = config.s3_bucket.clone();
         let lock_config = config.object_lock.clone();
 
-        let result = with_tenant_tx(db, &ctx, |repo| {
-            let s3 = s3.clone();
+        let fetched = with_tenant_tx(db, &ctx, |repo| {
             Box::pin(async move {
-                // Archive entity histories
                 let histories = repo.find_unarchived_entity_histories(100).await?;
-                if !histories.is_empty() {
-                    info!("Found {} entity history records to archive", histories.len());
-                    for history in histories {
-                        let key = format!(
-                            "entity-history/{}/{}/{}.json.gz",
-                            sanitize_tenant_id_for_key(&history.tenant_id),
-                            history.created_at.format("%Y/%m/%d"),
-                            history.id
-                        );
-
-                        match s3_object_exists(&s3, &bucket, &key).await {
-                            Ok(true) => {
-                                if let Err(e) = repo.mark_entity_history_archived(history.id.clone()).await {
-                                    error!("Failed to mark already-uploaded entity history archived: {}", e);
-                                }
-                                continue;
-                            }
-                            Ok(false) => {}
-                            Err(e) => {
-                                error!("head_object failed for entity history key {}: {}", key, e);
-                                continue;
-                            }
-                        }
-
-                        let json = serde_json::to_string(&history)
-                            .map_err(|e| KernelError::DbError(e.to_string()))?;
-                        let (payload, checksum) = build_gzip_payload(&json)
-                            .map_err(|e| KernelError::DbError(e.to_string()))?;
-
-                        match put_archive_object(&s3, &bucket, &key, payload, checksum, lock_config.as_ref()).await {
-                            Ok(_) => {
-                                if let Err(e) = repo.mark_entity_history_archived(history.id.clone()).await {
-                                    error!("Failed to mark entity history archived after upload: {}", e);
-                                }
-                            }
-                            Err(e) => {
-                                error!("Failed to upload entity history {}: {}", key, e);
-                            }
-                        }
-                    }
-                }
-
-                // Archive audit logs
                 let logs = repo.find_unarchived_audit_logs(100).await?;
-                if !logs.is_empty() {
-                    info!("Found {} audit log records to archive", logs.len());
-                    for log in logs {
-                        let key = format!(
-                            "audit-logs/{}/{}/{}.json.gz",
-                            sanitize_tenant_id_for_key(&log.tenant_id),
-                            log.created_at.format("%Y/%m/%d"),
-                            log.id
-                        );
+                Ok((histories, logs))
+            })
+        })
+        .await;
 
-                        match s3_object_exists(&s3, &bucket, &key).await {
-                            Ok(true) => {
-                                if let Err(e) = repo.mark_audit_log_archived(log.id.clone()).await {
-                                    error!("Failed to mark already-uploaded audit log archived: {}", e);
-                                }
-                                continue;
-                            }
-                            Ok(false) => {}
-                            Err(e) => {
-                                error!("head_object failed for audit log key {}: {}", key, e);
-                                continue;
-                            }
-                        }
+        let (histories, logs) = match fetched {
+            Ok(data) => data,
+            Err(e) => {
+                error!(
+                    "Tenant {} failed to fetch unarchived records: {}",
+                    tenant_id, e
+                );
+                continue;
+            }
+        };
 
-                        let json = serde_json::to_string(&log)
-                            .map_err(|e| KernelError::DbError(e.to_string()))?;
-                        let (payload, checksum) = build_gzip_payload(&json)
-                            .map_err(|e| KernelError::DbError(e.to_string()))?;
+        let mark_plan = MarkPlan {
+            entity_history_ids: archive_items(
+                "entity history",
+                "entity-history",
+                histories,
+                s3,
+                &bucket,
+                lock_config.as_ref(),
+            )
+            .await,
+            audit_log_ids: archive_items(
+                "audit log",
+                "audit-logs",
+                logs,
+                s3,
+                &bucket,
+                lock_config.as_ref(),
+            )
+            .await,
+        };
 
-                        match put_archive_object(&s3, &bucket, &key, payload, checksum, lock_config.as_ref()).await {
-                            Ok(_) => {
-                                if let Err(e) = repo.mark_audit_log_archived(log.id.clone()).await {
-                                    error!("Failed to mark audit log archived after upload: {}", e);
-                                }
-                            }
-                            Err(e) => {
-                                error!("Failed to upload audit log {}: {}", key, e);
-                            }
-                        }
-                    }
+        if mark_plan.entity_history_ids.is_empty() && mark_plan.audit_log_ids.is_empty() {
+            continue;
+        }
+
+        let mark_result = with_tenant_tx(db, &ctx, move |repo| {
+            Box::pin(async move {
+                for id in mark_plan.entity_history_ids {
+                    repo.mark_entity_history_archived(id).await?;
                 }
-
+                for id in mark_plan.audit_log_ids {
+                    repo.mark_audit_log_archived(id).await?;
+                }
                 Ok(())
             })
         })
         .await;
 
-        if let Err(e) = result {
-            error!("Tenant {} archive cycle failed: {}", tenant_id, e);
+        if let Err(e) = mark_result {
+            error!(
+                "Tenant {} failed to mark archived records: {}",
+                tenant_id, e
+            );
         }
     }
 }
 
+async fn archive_items<T>(
+    record_kind: &str,
+    key_prefix: &str,
+    items: Vec<T>,
+    s3: &Client,
+    bucket: &str,
+    lock_config: Option<&ObjectLockConfig>,
+) -> Vec<String>
+where
+    T: ArchivableItem + serde::Serialize,
+{
+    if !items.is_empty() {
+        info!("Found {} {} records to archive", items.len(), record_kind);
+    }
+
+    let mut archived_ids = Vec::new();
+    for item in items {
+        let id = item.archive_id().to_string();
+        let key = item.archive_key(key_prefix);
+
+        match s3_object_exists(s3, bucket, &key).await {
+            Ok(true) => {
+                archived_ids.push(id);
+                continue;
+            }
+            Ok(false) => {}
+            Err(e) => {
+                error!("head_object failed for {} key {}: {}", record_kind, key, e);
+                continue;
+            }
+        }
+
+        let json = match serde_json::to_string(&item) {
+            Ok(json) => json,
+            Err(e) => {
+                error!(
+                    "Failed to serialize {} {} for archiving: {}",
+                    record_kind, id, e
+                );
+                continue;
+            }
+        };
+
+        let (payload, checksum) = match build_gzip_payload(&json) {
+            Ok(payload) => payload,
+            Err(e) => {
+                error!("Failed to gzip {} {}: {}", record_kind, id, e);
+                continue;
+            }
+        };
+
+        match put_archive_object(s3, bucket, &key, payload, checksum, lock_config).await {
+            Ok(_) => archived_ids.push(id),
+            Err(e) => error!("Failed to upload {} {}: {}", record_kind, key, e),
+        }
+    }
+
+    archived_ids
+}
 
 fn build_gzip_payload(json: &str) -> Result<(ByteStream, String)> {
     let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
@@ -330,11 +402,8 @@ async fn s3_object_exists(s3: &Client, bucket: &str, key: &str) -> Result<bool> 
     match s3.head_object().bucket(bucket).key(key).send().await {
         Ok(_) => Ok(true),
         Err(err) => {
-            if let Some(service_err) = err.as_service_error() {
-                let code = service_err.code();
-                if code == Some("NotFound") || code == Some("404") {
-                    return Ok(false);
-                }
+            if matches!(err.as_service_error(), Some(HeadObjectError::NotFound(_))) {
+                return Ok(false);
             }
             Err(anyhow!(err))
         }

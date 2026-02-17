@@ -1,19 +1,23 @@
 use axum::{
-    extract::{Json, Extension, Query},
+    Router,
+    extract::{Extension, Json, Query},
     http::StatusCode,
     response::IntoResponse,
     routing::{get, post},
-    Router,
 };
+use chrono::Utc;
 use kernel_core::auth::TenantContext;
 use kernel_core::diagnostics::{DiagnosticContext, sanitizer::PIISanitizer};
 use kernel_core::kernel::KernelError;
-use kernel_data::{with_tenant_tx, TenantRepository, entities::{diagnostic_report, diagnostic_policy}};
+use kernel_data::{
+    TenantRepository,
+    entities::{diagnostic_policy, diagnostic_report},
+    with_tenant_tx,
+};
 use sea_orm::{ActiveValue, DatabaseConnection};
-use uuid::Uuid;
-use chrono::Utc;
 use serde::Deserialize;
 use std::sync::Arc;
+use uuid::Uuid;
 
 /// Maximum allowed length for user-supplied string fields (error_code, trace_id, etc.)
 const MAX_STRING_LEN: usize = 256;
@@ -65,6 +69,11 @@ async fn report_diagnostic(
     if let Err(status) = validate_string_length(&payload.error_code, "error_code") {
         return status.into_response();
     }
+    if let Some(suggestion) = payload.suggestion.as_ref()
+        && let Err(status) = validate_string_length(suggestion, "suggestion")
+    {
+        return status.into_response();
+    }
 
     // 1. Sanitize (Defense in Depth)
     PIISanitizer::sanitize_value(&mut payload.context.props);
@@ -72,39 +81,53 @@ async fn report_diagnostic(
     if let Some(metrics) = &mut payload.context.metrics {
         PIISanitizer::sanitize_value(metrics);
     }
+    payload.error_code = PIISanitizer::sanitize_text(&payload.error_code);
+    payload.suggestion = payload
+        .suggestion
+        .map(|suggestion| PIISanitizer::sanitize_text(&suggestion));
 
     let trace_id = Uuid::now_v7();
 
     // 2. Check Policy & Save
-    let result = with_tenant_tx(&db, &ctx, move |repo| Box::pin(async move {
-        let policy = repo.get_diagnostic_policy().await?;
-        let enabled = policy.map(|p| p.enabled).unwrap_or(false);
+    let result = with_tenant_tx(&db, &ctx, move |repo| {
+        Box::pin(async move {
+            let policy = repo.get_diagnostic_policy().await?;
+            let enabled = policy.map(|p| p.enabled).unwrap_or(false);
 
-        if !enabled {
-             return Ok(None);
-        }
+            if !enabled {
+                return Ok(None);
+            }
 
-        let context_value = serde_json::to_value(payload.context)
-            .map_err(|e| KernelError::ValidationError(
-                format!("failed to serialize diagnostic context: {e}")
-            ))?;
+            let context_value = serde_json::to_value(payload.context).map_err(|e| {
+                KernelError::ValidationError(format!("failed to serialize diagnostic context: {e}"))
+            })?;
 
-        let report_model = diagnostic_report::ActiveModel {
-            trace_id: ActiveValue::Set(trace_id.to_string()),
-            tenant_id: ActiveValue::NotSet,
-            error_code: ActiveValue::Set(payload.error_code),
-            context: ActiveValue::Set(context_value),
-            suggestion: ActiveValue::Set(payload.suggestion),
-            created_at: ActiveValue::Set(Utc::now().into()),
-        };
+            let report_model = diagnostic_report::ActiveModel {
+                trace_id: ActiveValue::Set(trace_id.to_string()),
+                tenant_id: ActiveValue::NotSet,
+                error_code: ActiveValue::Set(payload.error_code),
+                context: ActiveValue::Set(context_value),
+                suggestion: ActiveValue::Set(payload.suggestion),
+                created_at: ActiveValue::Set(Utc::now().into()),
+            };
 
-        let saved = repo.create_diagnostic_report(report_model).await?;
-        Ok(Some(saved))
-    })).await;
+            let saved = repo.create_diagnostic_report(report_model).await?;
+            Ok(Some(saved))
+        })
+    })
+    .await;
 
     match result {
-        Ok(Some(saved)) => (StatusCode::CREATED, Json(serde_json::json!({"trace_id": saved.trace_id}))).into_response(),
-        Ok(None) => (StatusCode::OK, Json(serde_json::json!({"status": "dropped_by_policy"}))).into_response(),
+        Ok(Some(saved)) => (
+            StatusCode::CREATED,
+            Json(serde_json::json!({"trace_id": saved.trace_id})),
+        )
+            .into_response(),
+        Ok(None) => (
+            StatusCode::OK,
+            Json(serde_json::json!({"status": "dropped_by_policy"})),
+        )
+            .into_response(),
         Err(e) => {
             tracing::error!("Failed to save diagnostic report: {}", e);
             StatusCode::INTERNAL_SERVER_ERROR.into_response()
@@ -122,9 +145,10 @@ async fn query_diagnostic(
         return status.into_response();
     }
 
-    let result = with_tenant_tx(&db, &ctx, move |repo| Box::pin(async move {
-        repo.get_diagnostic_report(&payload.trace_id).await
-    })).await;
+    let result = with_tenant_tx(&db, &ctx, move |repo| {
+        Box::pin(async move { repo.get_diagnostic_report(&payload.trace_id).await })
+    })
+    .await;
 
     match result {
         Ok(Some(report)) => Json(report).into_response(),
@@ -149,18 +173,18 @@ async fn get_policy(
     Extension(db): Extension<Arc<DatabaseConnection>>,
     Extension(ctx): Extension<TenantContext>,
 ) -> impl IntoResponse {
-    let result = with_tenant_tx(&db, &ctx, move |repo| Box::pin(async move {
-        repo.get_diagnostic_policy().await
-    })).await;
+    let result = with_tenant_tx(&db, &ctx, move |repo| {
+        Box::pin(async move { repo.get_diagnostic_policy().await })
+    })
+    .await;
 
     match result {
         Ok(Some(policy)) => Json(policy).into_response(),
-        Ok(None) => {
-            Json(serde_json::json!({
-                "tenant_id": ctx.tenant_id().as_str(),
-                "enabled": false
-            })).into_response()
-        },
+        Ok(None) => Json(serde_json::json!({
+            "tenant_id": ctx.tenant_id().as_str(),
+            "enabled": false
+        }))
+        .into_response(),
         Err(e) => {
             tracing::error!("Failed to get policy: {}", e);
             StatusCode::INTERNAL_SERVER_ERROR.into_response()
@@ -179,28 +203,32 @@ async fn update_policy(
     };
 
     let enabled = payload.enabled;
-    let result = with_tenant_tx(&db, &ctx, move |repo| Box::pin(async move {
-        let model = diagnostic_policy::ActiveModel {
-            tenant_id: ActiveValue::NotSet,
-            enabled: ActiveValue::Set(enabled),
-            updated_at: ActiveValue::Set(Utc::now().into()),
-            updated_by: ActiveValue::Set(Some(user_id.clone())),
-        };
-        let policy = repo.upsert_diagnostic_policy(model).await?;
+    let result = with_tenant_tx(&db, &ctx, move |repo| {
+        Box::pin(async move {
+            let model = diagnostic_policy::ActiveModel {
+                tenant_id: ActiveValue::NotSet,
+                enabled: ActiveValue::Set(enabled),
+                updated_at: ActiveValue::Set(Utc::now().into()),
+                updated_by: ActiveValue::Set(Some(user_id.clone())),
+            };
+            let policy = repo.upsert_diagnostic_policy(model).await?;
 
-        // Record audit entry for policy change
-        repo.log_audit(
-            "update_policy".to_string(),
-            "diagnostic_policy".to_string(),
-            serde_json::json!({
-                "updated_by": user_id,
-                "field": "enabled",
-                "new_value": enabled,
-            }),
-        ).await?;
+            // Record audit entry for policy change
+            repo.log_audit(
+                "update_policy".to_string(),
+                "diagnostic_policy".to_string(),
+                serde_json::json!({
+                    "updated_by": user_id,
+                    "field": "enabled",
+                    "new_value": enabled,
+                }),
+            )
+            .await?;
 
-        Ok(policy)
-    })).await;
+            Ok(policy)
+        })
+    })
+    .await;
 
     match result {
         Ok(policy) => Json(policy).into_response(),
