@@ -3,6 +3,8 @@ use kernel_registry::error::RegistryError;
 use kernel_registry::model::{Dependencies, DistManifest, Kind, Route, Security};
 use kernel_registry::storage::RegistryStorage;
 use object_store::memory::InMemory;
+use object_store::path::Path;
+use object_store::ObjectStore;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -134,10 +136,15 @@ async fn test_manifest_digest_excludes_security_section() {
     };
 
     let mut manifest_b = manifest_a.clone();
+    // Intentionally keep `manifest_b` with the same id/version as `manifest_a`.
+    // In RegistryStorage::save_manifest this overwrites the same manifest path,
+    // and this test's goal is only to assert that digest computation ignores
+    // Security-field differences between manifest_a and manifest_b.
     manifest_b.security.manifest_signature = "sig_B".to_string();
     manifest_b.security.manifest_signature_kid = "kid_B".to_string();
     manifest_b.security.trust_root_version = "v2".to_string();
 
+    // These two save_manifest calls intentionally target the same RegistryStorage path.
     let (digest_a, _) = registry.save_manifest(&manifest_a).await.unwrap();
     let (digest_b, _) = registry.save_manifest(&manifest_b).await.unwrap();
 
@@ -194,6 +201,135 @@ async fn test_save_manifest_rejects_empty_security_fields() {
             assert_eq!(msg, "security.manifest_signature must not be empty");
         }
         other => panic!("expected InvalidManifest, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn test_save_manifest_rejects_empty_security_kid() {
+    let store = Arc::new(InMemory::new());
+    let registry = RegistryStorage::new(store, &test_tenant_ctx());
+
+    let manifest = DistManifest {
+        schema_version: "1.0".to_string(),
+        id: "app_invalid_security_kid".to_string(),
+        version: "1.0.0".to_string(),
+        kind: Kind::Composition,
+        name: "Invalid Security Kid".to_string(),
+        protected: false,
+        composition_root: "main.tsx".to_string(),
+        routes: vec![Route {
+            path: "/".to_string(),
+            component: "layout".to_string(),
+        }],
+        dependencies: Dependencies {
+            components: BTreeMap::new(),
+            permissions: vec![],
+        },
+        configuration: BTreeMap::new(),
+        security: Security {
+            manifest_digest: "".to_string(),
+            manifest_signature: "sig_...".to_string(),
+            manifest_signature_kid: "".to_string(),
+            trust_root_version: "v1".to_string(),
+        },
+    };
+
+    let result = registry.save_manifest(&manifest).await;
+    match result {
+        Err(RegistryError::InvalidManifest(msg)) => {
+            assert_eq!(msg, "security.manifest_signature_kid must not be empty");
+        }
+        other => panic!("expected InvalidManifest, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn test_save_manifest_rejects_empty_trust_root_version() {
+    let store = Arc::new(InMemory::new());
+    let registry = RegistryStorage::new(store, &test_tenant_ctx());
+
+    let manifest = DistManifest {
+        schema_version: "1.0".to_string(),
+        id: "app_invalid_trust_root_version".to_string(),
+        version: "1.0.0".to_string(),
+        kind: Kind::Composition,
+        name: "Invalid Trust Root Version".to_string(),
+        protected: false,
+        composition_root: "main.tsx".to_string(),
+        routes: vec![Route {
+            path: "/".to_string(),
+            component: "layout".to_string(),
+        }],
+        dependencies: Dependencies {
+            components: BTreeMap::new(),
+            permissions: vec![],
+        },
+        configuration: BTreeMap::new(),
+        security: Security {
+            manifest_digest: "".to_string(),
+            manifest_signature: "sig_...".to_string(),
+            manifest_signature_kid: "key1".to_string(),
+            trust_root_version: "".to_string(),
+        },
+    };
+
+    let result = registry.save_manifest(&manifest).await;
+    match result {
+        Err(RegistryError::InvalidManifest(msg)) => {
+            assert_eq!(msg, "security.trust_root_version must not be empty");
+        }
+        other => panic!("expected InvalidManifest, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn test_get_manifest_detects_tampered_stored_json() {
+    let store = Arc::new(InMemory::new());
+    let tenant_ctx = test_tenant_ctx();
+    let registry = RegistryStorage::new(store.clone(), &tenant_ctx);
+
+    let manifest = DistManifest {
+        schema_version: "1.0".to_string(),
+        id: "app_tamper_test".to_string(),
+        version: "1.0.0".to_string(),
+        kind: Kind::Composition,
+        name: "Tamper Test".to_string(),
+        protected: false,
+        composition_root: "main.tsx".to_string(),
+        routes: vec![Route {
+            path: "/".to_string(),
+            component: "layout".to_string(),
+        }],
+        dependencies: Dependencies {
+            components: BTreeMap::new(),
+            permissions: vec![],
+        },
+        configuration: BTreeMap::new(),
+        security: Security {
+            manifest_digest: "".to_string(),
+            manifest_signature: "sig_...".to_string(),
+            manifest_signature_kid: "key1".to_string(),
+            trust_root_version: "v1".to_string(),
+        },
+    };
+
+    let (_, persisted) = registry.save_manifest(&manifest).await.unwrap();
+
+    let mut tampered = persisted.clone();
+    tampered.name = "Tampered Name".to_string();
+    let tampered_bytes = serde_json::to_vec(&tampered).unwrap();
+    let tampered_path = Path::from(format!(
+        "tenants/{}/manifests/{}/{}/manifest.json",
+        tenant_ctx.tenant_id().as_str(),
+        manifest.id,
+        manifest.version
+    ));
+    store.put(&tampered_path, tampered_bytes.into()).await.unwrap();
+
+    let result = registry.get_manifest(&manifest.id, &manifest.version).await;
+    match result {
+        Err(RegistryError::IntegrityCheckFailed { .. }) => {}
+        other => panic!("expected IntegrityCheckFailed, got {other:?}"),
     }
 }
 
