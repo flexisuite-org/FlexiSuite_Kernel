@@ -8,10 +8,12 @@ use serde::Serialize;
 use sha2::{Digest, Sha384};
 use std::collections::BTreeMap;
 use std::sync::Arc;
+use tracing::{info, warn, error, instrument};
 
 pub struct RegistryStorage {
     store: Arc<dyn ObjectStore>,
     prefix: String,
+    tenant_id: String,
 }
 
 #[derive(Serialize)]
@@ -42,6 +44,7 @@ impl RegistryStorage {
         Self {
             store,
             prefix: format!("tenants/{}/", tenant_ctx.tenant_id().as_str()),
+            tenant_id: tenant_ctx.tenant_id().to_string(),
         }
     }
 
@@ -114,13 +117,47 @@ impl RegistryStorage {
             dependencies: &manifest.dependencies,
             configuration: &manifest.configuration,
         };
-        let payload_bytes = serde_json::to_vec(&payload)?;
+
+        // Normalize numeric values to ensure digest stability (1.0 vs 1)
+        let payload_value = serde_json::to_value(&payload)?;
+        let normalized = Self::normalize_value(payload_value);
+        let payload_bytes = serde_json::to_vec(&normalized)?;
+        
         let mut hasher = Sha384::new();
         hasher.update(payload_bytes);
         Ok(hex::encode(hasher.finalize()))
     }
 
+    fn normalize_value(v: serde_json::Value) -> serde_json::Value {
+        use serde_json::Value;
+        match v {
+            Value::Object(map) => {
+                Value::Object(map.into_iter().map(|(k, v)| (k, Self::normalize_value(v))).collect())
+            }
+            Value::Array(vec) => {
+                Value::Array(vec.into_iter().map(Self::normalize_value).collect())
+            }
+            Value::Number(n) => {
+                if let Some(f) = n.as_f64() {
+                    // Check if the float is effectively an integer
+                    if f.fract() == 0.0 {
+                         // Prefer integer representation if it fits in i64/u64
+                         if f >= (i64::MIN as f64) && f <= (i64::MAX as f64) {
+                             return Value::from(f as i64);
+                         }
+                         if f >= 0.0 && f <= (u64::MAX as f64) {
+                             return Value::from(f as u64);
+                         }
+                    }
+                }
+                Value::Number(n)
+            }
+            _ => v,
+        }
+    }
+
     /// Saves binary data and returns the SHA-384 digest (hex string).
+    #[instrument(skip(self, data), fields(tenant = %self.tenant_id, artifact = %key))]
     pub async fn save_artifact(&self, key: &str, data: Bytes) -> Result<String, RegistryError> {
         Self::validate_key(key)?;
         let mut hasher = Sha384::new();
@@ -128,12 +165,17 @@ impl RegistryStorage {
         let digest = hex::encode(hasher.finalize());
 
         let path = self.artifact_path(key);
-        self.store.put(&path, data.into()).await?;
+        if let Err(e) = self.store.put(&path, data.into()).await {
+             error!("Failed to save artifact: {}", e);
+             return Err(RegistryError::ObjectStore(e));
+        }
 
+        info!(digest = %digest, "Artifact saved successfully");
         Ok(digest)
     }
 
     /// Retrieves binary data. If expected_digest is provided, verifies SHA-384.
+    #[instrument(skip(self), fields(tenant = %self.tenant_id, artifact = %key))]
     pub async fn get_artifact(
         &self,
         key: &str,
@@ -143,9 +185,13 @@ impl RegistryStorage {
         let path = self.artifact_path(key);
         let result = self.store.get(&path).await.map_err(|e| match e {
             object_store::Error::NotFound { .. } => {
+                warn!("Artifact not found");
                 RegistryError::ArtifactNotFound(key.to_string())
             }
-            _ => RegistryError::ObjectStore(e),
+            _ => {
+                error!("Object store error: {}", e);
+                RegistryError::ObjectStore(e)
+            }
         })?;
 
         let data = result.bytes().await?;
@@ -155,6 +201,7 @@ impl RegistryStorage {
             hasher.update(&data);
             let actual = hex::encode(hasher.finalize());
             if actual != expected {
+                warn!(expected = %expected, actual = %actual, "Integrity check failed");
                 return Err(RegistryError::IntegrityCheckFailed {
                     expected: expected.to_string(),
                     actual,
@@ -162,11 +209,13 @@ impl RegistryStorage {
             }
         }
 
+        info!("Artifact retrieved successfully");
         Ok(data)
     }
 
     /// Saves a DistManifest to `manifests/{id}/{version}/manifest.json`.
     /// Returns the SHA-384 digest and persisted manifest with manifest_digest set.
+    #[instrument(skip(self, manifest), fields(tenant = %self.tenant_id, manifest.id = %manifest.id, manifest.version = %manifest.version))]
     pub async fn save_manifest(
         &self,
         manifest: &DistManifest,
@@ -174,16 +223,19 @@ impl RegistryStorage {
         Self::validate_key(&manifest.id)?;
         Self::validate_key(&manifest.version)?;
         if manifest.security.manifest_signature.trim().is_empty() {
+            warn!("Manifest rejected: empty signature");
             return Err(RegistryError::InvalidManifest(
                 "security.manifest_signature must not be empty".to_string(),
             ));
         }
         if manifest.security.manifest_signature_kid.trim().is_empty() {
+             warn!("Manifest rejected: empty signature kid");
             return Err(RegistryError::InvalidManifest(
                 "security.manifest_signature_kid must not be empty".to_string(),
             ));
         }
         if manifest.security.trust_root_version.trim().is_empty() {
+             warn!("Manifest rejected: empty trust root version");
             return Err(RegistryError::InvalidManifest(
                 "security.trust_root_version must not be empty".to_string(),
             ));
@@ -197,11 +249,18 @@ impl RegistryStorage {
 
         let path = self.manifest_path(&manifest.id, &manifest.version);
         let data = serde_json::to_vec(&persisted)?;
-        self.store.put(&path, data.into()).await?;
+        
+        if let Err(e) = self.store.put(&path, data.into()).await {
+            error!("Failed to save manifest: {}", e);
+            return Err(RegistryError::ObjectStore(e));
+        }
+        
+        info!(digest = %computed_digest, "Manifest saved successfully");
         Ok((computed_digest, persisted))
     }
 
     /// Retrieves a DistManifest from `manifests/{id}/{version}/manifest.json`.
+    #[instrument(skip(self), fields(tenant = %self.tenant_id, manifest.id = %id, manifest.version = %version))]
     pub async fn get_manifest(
         &self,
         id: &str,
@@ -212,17 +271,23 @@ impl RegistryStorage {
         let path = self.manifest_path(id, version);
         let result = self.store.get(&path).await.map_err(|e| match e {
             object_store::Error::NotFound { .. } => {
+                warn!("Manifest not found");
                 RegistryError::ManifestNotFound(format!("{id}/{version}"))
             }
-            _ => RegistryError::ObjectStore(e),
+            _ => {
+                error!("Object store error: {}", e);
+                RegistryError::ObjectStore(e)
+            }
         })?;
         let data = result.bytes().await?;
         let manifest: DistManifest = serde_json::from_slice(&data)?;
         let actual = Self::manifest_payload_digest(&manifest)?;
         let expected = manifest.security.manifest_digest.clone();
         if actual != expected {
+            warn!(expected = %expected, actual = %actual, "Manifest integrity check failed");
             return Err(RegistryError::IntegrityCheckFailed { expected, actual });
         }
+        info!(digest = %actual, "Manifest retrieved successfully");
         Ok(manifest)
     }
 }
