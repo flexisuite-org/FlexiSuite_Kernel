@@ -288,3 +288,83 @@ async fn test_manifest_digest_numeric_normalization() {
 
     assert_eq!(digest_int, digest_float, "Digests should match for 1 and 1.0");
 }
+
+#[tokio::test]
+async fn test_get_artifact_returns_artifact_not_found_for_missing_key() {
+    let store = Arc::new(InMemory::new());
+    let registry = RegistryStorage::new(store, &test_tenant_ctx());
+
+    let result = registry.get_artifact("missing_artifact", None).await;
+    match result {
+        Err(RegistryError::ArtifactNotFound(key)) => {
+            assert_eq!(key, "missing_artifact");
+        }
+        other => panic!("expected ArtifactNotFound, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn test_registry_key_validation_invalid_paths() {
+    let store = Arc::new(InMemory::new());
+    let registry = RegistryStorage::new(store, &test_tenant_ctx());
+    
+    let invalid_keys = vec![
+        "../traversal",
+        "key\\backslash",
+        "encode%2f",
+        "encode%5c",
+    ];
+
+    for key in invalid_keys {
+        // Test save_artifact
+        let result = registry.save_artifact(key, b"data".as_slice().into()).await;
+        match result {
+            Err(RegistryError::InvalidPath(_)) => {},
+            other => panic!("save_artifact: expected InvalidPath for {key}, got {other:?}"),
+        }
+        
+        // Test save_manifest (id)
+        let manifest = test_manifest(key, "1.0.0");
+        let result = registry.save_manifest(&manifest).await;
+        match result {
+            Err(RegistryError::InvalidPath(_)) => {},
+            other => panic!("save_manifest: expected InvalidPath for {key} (id), got {other:?}"),
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_save_manifest_rejects_whitespace_security_fields() {
+    let store = Arc::new(InMemory::new());
+    let registry = RegistryStorage::new(store, &test_tenant_ctx());
+
+    let mut manifest = test_manifest("app_whitespace_sig", "1.0.0");
+    manifest.security.manifest_signature = "   ".to_string();
+    let result = registry.save_manifest(&manifest).await;
+    match result {
+        Err(RegistryError::InvalidManifest(msg)) => {
+            assert_eq!(msg, "security.manifest_signature must not be empty");
+        },
+        other => panic!("expected InvalidManifest for whitespace signature, got {other:?}"),
+    }
+
+    let mut manifest = test_manifest("app_whitespace_kid", "1.0.0");
+    manifest.security.manifest_signature_kid = "   ".to_string();
+    let result = registry.save_manifest(&manifest).await;
+    match result {
+        Err(RegistryError::InvalidManifest(msg)) => {
+            assert_eq!(msg, "security.manifest_signature_kid must not be empty");
+        },
+        other => panic!("expected InvalidManifest for whitespace kid, got {other:?}"),
+    }
+    
+    let mut manifest = test_manifest("app_whitespace_trust", "1.0.0");
+    manifest.security.trust_root_version = "   ".to_string();
+    let result = registry.save_manifest(&manifest).await;
+    match result {
+        Err(RegistryError::InvalidManifest(msg)) => {
+            assert_eq!(msg, "security.trust_root_version must not be empty");
+        },
+        other => panic!("expected InvalidManifest for whitespace trust_root_version, got {other:?}"),
+    }
+}

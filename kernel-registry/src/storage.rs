@@ -142,11 +142,18 @@ impl RegistryStorage {
                     // Check if the float is effectively an integer
                     if f.fract() == 0.0 {
                          // Prefer integer representation if it fits in i64/u64
+                         // Perform lossless round-trip check to avoid silent saturation
                          if f >= (i64::MIN as f64) && f <= (i64::MAX as f64) {
-                             return Value::from(f as i64);
+                             let i = f as i64;
+                             if (i as f64) == f {
+                                 return Value::from(i);
+                             }
                          }
                          if f >= 0.0 && f <= (u64::MAX as f64) {
-                             return Value::from(f as u64);
+                             let u = f as u64;
+                             if (u as f64) == f {
+                                 return Value::from(u);
+                             }
                          }
                     }
                 }
