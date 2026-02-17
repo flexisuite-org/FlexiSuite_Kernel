@@ -339,16 +339,23 @@ async function run() {
 
     if (hasOpenItems) {
         // Only prepend @Jules if it's absent (to notify)
+        // REMOVED @Jules mention to use direct action trigger instead
+        /*
         if (!alreadyMentioned) {
-            newBody = `@Jules\n` + newBody.replace(DIGEST_HEADER, UNRESOLVED_HEADER);
+             newBody = `@Jules\n` + newBody.replace(DIGEST_HEADER, UNRESOLVED_HEADER);
         } else {
-            // Leave without mention if it was already there (user instruction to avoid repeated notifications)
-            newBody = newBody.replace(DIGEST_HEADER, UNRESOLVED_HEADER);
+             // Leave without mention if it was already there (user instruction to avoid repeated notifications)
+             newBody = newBody.replace(DIGEST_HEADER, UNRESOLVED_HEADER);
         }
-        newBody += `\n\nThere are unresolved items. Please review and update status (Fix/Skip/Defer) for the unchecked items.`;
+        */
+        newBody = newBody.replace(DIGEST_HEADER, UNRESOLVED_HEADER);
+        // newBody += `\n\nThere are unresolved items. Please review and update status (Fix/Skip/Defer) for the unchecked items.`;
+        // Removed @Jules auto-mention. Now we trigger the workflow directly.
     } else {
         newBody += `\n\nAll items resolved! code review complete.`;
     }
+
+    let digestChanged = false;
 
     // Post/Update
     if (digestComment) {
@@ -362,6 +369,7 @@ async function run() {
                 body: newBody
             });
             console.log("Updated Digest comment.");
+            digestChanged = true;
         } else {
             console.log("Digest up to date.");
         }
@@ -374,6 +382,30 @@ async function run() {
                 body: newBody
             });
             console.log("Created Digest comment.");
+            digestChanged = true;
+        }
+    }
+
+    // Trigger Jules if there are open items and (digest changed OR explicitly requested)
+    // For now, we trigger if there are open items and we just updated the digest, OR if it's a manual run.
+    const shouldTriggerJules = hasOpenItems && (digestChanged || eventName === 'workflow_dispatch');
+
+    if (shouldTriggerJules) {
+        console.log("Triggering Jules Process...");
+        try {
+            await octokit.actions.createWorkflowDispatch({
+                owner: repoOwner!,
+                repo: repoName!,
+                workflow_id: 'jules-process.yml',
+                ref: payload.pull_request?.head?.ref || payload.ref || 'main', // Target the PR branch or default
+                inputs: {
+                    pr_number: prNumber.toString(),
+                    digest_body: newBody
+                }
+            });
+            console.log("Successfully triggered jules-process workflow.");
+        } catch (error) {
+            console.error("Failed to trigger Jules workflow:", error);
         }
     }
 }
