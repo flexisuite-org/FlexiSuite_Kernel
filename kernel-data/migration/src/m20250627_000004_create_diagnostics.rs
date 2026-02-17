@@ -31,7 +31,7 @@ impl MigrationTrait for Migration {
                 error_code TEXT NOT NULL,
                 context JSONB NOT NULL,
                 suggestion TEXT,
-                created_at TIMESTAMPTZ NOT NULL,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                 PRIMARY KEY (trace_id, tenant_id)
             );
             "#,

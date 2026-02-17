@@ -13,6 +13,8 @@ use sea_orm::{
 };
 use uuid::Uuid;
 
+const MARK_ARCHIVE_CHUNK_SIZE: usize = 500;
+
 /// Sealed trait to prevent external implementations.
 pub(crate) mod private {
     pub trait Sealed {}
@@ -327,17 +329,20 @@ impl TenantRepository for TenantScoped<RawConnection> {
         if ids.is_empty() {
             return Ok(());
         }
-        EntityHistory::update_many()
-            .col_expr(
-                entity_history::Column::ArchivedAt,
-                Expr::current_timestamp().into(),
-            )
-            .filter(entity_history::Column::Id.is_in(ids))
-            .filter(entity_history::Column::TenantId.eq(self.tenant_id.to_string()))
-            .filter(entity_history::Column::ArchivedAt.is_null())
-            .exec(&self.inner.txn)
-            .await
-            .map_err(KernelError::db_error)?;
+        let tenant_id = self.tenant_id.to_string();
+        for chunk in ids.chunks(MARK_ARCHIVE_CHUNK_SIZE) {
+            EntityHistory::update_many()
+                .col_expr(
+                    entity_history::Column::ArchivedAt,
+                    Expr::current_timestamp().into(),
+                )
+                .filter(entity_history::Column::Id.is_in(chunk.iter().cloned()))
+                .filter(entity_history::Column::TenantId.eq(tenant_id.clone()))
+                .filter(entity_history::Column::ArchivedAt.is_null())
+                .exec(&self.inner.txn)
+                .await
+                .map_err(KernelError::db_error)?;
+        }
         Ok(())
     }
 
@@ -363,17 +368,20 @@ impl TenantRepository for TenantScoped<RawConnection> {
         if ids.is_empty() {
             return Ok(());
         }
-        AuditLog::update_many()
-            .col_expr(
-                audit_log::Column::ArchivedAt,
-                Expr::current_timestamp().into(),
-            )
-            .filter(audit_log::Column::Id.is_in(ids))
-            .filter(audit_log::Column::TenantId.eq(self.tenant_id.to_string()))
-            .filter(audit_log::Column::ArchivedAt.is_null())
-            .exec(&self.inner.txn)
-            .await
-            .map_err(KernelError::db_error)?;
+        let tenant_id = self.tenant_id.to_string();
+        for chunk in ids.chunks(MARK_ARCHIVE_CHUNK_SIZE) {
+            AuditLog::update_many()
+                .col_expr(
+                    audit_log::Column::ArchivedAt,
+                    Expr::current_timestamp().into(),
+                )
+                .filter(audit_log::Column::Id.is_in(chunk.iter().cloned()))
+                .filter(audit_log::Column::TenantId.eq(tenant_id.clone()))
+                .filter(audit_log::Column::ArchivedAt.is_null())
+                .exec(&self.inner.txn)
+                .await
+                .map_err(KernelError::db_error)?;
+        }
         Ok(())
     }
 }

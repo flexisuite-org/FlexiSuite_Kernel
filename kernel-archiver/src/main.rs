@@ -32,6 +32,7 @@ struct AppConfig {
     s3_bucket: String,
     region_name: String,
     interval_secs: u64,
+    batch_size: u64,
     tenant_ids: Vec<TenantId>,
     object_lock: Option<ObjectLockConfig>,
 }
@@ -52,7 +53,7 @@ trait ArchivableItem {
             key_prefix,
             sanitize_tenant_id_for_key(self.archive_tenant_id()),
             self.archive_created_at().format("%Y/%m/%d"),
-            self.archive_id()
+            sanitize_archive_id_for_key(self.archive_id())
         )
     }
 }
@@ -152,6 +153,22 @@ fn load_config() -> Result<AppConfig> {
         }
     };
 
+    let batch_size = match env::var("ARCHIVER_BATCH_SIZE") {
+        Ok(v) => {
+            let parsed = v
+                .parse::<u64>()
+                .context("ARCHIVER_BATCH_SIZE must be an integer")?;
+            if parsed == 0 {
+                return Err(anyhow!("ARCHIVER_BATCH_SIZE must be > 0"));
+            }
+            parsed
+        }
+        Err(_) => {
+            info!("ARCHIVER_BATCH_SIZE is not set, defaulting to 100");
+            100
+        }
+    };
+
     let tenant_ids = parse_tenant_ids(
         &env::var("ARCHIVER_TENANT_IDS")
             .context("ARCHIVER_TENANT_IDS must be set (comma-separated tenant IDs)")?,
@@ -167,6 +184,7 @@ fn load_config() -> Result<AppConfig> {
         s3_bucket,
         region_name,
         interval_secs,
+        batch_size,
         tenant_ids,
         object_lock,
     })
@@ -228,11 +246,14 @@ async fn run_archive_cycle(db: &DatabaseConnection, s3: &Client, config: &AppCon
         let ctx = TenantContext::new(tenant_id.clone(), None);
         let bucket = config.s3_bucket.clone();
         let lock_config = config.object_lock.clone();
+        let batch_size = config.batch_size;
 
         let fetched = with_tenant_tx(db, &ctx, |repo| {
             Box::pin(async move {
-                let histories = repo.find_unarchived_entity_histories(100).await?;
-                let logs = repo.find_unarchived_audit_logs(100).await?;
+                let histories = repo
+                    .find_unarchived_entity_histories(batch_size)
+                    .await?;
+                let logs = repo.find_unarchived_audit_logs(batch_size).await?;
                 Ok((histories, logs))
             })
         })
@@ -249,6 +270,7 @@ async fn run_archive_cycle(db: &DatabaseConnection, s3: &Client, config: &AppCon
             }
         };
 
+        let tenant_id = ctx.tenant_id().to_string();
         let mark_plan = MarkPlan {
             entity_history_ids: archive_items(
                 "entity history",
@@ -257,7 +279,7 @@ async fn run_archive_cycle(db: &DatabaseConnection, s3: &Client, config: &AppCon
                 s3,
                 &bucket,
                 lock_config.as_ref(),
-                &ctx.tenant_id().to_string(),
+                &tenant_id,
             )
             .await,
             audit_log_ids: archive_items(
@@ -267,7 +289,7 @@ async fn run_archive_cycle(db: &DatabaseConnection, s3: &Client, config: &AppCon
                 s3,
                 &bucket,
                 lock_config.as_ref(),
-                &ctx.tenant_id().to_string(),
+                &tenant_id,
             )
             .await,
         };
@@ -397,7 +419,6 @@ async fn put_archive_object(
         .key(key)
         .body(body)
         .content_type("application/gzip")
-        .content_encoding("gzip")
         .checksum_sha256(checksum);
 
     if let Some(lock) = object_lock {
@@ -428,6 +449,14 @@ async fn s3_object_exists(s3: &Client, bucket: &str, key: &str) -> Result<bool> 
 }
 
 fn sanitize_tenant_id_for_key(raw: &str) -> String {
+    sanitize_key_segment(raw)
+}
+
+fn sanitize_archive_id_for_key(raw: &str) -> String {
+    sanitize_key_segment(raw)
+}
+
+fn sanitize_key_segment(raw: &str) -> String {
     raw.chars()
         .map(|c| {
             if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' {

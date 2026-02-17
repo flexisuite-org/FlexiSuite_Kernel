@@ -15,7 +15,7 @@ use kernel_data::{
     with_tenant_tx,
 };
 use sea_orm::{ActiveValue, DatabaseConnection};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -60,6 +60,16 @@ pub struct UpdatePolicyRequest {
     pub enabled: bool,
 }
 
+#[derive(Serialize)]
+#[serde(untagged)]
+enum DiagnosticPolicyResponse {
+    Configured(diagnostic_policy::Model),
+    NotConfigured {
+        tenant_id: String,
+        enabled: bool,
+    },
+}
+
 pub fn routes() -> Router {
     Router::new()
         .route("/report", post(report_diagnostic))
@@ -77,14 +87,10 @@ async fn report_diagnostic(
     if let Err(status) = validate_string_length(&payload.error_code, "error_code") {
         return status.into_response();
     }
-    if let Err(status) = payload
-        .suggestion
-        .as_ref()
-        .map(|s| validate_string_length(s, "suggestion"))
-        .transpose()
-        .map(|_| ())
-    {
-        return status.into_response();
+    if let Some(suggestion) = payload.suggestion.as_ref() {
+        if let Err(status) = validate_string_length(suggestion, "suggestion") {
+            return status.into_response();
+        }
     }
     if let Err(status) = validate_string_length(&payload.context.dom_snapshot, "dom_snapshot") {
         return status.into_response();
@@ -196,12 +202,10 @@ async fn get_policy(
     .await;
 
     match result {
-        Ok(Some(policy)) => Json(policy).into_response(),
-        Ok(None) => Json(diagnostic_policy::Model {
+        Ok(Some(policy)) => Json(DiagnosticPolicyResponse::Configured(policy)).into_response(),
+        Ok(None) => Json(DiagnosticPolicyResponse::NotConfigured {
             tenant_id: ctx.tenant_id().to_string(),
             enabled: false,
-            updated_at: Utc::now().into(),
-            updated_by: None,
         })
         .into_response(),
         Err(e) => {
