@@ -19,6 +19,7 @@ impl EventRepository {
         payload: serde_json::Value,
     ) -> Result<EventEnvelope, EventError> {
         let tenant_id = db.tenant_id.to_string();
+        let now = chrono::Utc::now();
 
         // 1. Generate Sequence
         let (seq, metadata_mode_str) = match &order_mode {
@@ -74,7 +75,7 @@ impl EventRepository {
                 _ => None,
             }),
             payload: Set(payload.clone()),
-            created_at: Set(chrono::Utc::now().into()), // Or use DB default
+            created_at: Set(now.into()), // Use captured time
             published_at: Set(None),
         };
 
@@ -88,7 +89,7 @@ impl EventRepository {
             event_id,
             order_mode: final_order_mode,
             payload,
-            created_at: chrono::Utc::now(), // Approximate, strictly should use DB time or pass in time
+            created_at: now, // Use captured time
         })
     }
 
