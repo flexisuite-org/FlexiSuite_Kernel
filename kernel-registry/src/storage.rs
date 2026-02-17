@@ -1,4 +1,5 @@
 use bytes::Bytes;
+use kernel_core::auth::TenantContext;
 use object_store::path::Path;
 use object_store::ObjectStore;
 use sha2::{Digest, Sha384};
@@ -12,26 +13,69 @@ pub struct RegistryStorage {
 }
 
 impl RegistryStorage {
-    pub fn new(store: Arc<dyn ObjectStore>) -> Self {
+    pub fn new(store: Arc<dyn ObjectStore>, tenant_ctx: &TenantContext) -> Self {
         Self {
             store,
-            prefix: "artifacts/".to_string(),
+            prefix: format!("tenants/{}/", tenant_ctx.tenant_id().as_str()),
         }
     }
 
-    fn get_path(&self, key: &str) -> Path {
-        let key = key.trim_start_matches('/');
-        // Assuming self.prefix ends with '/'
-        Path::from(format!("{}{}", self.prefix, key))
+    fn validate_key(key: &str) -> Result<(), RegistryError> {
+        if key.is_empty() {
+            return Err(RegistryError::InvalidPath("key must not be empty".to_string()));
+        }
+        if key.contains('\\') {
+            return Err(RegistryError::InvalidPath(format!("invalid key contains backslash: {key}")));
+        }
+        let lower = key.to_ascii_lowercase();
+        if lower.contains("%2f") || lower.contains("%5c") {
+            return Err(RegistryError::InvalidPath(format!(
+                "invalid key contains encoded path separator: {key}"
+            )));
+        }
+        for segment in key.split('/') {
+            if segment.is_empty() {
+                return Err(RegistryError::InvalidPath(format!(
+                    "invalid key contains empty segment: {key}"
+                )));
+            }
+            if segment == "." || segment == ".." {
+                return Err(RegistryError::InvalidPath(format!(
+                    "invalid key contains traversal segment: {key}"
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    fn artifact_path(&self, key: &str) -> Path {
+        Path::from(format!("{}artifacts/{}", self.prefix, key))
+    }
+
+    fn manifest_path(&self, id: &str, version: &str) -> Path {
+        Path::from(format!(
+            "{}manifests/{}/{}/manifest.json",
+            self.prefix, id, version
+        ))
+    }
+
+    fn manifest_payload_digest(manifest: &DistManifest) -> Result<String, RegistryError> {
+        let mut payload = manifest.clone();
+        payload.security.manifest_digest.clear();
+        let payload_bytes = serde_json::to_vec(&payload)?;
+        let mut hasher = Sha384::new();
+        hasher.update(payload_bytes);
+        Ok(hex::encode(hasher.finalize()))
     }
 
     /// Saves binary data and returns the SHA-384 digest (hex string).
     pub async fn save_artifact(&self, key: &str, data: Bytes) -> Result<String, RegistryError> {
+        Self::validate_key(key)?;
         let mut hasher = Sha384::new();
         hasher.update(&data);
         let digest = hex::encode(hasher.finalize());
 
-        let path = self.get_path(key);
+        let path = self.artifact_path(key);
         self.store.put(&path, data.into()).await?;
 
         Ok(digest)
@@ -39,9 +83,10 @@ impl RegistryStorage {
 
     /// Retrieves binary data. If expected_digest is provided, verifies SHA-384.
     pub async fn get_artifact(&self, key: &str, expected_digest: Option<&str>) -> Result<Bytes, RegistryError> {
-        let path = self.get_path(key);
+        Self::validate_key(key)?;
+        let path = self.artifact_path(key);
         let result = self.store.get(&path).await.map_err(|e| match e {
-            object_store::Error::NotFound { .. } => RegistryError::ManifestNotFound(key.to_string()),
+            object_store::Error::NotFound { .. } => RegistryError::ArtifactNotFound(key.to_string()),
             _ => RegistryError::ObjectStore(e),
         })?;
 
@@ -65,20 +110,38 @@ impl RegistryStorage {
     /// Saves a DistManifest to `manifests/{id}/{version}/manifest.json`.
     /// Returns the SHA-384 digest of the stored manifest.
     pub async fn save_manifest(&self, manifest: &DistManifest) -> Result<String, RegistryError> {
-        // Path convention: manifests/{id}/{version}/manifest.json
-        // Note: DistManifest should have a `version` field.
-        let path_str = format!("manifests/{}/{}/manifest.json", manifest.id, manifest.version);
-        let data = serde_json::to_vec(manifest)?;
-        self.save_artifact(&path_str, data.into()).await
+        Self::validate_key(&manifest.id)?;
+        Self::validate_key(&manifest.version)?;
+
+        // manifest_digest is computed from the manifest where this field is excluded.
+        let computed_digest = Self::manifest_payload_digest(manifest)?;
+        let mut persisted = manifest.clone();
+        persisted.security.manifest_digest = computed_digest.clone();
+
+        let path = self.manifest_path(&manifest.id, &manifest.version);
+        let data = serde_json::to_vec(&persisted)?;
+        self.store.put(&path, data.into()).await?;
+        Ok(computed_digest)
     }
 
     /// Retrieves a DistManifest from `manifests/{id}/{version}/manifest.json`.
     pub async fn get_manifest(&self, id: &str, version: &str) -> Result<DistManifest, RegistryError> {
-        let path_str = format!("manifests/{id}/{version}/manifest.json");
-        // We don't check digest here as we don't know it beforehand unless passed.
-        // The registry index would store the digest if needed.
-        let data = self.get_artifact(&path_str, None).await?;
+        Self::validate_key(id)?;
+        Self::validate_key(version)?;
+        let path = self.manifest_path(id, version);
+        let result = self.store.get(&path).await.map_err(|e| match e {
+            object_store::Error::NotFound { .. } => {
+                RegistryError::ManifestNotFound(format!("{id}/{version}"))
+            }
+            _ => RegistryError::ObjectStore(e),
+        })?;
+        let data = result.bytes().await?;
         let manifest: DistManifest = serde_json::from_slice(&data)?;
+        let actual = Self::manifest_payload_digest(&manifest)?;
+        let expected = manifest.security.manifest_digest.clone();
+        if actual != expected {
+            return Err(RegistryError::IntegrityCheckFailed { expected, actual });
+        }
         Ok(manifest)
     }
 }
