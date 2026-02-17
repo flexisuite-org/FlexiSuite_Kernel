@@ -79,21 +79,24 @@ fn main() -> Result<()> {
     // 4. Scan Codebase
     for entry in WalkDir::new(root).into_iter().filter_entry(|entry| {
         let p = entry.path();
-        let components: Vec<_> = p.components().map(|c| c.as_os_str()).collect();
-        let is_ops_linters_path = components
-            .windows(2)
-            .any(|pair| pair[0] == OsStr::new("ops") && pair[1] == OsStr::new("linters"));
-
-        if p == matrix_path || p == impl_path {
-            true
-        } else {
-            !p.components().any(|c| c.as_os_str() == "target")
-                && !is_ops_linters_path
-                && !p.components().any(|c| {
-                    let s = c.as_os_str().to_string_lossy();
-                    s.starts_with('.') && s != "." && s != ".."
-                })
+        let mut components = p.components();
+        let mut prev = None;
+        let mut is_ops_linters_path = false;
+        while let Some(component) = components.next() {
+            let current = component.as_os_str();
+            if prev == Some(OsStr::new("ops")) && current == OsStr::new("linters") {
+                is_ops_linters_path = true;
+                break;
+            }
+            prev = Some(current);
         }
+
+        !p.components().any(|c| c.as_os_str() == "target")
+            && !is_ops_linters_path
+            && !p.components().any(|c| {
+                let s = c.as_os_str().to_string_lossy();
+                s.starts_with('.') && s != "." && s != ".."
+            })
     }) {
         let entry = match entry {
             Ok(entry) => entry,
