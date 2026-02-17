@@ -11,8 +11,8 @@ pub struct Model {
     pub entity_id: String, // FK to entity_records.id
     pub entity_type: String,
     pub change_type: String, // "CREATE", "UPDATE", "DELETE"
-    pub version: i32, // Snapshot version
-    pub diff: Json, // The changes or full snapshot
+    pub version: i32,        // Snapshot version
+    pub diff: Json,          // The changes or full snapshot
     pub created_at: DateTimeWithTimeZone,
     pub created_by: Option<String>, // User ID or System
     pub archived_at: Option<DateTimeWithTimeZone>,
@@ -25,7 +25,7 @@ pub enum Relation {
         from = "Column::EntityId",
         to = "super::entity_record::Column::Id",
         on_update = "NoAction",
-        on_delete = "Cascade"
+        on_delete = "NoAction"
     )]
     EntityRecord,
 }
