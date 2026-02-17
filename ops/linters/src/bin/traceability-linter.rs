@@ -23,7 +23,8 @@ fn main() -> Result<()> {
     let args = Args::parse();
     let root = Path::new(&args.path);
 
-    let re_req = Regex::new(r"REQ-[A-Z0-9-]+").unwrap();
+    // REQ ID must consist of alphanumeric segments separated by single hyphens
+    let re_req = Regex::new(r"REQ-[A-Z0-9]+(?:-[A-Z0-9]+)*").unwrap();
 
     // 1. Load Matrix REQs
     let matrix_path = root.join("docs/verification_matrix.md");
@@ -90,7 +91,10 @@ fn main() -> Result<()> {
             // We'll trust utf8 read for now
              let content = match fs::read_to_string(path) {
                 Ok(c) => c,
-                Err(_) => continue,
+                Err(e) => {
+                    eprintln!("Warning: Failed to read file {}: {}", path.display(), e);
+                    continue;
+                }
             };
 
             let file_reqs = extract_reqs(&content, &re_req);
