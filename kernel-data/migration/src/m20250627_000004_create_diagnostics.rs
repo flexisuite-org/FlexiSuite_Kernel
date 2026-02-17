@@ -43,8 +43,9 @@ impl MigrationTrait for Migration {
             r#"
             ALTER TABLE flexi.diagnostic_reports ENABLE ROW LEVEL SECURITY;
             ALTER TABLE flexi.diagnostic_reports FORCE ROW LEVEL SECURITY;
+            DROP POLICY IF EXISTS tenant_isolation ON flexi.diagnostic_reports;
             DROP POLICY IF EXISTS tenant_isolation_policy ON flexi.diagnostic_reports;
-            CREATE POLICY tenant_isolation_policy ON flexi.diagnostic_reports
+            CREATE POLICY tenant_isolation ON flexi.diagnostic_reports
                 FOR ALL
                 TO PUBLIC
                 USING (tenant_id = flexi.authorized_tenant_id());
@@ -57,8 +58,9 @@ impl MigrationTrait for Migration {
             r#"
             ALTER TABLE flexi.diagnostic_policies ENABLE ROW LEVEL SECURITY;
             ALTER TABLE flexi.diagnostic_policies FORCE ROW LEVEL SECURITY;
+            DROP POLICY IF EXISTS tenant_isolation ON flexi.diagnostic_policies;
             DROP POLICY IF EXISTS tenant_isolation_policy ON flexi.diagnostic_policies;
-            CREATE POLICY tenant_isolation_policy ON flexi.diagnostic_policies
+            CREATE POLICY tenant_isolation ON flexi.diagnostic_policies
                 FOR ALL
                 TO PUBLIC
                 USING (tenant_id = flexi.authorized_tenant_id());
@@ -86,7 +88,9 @@ impl MigrationTrait for Migration {
         // Drop RLS policies before tables
         db.execute_unprepared(
             r#"
+            DROP POLICY IF EXISTS tenant_isolation ON flexi.diagnostic_reports;
             DROP POLICY IF EXISTS tenant_isolation_policy ON flexi.diagnostic_reports;
+            DROP POLICY IF EXISTS tenant_isolation ON flexi.diagnostic_policies;
             DROP POLICY IF EXISTS tenant_isolation_policy ON flexi.diagnostic_policies;
             "#,
         )

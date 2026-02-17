@@ -190,9 +190,10 @@ async fn update_policy(
 
         // Record audit entry for policy change
         repo.log_audit(
-            "diagnostics.update_policy".to_string(),
+            "update_policy".to_string(),
             "diagnostic_policy".to_string(),
             serde_json::json!({
+                "updated_by": user_id,
                 "field": "enabled",
                 "new_value": enabled,
             }),
