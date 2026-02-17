@@ -184,10 +184,9 @@ impl IdempotencyStore for InMemoryIdempotencyStore {
                 IdempotencyEntry::InFlight { expires_at, .. } => *expires_at > now,
                 IdempotencyEntry::Completed(record) => record.expires_at > now,
             };
-            if !keep
-                && let IdempotencyEntry::InFlight { notify, .. } = entry {
-                    expired_inflight_notifies.push(notify.clone());
-                }
+            if !keep && let IdempotencyEntry::InFlight { notify, .. } = entry {
+                expired_inflight_notifies.push(notify.clone());
+            }
             keep
         });
         drop(lock);
@@ -236,7 +235,10 @@ impl MiddlewareState {
         Self::with_store(config, Arc::new(InMemoryIdempotencyStore::new()))
     }
 
-    pub fn with_store(config: MiddlewareConfig, idempotency_store: Arc<dyn IdempotencyStore>) -> Self {
+    pub fn with_store(
+        config: MiddlewareConfig,
+        idempotency_store: Arc<dyn IdempotencyStore>,
+    ) -> Self {
         Self {
             idempotency_store,
             action_store: Arc::new(Mutex::new(HashMap::new())),
@@ -370,7 +372,7 @@ pub async fn idempotency_middleware(
     // Body hash MUST be derived from the actual request body.
     // DoS Protection: Limit body size
     // Note: This forces buffering. For streams > 10MB, Idempotency is not supported by this middleware.
-    
+
     // Check Store
     let state = parts
         .extensions
@@ -381,7 +383,10 @@ pub async fn idempotency_middleware(
     let body_bytes = match to_bytes(body, state.config.max_body_size).await {
         Ok(b) => b,
         Err(_) => {
-            warn!("Request body exceeded max_body_size ({})", state.config.max_body_size);
+            warn!(
+                "Request body exceeded max_body_size ({})",
+                state.config.max_body_size
+            );
             return Err(StatusCode::BAD_REQUEST);
         }
     };
@@ -402,16 +407,26 @@ pub async fn idempotency_middleware(
                 "Exceeded max attempts waiting for in-flight idempotent request"
             );
             let mut res = StatusCode::SERVICE_UNAVAILABLE.into_response();
-            let retry_after = state.config.inflight_wait_timeout.as_secs().max(1).to_string();
+            let retry_after = state
+                .config
+                .inflight_wait_timeout
+                .as_secs()
+                .max(1)
+                .to_string();
             if let Ok(val) = HeaderValue::from_str(&retry_after) {
-                res.headers_mut().insert(axum::http::header::RETRY_AFTER, val);
+                res.headers_mut()
+                    .insert(axum::http::header::RETRY_AFTER, val);
             }
             return Ok(res);
         }
 
         // Atomic check-and-acquire
         match store
-            .try_acquire(scope_key.clone(), body_hash.clone(), state.config.idempotency_ttl)
+            .try_acquire(
+                scope_key.clone(),
+                body_hash.clone(),
+                state.config.idempotency_ttl,
+            )
             .await
         {
             None => {
@@ -448,9 +463,9 @@ pub async fn idempotency_middleware(
                             );
                             return Err(StatusCode::CONFLICT);
                         }
-                        
+
                         // Wait for the in-flight request to complete
-                        // Use enable() pattern to avoid missed wakeups if notify_waiters() fires 
+                        // Use enable() pattern to avoid missed wakeups if notify_waiters() fires
                         // between try_acquire returning and awaiting notified()
                         let notified = notify.notified();
                         tokio::pin!(notified);
@@ -466,9 +481,15 @@ pub async fn idempotency_middleware(
                                 "Timed out waiting for in-flight idempotent request"
                             );
                             let mut res = StatusCode::SERVICE_UNAVAILABLE.into_response();
-                            let retry_after = state.config.inflight_wait_timeout.as_secs().max(1).to_string();
+                            let retry_after = state
+                                .config
+                                .inflight_wait_timeout
+                                .as_secs()
+                                .max(1)
+                                .to_string();
                             if let Ok(val) = HeaderValue::from_str(&retry_after) {
-                                res.headers_mut().insert(axum::http::header::RETRY_AFTER, val);
+                                res.headers_mut()
+                                    .insert(axum::http::header::RETRY_AFTER, val);
                             }
                             return Ok(res);
                         }

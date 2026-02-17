@@ -72,7 +72,9 @@ pub async fn auth_middleware(mut req: Request<Body>, next: Next) -> Result<Respo
 
                 TenantContext::new(tenant_id, user_id)
             } else {
-                tracing::warn!("Missing Authorization header (and no X-Tenant-Id for debug bypass)");
+                tracing::warn!(
+                    "Missing Authorization header (and no X-Tenant-Id for debug bypass)"
+                );
                 return Err(StatusCode::UNAUTHORIZED);
             }
         }
@@ -137,7 +139,6 @@ fn verify_paseto_v4_public_token(
     validate_claims(claims)
 }
 
-
 fn validate_claims(claims: PasetoClaims) -> Result<TenantContext, AuthError> {
     let tenant_id = TenantId::new(&claims.tenant_id).map_err(|_| AuthError::Forbidden)?;
     let user_id = if let Some(uid) = claims.user_id {
@@ -196,6 +197,7 @@ fn extract_bearer_token(auth_header: &str) -> Option<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use kernel_core::auth::is_valid_principal;
 
     #[test]
     fn extract_bearer_token_accepts_case_insensitive_scheme() {
