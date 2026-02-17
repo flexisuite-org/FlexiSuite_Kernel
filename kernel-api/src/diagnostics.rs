@@ -24,13 +24,11 @@ const MAX_STRING_LEN: usize = 256;
 /// Maximum allowed length for DOM snapshot
 const MAX_DOM_SNAPSHOT_LEN: usize = 1024 * 1024; // 1MB
 
-fn validate_string_length(value: &str, field_name: &str) -> Result<(), StatusCode> {
-    let max_len = if field_name == "dom_snapshot" {
-        MAX_DOM_SNAPSHOT_LEN
-    } else {
-        MAX_STRING_LEN
-    };
-
+fn validate_string_length(
+    value: &str,
+    field_name: &str,
+    max_len: usize,
+) -> Result<(), StatusCode> {
     if value.len() > max_len {
         tracing::warn!(
             field = %field_name,
@@ -84,15 +82,19 @@ async fn report_diagnostic(
     Json(mut payload): Json<ReportDiagnosticRequest>,
 ) -> impl IntoResponse {
     // 0. Validate input lengths
-    if let Err(status) = validate_string_length(&payload.error_code, "error_code") {
+    if let Err(status) = validate_string_length(&payload.error_code, "error_code", MAX_STRING_LEN) {
         return status.into_response();
     }
     if let Some(suggestion) = payload.suggestion.as_ref() {
-        if let Err(status) = validate_string_length(suggestion, "suggestion") {
+        if let Err(status) = validate_string_length(suggestion, "suggestion", MAX_STRING_LEN) {
             return status.into_response();
         }
     }
-    if let Err(status) = validate_string_length(&payload.context.dom_snapshot, "dom_snapshot") {
+    if let Err(status) = validate_string_length(
+        &payload.context.dom_snapshot,
+        "dom_snapshot",
+        MAX_DOM_SNAPSHOT_LEN,
+    ) {
         return status.into_response();
     }
 
@@ -164,7 +166,7 @@ async fn query_diagnostic(
     Query(payload): Query<QueryDiagnosticRequest>,
 ) -> impl IntoResponse {
     // Validate input length
-    if let Err(status) = validate_string_length(&payload.trace_id, "trace_id") {
+    if let Err(status) = validate_string_length(&payload.trace_id, "trace_id", MAX_STRING_LEN) {
         return status.into_response();
     }
 
