@@ -25,7 +25,7 @@ pub enum Relation {
         from = "Column::EntityId",
         to = "super::entity_record::Column::Id",
         on_update = "NoAction",
-        on_delete = "NoAction"
+        on_delete = "Cascade"
     )]
     EntityRecord,
 }
