@@ -77,7 +77,7 @@ impl TenantRepository for TenantScoped<RawConnection> {
         let content = required_active_value(&active_model.content, "Content")?;
         let version = active_value_or(&active_model.version, 1);
 
-        let user_id_str = self
+        let pseudonymized_user_id = self
             .user_id
             .as_ref()
             .map(|u| pseudonymize_user_id_for_audit(self.tenant_id.as_str(), u.as_str()));
