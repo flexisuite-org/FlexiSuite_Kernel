@@ -7,4 +7,5 @@ members = [
     "kernel-data",
     "kernel-data/migration",
     "ops/linters",
+    "kernel-archiver",
 ]
