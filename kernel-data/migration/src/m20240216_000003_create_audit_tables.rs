@@ -20,7 +20,7 @@ impl MigrationTrait for Migration {
                 version INT NOT NULL,
                 diff JSONB NOT NULL,
                 created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                created_by TEXT,
+                created_by TEXT NOT NULL,
                 archived_at TIMESTAMPTZ,
                 PRIMARY KEY (id, tenant_id)
             );
@@ -28,7 +28,19 @@ impl MigrationTrait for Migration {
         )
         .await?;
 
-        // Enforce DB-level referential integrity and cascade behavior for entity history.
+        // Backfill and enforce non-null actor for existing rows.
+        db.execute_unprepared(
+            r#"
+            UPDATE flexi.entity_histories
+                SET created_by = 'system'
+                WHERE created_by IS NULL;
+            ALTER TABLE flexi.entity_histories
+                ALTER COLUMN created_by SET NOT NULL;
+            "#,
+        )
+        .await?;
+
+        // Enforce DB-level referential integrity for entity history.
         db.execute_unprepared(
             r#"
             ALTER TABLE flexi.entity_histories
@@ -37,7 +49,7 @@ impl MigrationTrait for Migration {
                 ADD CONSTRAINT fk_entity_histories_entity_record
                 FOREIGN KEY (entity_id, tenant_id)
                 REFERENCES flexi.entity_records (id, tenant_id)
-                ON DELETE CASCADE;
+                ON DELETE NO ACTION;
             "#,
         )
         .await?;
