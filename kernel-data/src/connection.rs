@@ -80,13 +80,6 @@ impl<C> TenantScoped<C> {
 }
 
 impl TenantScoped<RawConnection> {
-    /// Returns the tenant-authorized transaction handle.
-    /// Intended for trusted internal services that must run tenant-scoped queries
-    /// not yet covered by repository trait methods.
-    pub(crate) fn txn(&self) -> &DatabaseTransaction {
-        &self.inner.txn
-    }
-
     pub(crate) async fn commit(self) -> Result<(), DbErr> {
         self.inner.txn.commit().await
     }
