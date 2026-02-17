@@ -88,9 +88,6 @@ impl TenantScoped<RawConnection> {
         self.inner.txn.rollback().await
     }
 
-    pub fn txn(&self) -> &DatabaseTransaction {
-        &self.inner.txn
-    }
 }
 
 // Implement Sealed trait for TenantScoped
