@@ -68,13 +68,13 @@ impl MigrationTrait for Migration {
         )
         .await?;
 
-        // 5. Create indexes with tenant_id as leading column
+        // 5. Create index with tenant_id as leading column for diagnostic_reports.
+        // Note: diagnostic_policies already has PRIMARY KEY (tenant_id),
+        // so a separate index would be redundant.
         db.execute_unprepared(
             r#"
             CREATE INDEX IF NOT EXISTS idx_diagnostic_reports_tenant_id
                 ON flexi.diagnostic_reports (tenant_id, created_at);
-            CREATE INDEX IF NOT EXISTS idx_diagnostic_policies_tenant_id
-                ON flexi.diagnostic_policies (tenant_id, updated_at);
             "#,
         )
         .await?;

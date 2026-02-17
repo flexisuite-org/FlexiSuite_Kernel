@@ -233,11 +233,13 @@ async fn update_policy(
             let policy = repo.upsert_diagnostic_policy(model).await?;
 
             // Record audit entry for policy change
+            // Note: actor identity is tracked via the pseudonymized actor_id
+            // in the audit_log row itself; we intentionally omit raw user_id
+            // from the details payload to prevent PII leakage.
             repo.log_audit(
                 "update_policy".to_string(),
                 "diagnostic_policy".to_string(),
                 serde_json::json!({
-                    "updated_by": user_id,
                     "field": "enabled",
                     "new_value": enabled,
                 }),
