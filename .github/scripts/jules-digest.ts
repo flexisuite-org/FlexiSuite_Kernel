@@ -3,7 +3,7 @@ import { crypto } from "jsr:@std/crypto@0.224.0"; // Using standard library for 
 
 // --- Type Definitions ---
 
-interface ReviewItem {
+export interface ReviewItem {
     id: string;
     type: 'actionable' | 'nitpick';
     content: string; // Markdown content, preserved from CodeRabbit
@@ -251,22 +251,11 @@ async function run() {
         return 0;
     });
 
+    // Check list format
     let newBody = `${DIGEST_HEADER}\n\n`;
-    newBody += `| ID | Type | Status | Content |\n`;
-    newBody += `|---|---|---|---|\n`;
+    newBody += `**Actionable & Nitpicks**\n`;
 
     let hasOpenItems = false;
-
-    for (const item of sortedItems) {
-        const checked = item.status === 'fixed' || item.status === 'skipped' || item.status === 'deferred' ? 'x' : ' ';
-        // We render a checklist for easy manual clicking, but also a table for structure? 
-        // Requirement says: "Checklist as SoT".
-        // Let's stick to the list format requested in spec.
-    }
-
-    // Check list format
-    newBody = `${DIGEST_HEADER}\n\n`;
-    newBody += `**Actionable & Nitpicks**\n`;
 
     for (const item of sortedItems) {
         const checked = (item.status === 'fixed' || item.status === 'skipped' || item.status === 'deferred') ? 'x' : ' ';
@@ -309,6 +298,16 @@ async function run() {
         }
     }
 }
+
+// Run the script
+// --- Exports for Testing ---
+
+export {
+    extractSections,
+    generateStableId,
+    parseDigestComment,
+    parseJulesReport
+};
 
 // Run the script
 if (import.meta.main) {
