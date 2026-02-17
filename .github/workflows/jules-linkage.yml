@@ -1,0 +1,41 @@
+name: CodeRabbit-Jules Linkage
+
+on:
+  pull_request_review:
+    types: [submitted]
+  pull_request_review_comment:
+    types: [created]
+  issue_comment:
+    types: [created]
+  # For manual trigger or debugging
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+
+jobs:
+  update-digest:
+    runs-on: ubuntu-latest
+    if: |
+      (github.event_name == 'pull_request_review' && contains(github.event.review.body, 'CodeRabbit')) ||
+      (github.event_name == 'pull_request_review_comment' && github.event.comment.user.type == 'Bot') ||
+      (github.event_name == 'issue_comment' && github.event.issue.pull_request && contains(github.event.comment.body, 'Jules Review Result')) ||
+      contains(github.event.pull_request.labels.*.name, 'run-jules') ||
+      contains(github.event.issue.labels.*.name, 'run-jules')
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Deno
+        uses: denoland/setup-deno@v1
+        with:
+          deno-version: v1.x
+
+      - name: Run Jules Digest Script
+        run: deno run --allow-net --allow-env --allow-read .github/scripts/jules-digest.ts
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          EVENT_PATH: ${{ github.event_path }}
+          EVENT_NAME: ${{ github.event_name }}
