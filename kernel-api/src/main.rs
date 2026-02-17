@@ -26,12 +26,12 @@ async fn main() {
     }
 
     // Initialize Database
-    let db_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| "postgres://flexi:flexi_pass@localhost:5432/flexi".to_string());
+    let db_url = std::env::var("DATABASE_URL")
+        .expect("DATABASE_URL must be set");
     let mut opt = ConnectOptions::new(db_url);
     opt.max_connections(100)
         .min_connections(5)
-        .sqlx_logging(true)
-        .sqlx_logging_level(tracing::log::LevelFilter::Info);
+        .sqlx_logging(false);
 
     let db = Database::connect(opt).await.unwrap_or_else(|e| {
         eprintln!("Failed to connect to database: {e}");

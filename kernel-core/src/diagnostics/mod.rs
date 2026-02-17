@@ -6,6 +6,11 @@ use serde_json::Value;
 
 pub mod sanitizer;
 
+/// Domain-layer diagnostic report representation.
+///
+/// Reserved for future domain-level logic (e.g., aggregation, analysis pipelines).
+/// The persistence layer uses `kernel_data::entities::diagnostic_report::Model` for DB operations.
+/// This struct coexists intentionally to maintain kernel/data separation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DiagnosticReport {
     pub trace_id: Uuid,
@@ -16,6 +21,12 @@ pub struct DiagnosticReport {
     pub created_at: DateTime<Utc>,
 }
 
+/// Diagnostic context captured from the client.
+///
+/// # Size Constraints
+/// - Request body size is enforced by API middleware (`max_body_size`, default 10MB).
+/// - Individual string fields (e.g., `error_code`) are validated at the handler boundary.
+/// - `dom_snapshot` and `props` are sanitized before storage.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DiagnosticContext {
     pub component_id: String,
