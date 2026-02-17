@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -13,7 +13,7 @@ pub enum Kind {
 pub struct DistManifest {
     pub schema_version: String,
     pub id: String,
-    pub version: String, // Added this field
+    pub version: String,
     pub kind: Kind,
     pub name: String,
     #[serde(default)]
@@ -22,7 +22,7 @@ pub struct DistManifest {
     pub routes: Vec<Route>,
     pub dependencies: Dependencies,
     #[serde(default)]
-    pub configuration: HashMap<String, serde_json::Value>,
+    pub configuration: BTreeMap<String, serde_json::Value>,
     pub security: Security,
 }
 
@@ -36,7 +36,7 @@ pub struct Route {
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Dependencies {
-    pub components: HashMap<String, ComponentDependency>,
+    pub components: BTreeMap<String, ComponentDependency>,
     #[serde(default)]
     pub permissions: Vec<String>,
 }

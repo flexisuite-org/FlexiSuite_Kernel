@@ -19,4 +19,7 @@ pub enum RegistryError {
 
     #[error("Invalid path: {0}")]
     InvalidPath(String),
+
+    #[error("Invalid manifest: {0}")]
+    InvalidManifest(String),
 }

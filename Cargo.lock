@@ -2589,7 +2589,6 @@ name = "kernel-registry"
 version = "0.1.0"
 dependencies = [
  "bytes",
- "futures",
  "hex",
  "kernel-core",
  "object_store",
