@@ -6,6 +6,7 @@ use kernel_core::event::{EventEnvelope, EventError, OrderMode};
 use sea_orm::sea_query::{Expr, OnConflict};
 use sea_orm::{ActiveModelTrait, DbErr, EntityTrait, Set};
 use uuid::Uuid;
+use std::convert::TryFrom;
 
 pub struct EventRepository;
 
@@ -45,25 +46,35 @@ impl EventRepository {
         let final_order_mode = match order_mode {
             OrderMode::Entity { entity_id, .. } => OrderMode::Entity {
                 entity_id,
-                seq: Some(seq as u64),
+                seq: Some(u64::try_from(seq).map_err(|e| {
+                    EventError::Store(format!("failed to convert entity seq to u64: {}", e))
+                })?),
             },
             OrderMode::Causality { key, .. } => OrderMode::Causality {
                 key,
-                seq: Some(seq as u64),
+                seq: Some(u64::try_from(seq).map_err(|e| {
+                    EventError::Store(format!("failed to convert causality seq to u64: {}", e))
+                })?),
             },
         };
 
         // 3. Insert into Outbox
         let outbox_model = entities_outbox::ActiveModel {
             event_id: Set(event_id),
-            tenant_id: Set(tenant_id),
+            tenant_id: Set(tenant_id.clone()),
             order_mode: Set(metadata_mode_str.to_string()),
             entity_id: Set(match &final_order_mode {
                 OrderMode::Entity { entity_id, .. } => Some(*entity_id),
                 _ => None,
             }),
             entity_seq: Set(match &final_order_mode {
-                OrderMode::Entity { seq, .. } => seq.map(|s| s as i64),
+                OrderMode::Entity { seq, .. } => seq
+                    .map(|s| {
+                        i64::try_from(s).map_err(|e| {
+                            EventError::Store(format!("failed to convert entity seq to i64: {}", e))
+                        })
+                    })
+                    .transpose()?,
                 _ => None,
             }),
             causality_key: Set(match &final_order_mode {
@@ -71,7 +82,16 @@ impl EventRepository {
                 _ => None,
             }),
             causality_seq: Set(match &final_order_mode {
-                OrderMode::Causality { seq, .. } => seq.map(|s| s as i64),
+                OrderMode::Causality { seq, .. } => seq
+                    .map(|s| {
+                        i64::try_from(s).map_err(|e| {
+                            EventError::Store(format!(
+                                "failed to convert causality seq to i64: {}",
+                                e
+                            ))
+                        })
+                    })
+                    .transpose()?,
                 _ => None,
             }),
             payload: Set(payload.clone()),
@@ -87,6 +107,7 @@ impl EventRepository {
         // 4. Return Envelope
         Ok(EventEnvelope {
             event_id,
+            tenant_id: kernel_core::auth::TenantId::new(tenant_id).map_err(EventError::Store)?,
             order_mode: final_order_mode,
             payload,
             created_at: now, // Use captured time
