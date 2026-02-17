@@ -66,7 +66,10 @@ function extractSections(body: string): { actionable: string[], nitpick: string[
         }
 
         if (currentSection !== 'none' && (line.trim().startsWith('- ') || line.trim().startsWith('* '))) {
-            const content = line.trim().substring(2).trim(); // Remove bullet point
+            let content = line.trim().substring(2).trim(); // Remove bullet point
+            // Remove checkbox if present (e.g. from Actionable items)
+            content = content.replace(/^\[[ xX]\]\s*/, '');
+
             if (currentSection === 'actionable') {
                 actionableItems.push(content);
             } else {
