@@ -80,6 +80,10 @@ impl<C> TenantScoped<C> {
 }
 
 impl TenantScoped<RawConnection> {
+    pub fn txn(&self) -> &DatabaseTransaction {
+        &self.inner.txn
+    }
+
     pub(crate) async fn commit(self) -> Result<(), DbErr> {
         self.inner.txn.commit().await
     }
@@ -87,6 +91,7 @@ impl TenantScoped<RawConnection> {
     pub(crate) async fn rollback(self) -> Result<(), DbErr> {
         self.inner.txn.rollback().await
     }
+
 }
 
 // Implement Sealed trait for TenantScoped

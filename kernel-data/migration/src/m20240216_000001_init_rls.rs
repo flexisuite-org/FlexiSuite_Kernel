@@ -57,6 +57,8 @@ impl MigrationTrait for Migration {
             END;
             $$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = flexi, pg_catalog, pg_temp;
 
+            REVOKE ALL ON FUNCTION flexi.check_nonce_uniqueness() FROM PUBLIC;
+
             DROP TRIGGER IF EXISTS nonce_uniqueness_trigger ON flexi.flexi_nonce;
             CREATE TRIGGER nonce_uniqueness_trigger
             BEFORE INSERT ON flexi.flexi_nonce
