@@ -216,6 +216,23 @@ async function run() {
 
     console.log(`Processing PR #${prNumber} in ${repoOwner}/${repoName}`);
 
+    // Resolve PR properties (like head ref) if missing from payload
+    let headRef = payload.pull_request?.head?.ref;
+    if (!headRef && prNumber) {
+        try {
+            const pr = await octokit.pulls.get({
+                owner: repoOwner,
+                repo: repoName,
+                pull_number: prNumber,
+            });
+            headRef = pr.data.head.ref;
+        } catch (e) {
+            console.error("Failed to fetch PR details for ref resolution:", e);
+        }
+    }
+    // Fallback
+    const targetRef = headRef || payload.ref || 'main';
+
     // Fetch PR comments to find Digest and Jules Report
     const comments = await octokit.paginate(octokit.issues.listComments, {
         owner: repoOwner,
@@ -223,7 +240,7 @@ async function run() {
         issue_number: prNumber,
     });
 
-    let digestComment = comments.find(c => c.body && (c.body.includes(DIGEST_HEADER) || c.body.includes(UNRESOLVED_HEADER)));
+    const digestComment = comments.find((c: any) => c.body && (c.body.includes(DIGEST_HEADER) || c.body.includes(UNRESOLVED_HEADER)));
     let existingItems = new Map<string, ReviewItem>();
 
     if (digestComment && digestComment.body) {
@@ -231,7 +248,7 @@ async function run() {
     }
 
     // Parse Jules Reports to update status
-    const julesReports = comments.filter(c => c.body && c.body.includes(JULES_REPORT_HEADER));
+    const julesReports = comments.filter((c: any) => c.body && c.body.includes(JULES_REPORT_HEADER));
     for (const report of julesReports) {
         if (!report.body) continue;
         const statuses = parseJulesReport(report.body);
@@ -297,9 +314,12 @@ async function run() {
         // If exists, we keep the status (managed by check/report)
     }
 
-    // Remove stale items
-    // Remove stale items
-    if (newItemIds.size > 0) {
+    // Remove stale items ONLY if doing a full reconciliation
+    // For now, we assume partial updates to be safe and avoid deleting items unless explicitly flagged.
+    // TODO: Determine if we can reliably detect a full scan (e.g. via input or event type).
+    const isFullReconciliation = false; // Default to false for safety as requested
+
+    if (isFullReconciliation && newItemIds.size > 0) {
         for (const id of existingItems.keys()) {
             if (!newItemIds.has(id)) {
                 existingItems.delete(id);
@@ -334,23 +354,8 @@ async function run() {
     }
 
     // Sweep logic: If we are in a sweep mode (e.g. specialized trigger) or just always hinting
-    const existingBody = digestComment?.body || '';
-    const alreadyMentioned = existingBody.includes('@Jules');
-
     if (hasOpenItems) {
-        // Only prepend @Jules if it's absent (to notify)
-        // REMOVED @Jules mention to use direct action trigger instead
-        /*
-        if (!alreadyMentioned) {
-             newBody = `@Jules\n` + newBody.replace(DIGEST_HEADER, UNRESOLVED_HEADER);
-        } else {
-             // Leave without mention if it was already there (user instruction to avoid repeated notifications)
-             newBody = newBody.replace(DIGEST_HEADER, UNRESOLVED_HEADER);
-        }
-        */
         newBody = newBody.replace(DIGEST_HEADER, UNRESOLVED_HEADER);
-        // newBody += `\n\nThere are unresolved items. Please review and update status (Fix/Skip/Defer) for the unchecked items.`;
-        // Removed @Jules auto-mention. Now we trigger the workflow directly.
     } else {
         newBody += `\n\nAll items resolved! code review complete.`;
     }
@@ -390,22 +395,37 @@ async function run() {
     // For now, we trigger if there are open items and we just updated the digest, OR if it's a manual run.
     const shouldTriggerJules = hasOpenItems && (digestChanged || eventName === 'workflow_dispatch');
 
-    if (shouldTriggerJules) {
+    await checkAndTriggerJules(octokit, shouldTriggerJules, repoOwner!, repoName!, targetRef, prNumber, newBody);
+}
+
+async function checkAndTriggerJules(
+    octokit: Octokit,
+    shouldTrigger: boolean,
+    owner: string,
+    repo: string,
+    ref: string,
+    prNumber: number,
+    digestBody: string
+) {
+    if (shouldTrigger) {
         console.log("Triggering Jules Process...");
         try {
             await octokit.actions.createWorkflowDispatch({
-                owner: repoOwner!,
-                repo: repoName!,
+                owner,
+                repo,
                 workflow_id: 'jules-process.yml',
-                ref: payload.pull_request?.head?.ref || payload.ref || 'main', // Target the PR branch or default
+                ref,
                 inputs: {
                     pr_number: prNumber.toString(),
-                    digest_body: newBody
+                    // digest_body removed to avoid size limits. 
+                    // The workflow will fetch the digest from the PR comments.
                 }
             });
             console.log("Successfully triggered jules-process workflow.");
         } catch (error) {
             console.error("Failed to trigger Jules workflow:", error);
+            // Ensure failure is surfaced
+            Deno.exit(1);
         }
     }
 }
@@ -416,7 +436,8 @@ export {
     extractSections,
     generateStableId,
     parseDigestComment,
-    parseJulesReport
+    parseJulesReport,
+    checkAndTriggerJules
 };
 
 // Run the script
