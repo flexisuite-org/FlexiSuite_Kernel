@@ -24,16 +24,6 @@ const DIGEST_HEADER = "## CodeRabbit Digest for Jules";
 const JULES_REPORT_HEADER = "### Jules Review Result";
 const UNRESOLVED_HEADER = "## CodeRabbit Digest for Jules (Unresolved Items)";
 
-// --- GitHub Client Setup ---
-
-const token = Deno.env.get("GITHUB_TOKEN");
-if (!token) {
-    console.error("GITHUB_TOKEN is missing");
-    Deno.exit(1);
-}
-
-const octokit = new Octokit({ auth: token });
-
 // --- Helper Functions ---
 
 async function generateStableId(item: { type: string, content: string, filePath?: string, line?: number }): Promise<string> {
@@ -137,6 +127,13 @@ function parseJulesReport(body: string): Map<string, 'fixed' | 'skipped' | 'defe
 // --- Verification/Sweep Logic ---
 
 async function run() {
+    const token = Deno.env.get("GITHUB_TOKEN");
+    if (!token) {
+        console.error("GITHUB_TOKEN is missing");
+        Deno.exit(1);
+    }
+    const octokit = new Octokit({ auth: token });
+
     const eventPath = Deno.env.get("GITHUB_EVENT_PATH");
     const eventName = Deno.env.get("GITHUB_EVENT_NAME");
 

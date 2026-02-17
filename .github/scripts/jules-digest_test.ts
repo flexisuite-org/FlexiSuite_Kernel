@@ -30,7 +30,7 @@ const MOCK_DIGEST_BODY = `
 
 **Actionable & Nitpicks**
 - [x] CR-a1b2c3d4e5: Fix the typo in connection.rs
-- [ ] CR-f6g7h8i9j0: Add error handling for 'result' unwrapping
+- [ ] CR-f6b7c8d9e0: Add error handling for 'result' unwrapping
 `;
 
 const MOCK_JULES_REPORT = `
@@ -40,7 +40,7 @@ const MOCK_JULES_REPORT = `
 - CR-a1b2c3d4e5: Fixed typo
 
 #### Skipped (with rationale)
-- CR-f6g7h8i9j0: Not critical right now
+- CR-f6b7c8d9e0: Not critical right now
 `;
 
 // --- Tests ---
@@ -75,7 +75,7 @@ Deno.test("parseDigestComment - extracts existing items and status", () => {
     const item1 = items.get("CR-a1b2c3d4e5");
     assertEquals(item1?.status, "fixed");
 
-    const item2 = items.get("CR-f6g7h8i9j0");
+    const item2 = items.get("CR-f6b7c8d9e0");
     assertEquals(item2?.status, "open");
 });
 
@@ -83,5 +83,5 @@ Deno.test("parseJulesReport - extracts status updates", () => {
     const statusMap = parseJulesReport(MOCK_JULES_REPORT);
 
     assertEquals(statusMap.get("CR-a1b2c3d4e5"), "fixed");
-    assertEquals(statusMap.get("CR-f6g7h8i9j0"), "skipped");
+    assertEquals(statusMap.get("CR-f6b7c8d9e0"), "skipped");
 });
