@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 pub struct Model {
     #[sea_orm(primary_key, auto_increment = false)]
     pub trace_id: String, // UUID v7
+    #[sea_orm(primary_key, auto_increment = false)]
     pub tenant_id: String, // Partition Key / RLS Scope
     pub error_code: String,
     pub context: Json, // DiagnosticContext

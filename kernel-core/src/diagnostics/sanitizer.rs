@@ -1,18 +1,22 @@
 use regex::{Regex, Captures};
-use once_cell::sync::Lazy;
+use std::sync::LazyLock;
 use serde_json::Value;
 use url::Url;
 
-static EMAIL_REGEX: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?i)[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}").unwrap());
+static EMAIL_REGEX: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}").unwrap());
 // Bearer token: Bearer <token>
-static BEARER_TOKEN_REGEX: Lazy<Regex> = Lazy::new(|| Regex::new(r"Bearer\s+[a-zA-Z0-9\-\._~\+\/]+=*").unwrap());
+static BEARER_TOKEN_REGEX: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"Bearer\s+[a-zA-Z0-9\-\._~\+\/]+=*").unwrap());
 // Basic phone detection (generic)
 #[allow(dead_code)]
-static PHONE_REGEX: Lazy<Regex> = Lazy::new(|| Regex::new(r"\+?[\d\s\-\(\)]{7,15}").unwrap());
+static PHONE_REGEX: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\+?[\d\s\-\(\)]{7,15}").unwrap());
 // API Key / Secret patterns
-static API_KEY_REGEX: Lazy<Regex> = Lazy::new(|| Regex::new(r#"(?i)(api_key|apikey|secret|token)['"]?\s*[:=]\s*['"]?([a-zA-Z0-9\-_]{16,})['"]?"#).unwrap());
+static API_KEY_REGEX: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#"(?i)(api_key|apikey|secret|token)['"]?\s*[:=]\s*['"]?([a-zA-Z0-9\-_]{16,})['"]?"#).unwrap());
 // URL Regex (simplified for text scanning)
-static URL_REGEX: Lazy<Regex> = Lazy::new(|| Regex::new(r#"(https?://[^\s<>"']+)"#).unwrap());
+static URL_REGEX: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#"(https?://[^\s<>"']+)"#).unwrap());
+
+/// Maximum recursion depth for JSON value sanitization.
+/// Prevents stack overflow on deeply nested payloads.
+const MAX_DEPTH: usize = 32;
 
 pub struct PIISanitizer;
 
@@ -62,8 +66,20 @@ impl PIISanitizer {
         }
     }
 
-    /// Recursively sanitizes a JSON Value.
+    /// Recursively sanitizes a JSON Value with depth limiting.
+    ///
+    /// Public entry point that enforces `MAX_DEPTH` to prevent stack overflow
+    /// on adversarially nested payloads.
     pub fn sanitize_value(v: &mut Value) {
+        Self::sanitize_value_inner(v, MAX_DEPTH);
+    }
+
+    fn sanitize_value_inner(v: &mut Value, remaining_depth: usize) {
+        if remaining_depth == 0 {
+            *v = Value::String("<max_depth_reached>".to_string());
+            return;
+        }
+
         match v {
             Value::String(s) => {
                 if s.starts_with("http://") || s.starts_with("https://") {
@@ -74,12 +90,34 @@ impl PIISanitizer {
             }
             Value::Array(arr) => {
                 for i in arr {
-                    Self::sanitize_value(i);
+                    Self::sanitize_value_inner(i, remaining_depth - 1);
                 }
             }
             Value::Object(obj) => {
-                for (_, val) in obj {
-                    Self::sanitize_value(val);
+                // Sanitize both keys and values, rebuilding the map
+                let entries: Vec<(String, Value)> = obj.into_iter()
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect();
+                obj.clear();
+
+                for (key, mut val) in entries {
+                    let sanitized_key = Self::sanitize_text(&key);
+                    Self::sanitize_value_inner(&mut val, remaining_depth - 1);
+
+                    // Handle key collisions by appending a suffix
+                    if obj.contains_key(&sanitized_key) {
+                        let mut idx = 1;
+                        loop {
+                            let candidate = format!("{}_{}", sanitized_key, idx);
+                            if !obj.contains_key(&candidate) {
+                                obj.insert(candidate, val);
+                                break;
+                            }
+                            idx += 1;
+                        }
+                    } else {
+                        obj.insert(sanitized_key, val);
+                    }
                 }
             }
             _ => {}
@@ -165,5 +203,57 @@ mod tests {
         });
 
         assert_eq!(input, expected);
+    }
+
+    #[test]
+    fn test_sanitize_value_depth_limit() {
+        // Build a deeply nested JSON structure that exceeds MAX_DEPTH
+        let mut value = json!("leaf");
+        for _ in 0..(MAX_DEPTH + 5) {
+            value = json!({ "nested": value });
+        }
+
+        // Should not stack overflow
+        PIISanitizer::sanitize_value(&mut value);
+
+        // Verify that the deeply nested part was replaced
+        let serialized = serde_json::to_string(&value).unwrap();
+        assert!(
+            serialized.contains("<max_depth_reached>"),
+            "Expected depth-limited placeholder in output"
+        );
+    }
+
+    #[test]
+    fn test_sanitize_value_object_key_sanitization() {
+        let mut input = json!({
+            "user@example.com": "value1",
+            "normal_key": "value2"
+        });
+
+        PIISanitizer::sanitize_value(&mut input);
+
+        // The key with email should be sanitized
+        assert!(input.get("***EMAIL***").is_some(), "Key with email should be sanitized");
+        assert!(input.get("normal_key").is_some(), "Normal key should remain");
+        // Original key should be gone
+        assert!(input.get("user@example.com").is_none(), "Original email key should be removed");
+    }
+
+    #[test]
+    fn test_sanitize_value_object_key_collision() {
+        // Two different keys that sanitize to the same result
+        let mut input = json!({
+            "a@b.com": "val1",
+            "c@d.com": "val2"
+        });
+
+        PIISanitizer::sanitize_value(&mut input);
+
+        // Both values should be preserved (one with suffix)
+        let obj = input.as_object().unwrap();
+        assert_eq!(obj.len(), 2, "Both entries should be preserved despite key collision");
+        assert!(obj.contains_key("***EMAIL***"), "First sanitized key");
+        assert!(obj.contains_key("***EMAIL***_1"), "Collision-suffixed key");
     }
 }
