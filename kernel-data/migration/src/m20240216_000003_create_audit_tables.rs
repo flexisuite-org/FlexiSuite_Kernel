@@ -25,7 +25,8 @@ impl MigrationTrait for Migration {
                 PRIMARY KEY (id, tenant_id)
             );
             "#,
-        ).await?;
+        )
+        .await?;
 
         // 2. Create Audit Log Table
         db.execute_unprepared(
@@ -44,7 +45,8 @@ impl MigrationTrait for Migration {
                 PRIMARY KEY (id, tenant_id)
             );
             "#,
-        ).await?;
+        )
+        .await?;
 
         // 3. Enable RLS for History
         db.execute_unprepared(
@@ -57,7 +59,8 @@ impl MigrationTrait for Migration {
                 TO PUBLIC
                 USING (tenant_id = flexi.authorized_tenant_id());
             "#,
-        ).await?;
+        )
+        .await?;
 
         // 4. Enable RLS for Audit Logs
         db.execute_unprepared(
@@ -70,7 +73,8 @@ impl MigrationTrait for Migration {
                 TO PUBLIC
                 USING (tenant_id = flexi.authorized_tenant_id());
             "#,
-        ).await?;
+        )
+        .await?;
 
         // 5. Create Indexes
         db.execute_unprepared(
@@ -79,21 +83,30 @@ impl MigrationTrait for Migration {
                 ON flexi.entity_histories (tenant_id, entity_id);
             CREATE INDEX IF NOT EXISTS idx_entity_histories_created_at
                 ON flexi.entity_histories (tenant_id, created_at);
+            CREATE INDEX IF NOT EXISTS idx_entity_histories_unarchived
+                ON flexi.entity_histories (tenant_id, created_at)
+                WHERE archived_at IS NULL;
 
             CREATE INDEX IF NOT EXISTS idx_audit_logs_actor_id
                 ON flexi.audit_logs (tenant_id, actor_id);
             CREATE INDEX IF NOT EXISTS idx_audit_logs_created_at
                 ON flexi.audit_logs (tenant_id, created_at);
+            CREATE INDEX IF NOT EXISTS idx_audit_logs_unarchived
+                ON flexi.audit_logs (tenant_id, created_at)
+                WHERE archived_at IS NULL;
             "#,
-        ).await?;
+        )
+        .await?;
 
         Ok(())
     }
 
     async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
         let db = manager.get_connection();
-        db.execute_unprepared("DROP TABLE IF EXISTS flexi.entity_histories").await?;
-        db.execute_unprepared("DROP TABLE IF EXISTS flexi.audit_logs").await?;
+        db.execute_unprepared("DROP TABLE IF EXISTS flexi.entity_histories")
+            .await?;
+        db.execute_unprepared("DROP TABLE IF EXISTS flexi.audit_logs")
+            .await?;
         Ok(())
     }
 }

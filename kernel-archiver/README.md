@@ -21,9 +21,12 @@ The service is configured via environment variables:
 | Variable | Description | Default |
 |---|---|---|
 | `DATABASE_URL` | PostgreSQL connection string (Required) | - |
-| `AUDIT_LOG_BUCKET` | S3 bucket name for storage | `audit-logs` |
+| `AUDIT_LOG_BUCKET` | S3 bucket name for storage (Required) | - |
 | `AWS_REGION` | AWS Region | `us-east-1` |
 | `ARCHIVER_INTERVAL` | Interval in seconds between archive cycles | `60` |
+| `ARCHIVER_TENANT_IDS` | Comma-separated tenant IDs to process (Required) | - |
+| `S3_OBJECT_LOCK_MODE` | `COMPLIANCE` or `GOVERNANCE` for Object Lock | Disabled |
+| `S3_OBJECT_LOCK_DAYS` | Retention days when Object Lock is enabled | `365` |
 | `AWS_ACCESS_KEY_ID` | AWS Credentials (or IAM Role) | - |
 | `AWS_SECRET_ACCESS_KEY` | AWS Credentials (or IAM Role) | - |
 

@@ -1,13 +1,13 @@
+use futures::future::BoxFuture;
 use kernel_core::auth::TenantContext;
 use kernel_core::kernel::{self, KernelError};
+use ring::hmac;
 use sea_orm::{
-    ConnectionTrait, DatabaseConnection, DatabaseTransaction, DbBackend, DbErr,
-    Statement, TransactionTrait,
+    ConnectionTrait, DatabaseConnection, DatabaseTransaction, DbBackend, DbErr, Statement,
+    TransactionTrait,
 };
 use tracing::{error, warn};
 use uuid::Uuid;
-use futures::future::BoxFuture;
-use ring::hmac;
 
 use std::sync::OnceLock;
 
@@ -17,7 +17,7 @@ static HMAC_SECRET: OnceLock<Vec<u8>> = OnceLock::new();
 pub fn init_hmac_secret() -> Result<(), String> {
     let secret = std::env::var("FLEXI_HMAC_SECRET")
         .map_err(|_| "FLEXI_HMAC_SECRET is not set".to_string())?;
-    
+
     init_hmac_secret_from_string(secret)
 }
 
@@ -35,7 +35,8 @@ fn init_hmac_secret_from_string(secret: String) -> Result<(), String> {
         return Err("FLEXI_HMAC_SECRET must be at least 32 bytes".to_string());
     }
 
-    HMAC_SECRET.set(secret.into_bytes())
+    HMAC_SECRET
+        .set(secret.into_bytes())
         .map_err(|_| "HMAC secret already initialized".to_string())
 }
 
@@ -65,16 +66,31 @@ pub struct TenantScoped<C> {
 }
 
 impl<C> TenantScoped<C> {
-    pub(super) fn new(inner: C, tenant_id: kernel_core::auth::TenantId, user_id: Option<kernel_core::auth::UserId>) -> Self {
-        Self { inner, tenant_id, user_id }
+    pub(super) fn new(
+        inner: C,
+        tenant_id: kernel_core::auth::TenantId,
+        user_id: Option<kernel_core::auth::UserId>,
+    ) -> Self {
+        Self {
+            inner,
+            tenant_id,
+            user_id,
+        }
     }
 }
 
 impl TenantScoped<RawConnection> {
+    /// Returns the tenant-authorized transaction handle.
+    /// Intended for trusted internal services that must run tenant-scoped queries
+    /// not yet covered by repository trait methods.
+    pub fn txn(&self) -> &DatabaseTransaction {
+        &self.inner.txn
+    }
+
     pub(crate) async fn commit(self) -> Result<(), DbErr> {
         self.inner.txn.commit().await
     }
-    
+
     pub(crate) async fn rollback(self) -> Result<(), DbErr> {
         self.inner.txn.rollback().await
     }
@@ -126,7 +142,12 @@ where
 
     let token = format!(
         "{}:{}:{}:{}:{}:{}",
-        ver, kid, ts_str, nonce, ctx.tenant_id(), sig
+        ver,
+        kid,
+        ts_str,
+        nonce,
+        ctx.tenant_id(),
+        sig
     );
 
     // 2. Authorize
@@ -141,24 +162,26 @@ where
         KernelError::TenantAuthorizationFailed(e.to_string())
     })?;
 
-    let scoped = TenantScoped::new(RawConnection::new(txn), ctx.tenant_id().clone(), ctx.user_id().cloned());
+    let scoped = TenantScoped::new(
+        RawConnection::new(txn),
+        ctx.tenant_id().clone(),
+        ctx.user_id().cloned(),
+    );
 
     match f(&scoped).await {
-        Ok(result) => {
-            match scoped.commit().await {
-                Ok(()) => Ok(result),
-                Err(commit_err) => {
-                    error!(
-                        tenant_id = %ctx.tenant_id(),
-                        "commit failed (outcome unknown): {commit_err}"
-                    );
-                    Err(KernelError::CommitUnknown(commit_err.to_string()))
-                }
+        Ok(result) => match scoped.commit().await {
+            Ok(()) => Ok(result),
+            Err(commit_err) => {
+                error!(
+                    tenant_id = %ctx.tenant_id(),
+                    "commit failed (outcome unknown): {commit_err}"
+                );
+                Err(KernelError::CommitUnknown(commit_err.to_string()))
             }
-        }
+        },
         Err(e) => {
             if let Err(rollback_err) = scoped.rollback().await {
-               error!("rollback failed: {rollback_err}");
+                error!("rollback failed: {rollback_err}");
             }
             warn!(tenant_id = %ctx.tenant_id(), "tx rolled back: {e}");
             Err(e)
