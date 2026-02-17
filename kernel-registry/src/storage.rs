@@ -138,6 +138,12 @@ impl RegistryStorage {
                 Value::Array(vec.into_iter().map(Self::normalize_value).collect())
             }
             Value::Number(n) => {
+                if let Some(i) = n.as_i64() {
+                    return Value::from(i);
+                }
+                if let Some(u) = n.as_u64() {
+                    return Value::from(u);
+                }
                 if let Some(f) = n.as_f64() {
                     // Check if the float is effectively an integer
                     if f.fract() == 0.0 {

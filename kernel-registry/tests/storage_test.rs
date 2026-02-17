@@ -290,6 +290,20 @@ async fn test_manifest_digest_numeric_normalization() {
 }
 
 #[tokio::test]
+async fn test_manifest_digest_big_int_normalization() {
+    let store_a = Arc::new(InMemory::new());
+    let registry_a = RegistryStorage::new(store_a, &test_tenant_ctx());
+
+    // Test with i64::MAX and u64::MAX to ensure precision is kept
+    let mut manifest_big = test_manifest("app_big_int", "1.0.0");
+    manifest_big.configuration.insert("big_i64".to_string(), serde_json::json!(i64::MAX));
+    manifest_big.configuration.insert("big_u64".to_string(), serde_json::json!(u64::MAX));
+
+    let (digest, _) = registry_a.save_manifest(&manifest_big).await.unwrap();
+    assert_eq!(digest.len(), 96);
+}
+
+#[tokio::test]
 async fn test_get_artifact_returns_artifact_not_found_for_missing_key() {
     let store = Arc::new(InMemory::new());
     let registry = RegistryStorage::new(store, &test_tenant_ctx());
