@@ -45,6 +45,8 @@ async fn test_audit_log_creation() {
         .expect("Failed to run migrations");
 
     // Secret in DB
+    // SAFETY: TEST_HMAC_SECRET is a compile-time constant used only in tests.
+    // This manual escaping is acceptable here, but must not be copied to production SQL construction.
     let escaped_secret = TEST_HMAC_SECRET.replace('\'', "''");
     db.execute_unprepared(&format!(
         "ALTER ROLE postgres SET flexi.hmac_secret = '{}'",
@@ -93,7 +95,7 @@ async fn test_audit_log_creation() {
     assert_eq!(histories[0].change_type, "CREATE");
     assert_eq!(
         histories[0].created_by,
-        Some(expected_actor_id(&tenant_id, &user_id))
+        expected_actor_id(&tenant_id, &user_id)
     );
     assert_eq!(histories[0].archived_at, None);
 
@@ -122,7 +124,10 @@ async fn test_audit_log_creation() {
 
     assert_eq!(histories.len(), 2, "Should have 2 history records");
     assert_eq!(histories[1].change_type, "UPDATE");
-    assert_eq!(histories[1].diff, serde_json::json!({"val": 2}));
+    assert_eq!(
+        histories[1].diff,
+        serde_json::json!([{"op": "replace", "path": "/val", "value": 2}])
+    );
 
     // 3. Log Audit
     with_tenant_tx(&db, &ctx, |repo| {
@@ -149,4 +154,35 @@ async fn test_audit_log_creation() {
     assert_eq!(logs[0].action, "test.action");
     assert_eq!(logs[0].actor_id, expected_actor_id(&tenant_id, &user_id));
     assert_eq!(logs[0].archived_at, None);
+
+    // 4. Cross-tenant isolation checks
+    let other_tenant_id = TenantId::new("audit-tenant-other").unwrap();
+    let other_ctx = TenantContext::new(other_tenant_id.clone(), Some(user_id.clone()));
+    let entity_id_clone = entity_id.clone();
+    with_tenant_tx(&db, &other_ctx, |repo| {
+        Box::pin(async move {
+            let entity = repo.get_entity(&entity_id_clone).await?;
+            assert!(entity.is_none(), "Cross-tenant entity should be invisible");
+            Ok(())
+        })
+    })
+    .await
+    .expect("Cross-tenant get_entity failed");
+
+    let other_histories = entity_history::Entity::find()
+        .filter(entity_history::Column::TenantId.eq(other_tenant_id.to_string()))
+        .all(&db)
+        .await
+        .expect("Failed to query cross-tenant histories");
+    assert!(
+        other_histories.is_empty(),
+        "Cross-tenant histories should be empty"
+    );
+
+    let other_logs = audit_log::Entity::find()
+        .filter(audit_log::Column::TenantId.eq(other_tenant_id.to_string()))
+        .all(&db)
+        .await
+        .expect("Failed to query cross-tenant audit logs");
+    assert!(other_logs.is_empty(), "Cross-tenant logs should be empty");
 }

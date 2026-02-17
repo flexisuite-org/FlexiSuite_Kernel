@@ -40,6 +40,12 @@ fn pseudonymize_user_id_for_audit(tenant_id: &str, user_id: &str) -> String {
     format!("uidh:{}", hex::encode(digest.as_ref()))
 }
 
+fn history_actor_id(tenant_id: &str, user_id: Option<&kernel_core::auth::UserId>) -> String {
+    user_id
+        .map(|u| pseudonymize_user_id_for_audit(tenant_id, u.as_str()))
+        .unwrap_or_else(|| "system".to_string())
+}
+
 fn required_active_value<T: Clone>(value: &ActiveValue<T>, field_name: &str) -> kernel::Result<T>
 where
     T: Into<sea_orm::Value>,
@@ -77,10 +83,7 @@ impl TenantRepository for TenantScoped<RawConnection> {
         let content = required_active_value(&active_model.content, "Content")?;
         let version = active_value_or(&active_model.version, 1);
 
-        let user_id_str = self
-            .user_id
-            .clone()
-            .map(|u| pseudonymize_user_id_for_audit(self.tenant_id.as_str(), u.as_str()));
+        let user_id_str = history_actor_id(self.tenant_id.as_str(), self.user_id.as_ref());
 
         // 1. Insert Entity
         let result = active_model
@@ -124,23 +127,32 @@ impl TenantRepository for TenantScoped<RawConnection> {
             .map_err(KernelError::db_error)?
             .ok_or_else(|| KernelError::ValidationError("Entity not found".into()))?;
 
-        let next_version = match active_model.version.clone() {
-            ActiveValue::Set(v) | ActiveValue::Unchanged(v) => v + 1,
-            ActiveValue::NotSet => existing.version + 1,
-        };
+        match active_model.version.clone() {
+            ActiveValue::Set(v) | ActiveValue::Unchanged(v) if v != existing.version => {
+                return Err(KernelError::ValidationError(format!(
+                    "version conflict: expected {}, got {}",
+                    existing.version, v
+                )));
+            }
+            _ => {}
+        }
+
+        let next_version = existing.version + 1;
         active_model.version = ActiveValue::Set(next_version);
         active_model.updated_at = ActiveValue::Set(chrono::Utc::now().into());
 
-        let user_id_str = self
-            .user_id
-            .clone()
-            .map(|u| pseudonymize_user_id_for_audit(self.tenant_id.as_str(), u.as_str()));
+        let user_id_str = history_actor_id(self.tenant_id.as_str(), self.user_id.as_ref());
 
         // 1. Update Entity
         let result = active_model
             .update(&self.inner.txn)
             .await
             .map_err(KernelError::db_error)?;
+
+        let patch = json_patch::diff(&existing.content, &result.content);
+        let patch_json = serde_json::to_value(&patch).map_err(|e| {
+            KernelError::ValidationError(format!("failed to serialize content patch: {e}"))
+        })?;
 
         // 2. Insert History
         let history = entity_history::ActiveModel {
@@ -150,7 +162,7 @@ impl TenantRepository for TenantScoped<RawConnection> {
             entity_type: ActiveValue::Set(result.entity_type.clone()),
             change_type: ActiveValue::Set("UPDATE".to_string()),
             version: ActiveValue::Set(next_version),
-            diff: ActiveValue::Set(result.content.clone()),
+            diff: ActiveValue::Set(patch_json),
             created_at: ActiveValue::Set(chrono::Utc::now().into()),
             created_by: ActiveValue::Set(user_id_str),
             archived_at: ActiveValue::NotSet,

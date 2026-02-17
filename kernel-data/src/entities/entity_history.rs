@@ -14,7 +14,7 @@ pub struct Model {
     pub version: i32,        // Snapshot version
     pub diff: Json,          // The changes or full snapshot
     pub created_at: DateTimeWithTimeZone,
-    pub created_by: Option<String>, // User ID or System
+    pub created_by: String, // User ID or System
     pub archived_at: Option<DateTimeWithTimeZone>,
 }
 
@@ -22,10 +22,10 @@ pub struct Model {
 pub enum Relation {
     #[sea_orm(
         belongs_to = "super::entity_record::Entity",
-        from = "Column::EntityId",
-        to = "super::entity_record::Column::Id",
+        from = "(Column::EntityId, Column::TenantId)",
+        to = "(super::entity_record::Column::Id, super::entity_record::Column::TenantId)",
         on_update = "NoAction",
-        on_delete = "Cascade"
+        on_delete = "NoAction"
     )]
     EntityRecord,
 }
