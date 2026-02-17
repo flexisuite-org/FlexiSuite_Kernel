@@ -77,9 +77,9 @@ impl TenantRepository for TenantScoped<RawConnection> {
         let content = required_active_value(&active_model.content, "Content")?;
         let version = active_value_or(&active_model.version, 1);
 
-        let pseudonymized_user_id = self
+        let user_id_str = self
             .user_id
-            .as_ref()
+            .clone()
             .map(|u| pseudonymize_user_id_for_audit(self.tenant_id.as_str(), u.as_str()));
 
         // 1. Insert Entity
@@ -133,7 +133,7 @@ impl TenantRepository for TenantScoped<RawConnection> {
 
         let user_id_str = self
             .user_id
-            .as_ref()
+            .clone()
             .map(|u| pseudonymize_user_id_for_audit(self.tenant_id.as_str(), u.as_str()));
 
         // 1. Update Entity
@@ -180,7 +180,7 @@ impl TenantRepository for TenantScoped<RawConnection> {
         resource: String,
         details: serde_json::Value,
     ) -> kernel::Result<()> {
-        let user_id = self.user_id.as_ref().ok_or_else(|| {
+        let user_id = self.user_id.clone().ok_or_else(|| {
             KernelError::ValidationError("missing actor for audit log".to_string())
         })?;
         let user_id_str = pseudonymize_user_id_for_audit(self.tenant_id.as_str(), user_id.as_str());
