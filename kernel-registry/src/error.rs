@@ -14,6 +14,9 @@ pub enum RegistryError {
     #[error("Manifest not found: {0}")]
     ManifestNotFound(String),
 
+    #[error("Artifact not found: {0}")]
+    ArtifactNotFound(String),
+
     #[error("Invalid path: {0}")]
     InvalidPath(String),
 }
