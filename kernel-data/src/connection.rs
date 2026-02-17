@@ -1,8 +1,8 @@
 use crate::auth_context::TenantContext;
 use crate::error::DataError;
 use sea_orm::{
-    ConnectionTrait, DatabaseConnection, DatabaseTransaction, DbBackend, DbErr,
-    Statement, TransactionTrait,
+    ConnectionTrait, DatabaseConnection, DatabaseTransaction, DbBackend, DbErr, Statement,
+    TransactionTrait,
 };
 use tracing::{error, warn};
 use futures::future::BoxFuture;
@@ -22,11 +22,20 @@ impl RawConnection {
 pub struct TenantScoped<C> {
     pub(crate) inner: C,
     pub(crate) tenant_id: crate::auth_context::TenantId,
+    pub(crate) user_id: Option<crate::auth_context::UserId>,
 }
 
 impl<C> TenantScoped<C> {
-    pub(super) fn new(inner: C, tenant_id: crate::auth_context::TenantId) -> Self {
-        Self { inner, tenant_id }
+    pub(super) fn new(
+        inner: C,
+        tenant_id: crate::auth_context::TenantId,
+        user_id: Option<crate::auth_context::UserId>,
+    ) -> Self {
+        Self {
+            inner,
+            tenant_id,
+            user_id,
+        }
     }
 }
 
@@ -34,9 +43,13 @@ impl TenantScoped<RawConnection> {
     pub(crate) async fn commit(self) -> Result<(), DbErr> {
         self.inner.txn.commit().await
     }
-    
+
     pub(crate) async fn rollback(self) -> Result<(), DbErr> {
         self.inner.txn.rollback().await
+    }
+
+    pub fn txn(&self) -> &DatabaseTransaction {
+        &self.inner.txn
     }
 }
 
@@ -73,7 +86,11 @@ where
         DataError::TenantAuthorizationFailed(e.to_string())
     })?;
 
-    let scoped = TenantScoped::new(RawConnection::new(txn), ctx.tenant_id().clone());
+    let scoped = TenantScoped::new(
+        RawConnection::new(txn),
+        ctx.tenant_id().clone(),
+        ctx.user_id().cloned(),
+    );
 
     match f(&scoped).await {
         Ok(result) => {
@@ -87,10 +104,10 @@ where
                     Err(DataError::CommitUnknown(commit_err.to_string()))
                 }
             }
-        }
+        },
         Err(e) => {
             if let Err(rollback_err) = scoped.rollback().await {
-               error!("rollback failed: {rollback_err}");
+                error!("rollback failed: {rollback_err}");
             }
             warn!(tenant_id = %ctx.tenant_id(), "tx rolled back: {e}");
             Err(e)

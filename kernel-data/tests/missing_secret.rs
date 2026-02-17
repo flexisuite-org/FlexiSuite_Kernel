@@ -13,7 +13,9 @@ async fn test_auth_failures() {
     let port = node.get_host_port_ipv4(5432); // Removed .unwrap()
     let connection_string = format!("postgres://postgres:postgres@127.0.0.1:{}/postgres", port);
 
-    let db = Database::connect(&connection_string).await.expect("Failed to connect to DB");
+    let db = Database::connect(&connection_string)
+        .await
+        .expect("Failed to connect to DB");
 
     // Create Role
     db.execute_unprepared("DO $$ BEGIN IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = 'flexi') THEN CREATE ROLE flexi; END IF; END $$;").await.unwrap();
@@ -62,6 +64,30 @@ async fn test_auth_failures() {
     drop(db);
     let db = Database::connect(&connection_string).await.expect("Reconnect");
 
+    // We need to generate token BEFORE resetting secret? OR can we generate it still?
+    // KeyManager::generate_tenant_token uses HMAC algorithm, which usually needs a key.
+    // If the key is stored in DB `flexi_keys`, generate_tenant_token fetches it?
+    // Wait, internal secret is used by `authorize_tenant` DB function to verify implementation integrity?
+    // As checking line 81: internal secret is needed.
+    
+    // Actually, `generate_tenant_token` needs to read keys.
+    // Let's assume keys are available.
+    
+    // But if we reset `flexi.hmac_secret`, does it affect token generation or verification?
+    // verification is done by DB function using that secret to verify signature?
+    // Or `flexi.hmac_secret` is used to HMAC the key itself?
+    
+    // Let's just trust HEAD test logic for now.
+    // But construct token first just in case.
+    let token = "v2:kid:ts:nonce:tenant-x:sig"; // Dummy, since authorize should fail before signature check if secret is missing?
+    
+    // Actually in HEAD code:
+    // let token = KeyManager::generate_tenant_token(&db, "tenant-x").await.unwrap(); 
+    // This is called AFTER reset?
+    // If generate_tenant_token depends on flexi.hmac_secret, it might fail.
+    // But line 78 in HEAD code calls it.
+    
+    // I will keep HEAD code as is.
     let token = KeyManager::generate_tenant_token(&db, "tenant-x").await.unwrap();
 
     let res = with_tenant_tx(&db, &ctx, &token, |_| Box::pin(async { Ok(()) })).await;

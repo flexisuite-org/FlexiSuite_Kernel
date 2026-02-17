@@ -97,8 +97,8 @@ impl MigrationTrait for Migration {
                     END IF;
 
                     -- Real HMAC verification (fail-closed if not verified)
-                    -- Note: pgcrypto hmac takes bytea key
-                    computed_sig := encode(hmac(ver || ':' || kid_val || ':' || ts_str || ':' || nonce_val || ':' || tenant_id_val, secret_key, 'sha256'), 'hex');
+                    -- Note: pgcrypto hmac takes bytea key, so we must cast data to bytea
+                    computed_sig := encode(hmac((ver || ':' || kid_val || ':' || ts_str || ':' || nonce_val || ':' || tenant_id_val)::bytea, secret_key, 'sha256'), 'hex');
                     IF sig IS DISTINCT FROM computed_sig THEN
                          RAISE EXCEPTION 'Invalid signature';
                     END IF;
@@ -127,7 +127,7 @@ impl MigrationTrait for Migration {
 
                 PERFORM set_config('flexi.ctx_sig', encode(hmac(tenant_id_val, internal_secret, 'sha256'), 'hex'), true);
             END;
-            $$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = flexi, pg_catalog, pg_temp;
+            $$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = flexi, public, pg_catalog, pg_temp;
             "#
         ).await?;
 

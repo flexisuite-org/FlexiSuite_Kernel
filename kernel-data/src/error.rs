@@ -12,4 +12,8 @@ pub enum DataError {
     TransactionFailed(String),
     #[error("Entity not found: {0}")]
     EntityNotFound(String),
+    #[error("Validation error: {0}")]
+    ValidationError(String),
+    #[error("Serialization error: {0}")]
+    SerializationError(String),
 }
