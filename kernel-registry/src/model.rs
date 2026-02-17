@@ -52,6 +52,8 @@ pub struct ComponentDependency {
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Security {
+    /// SHA-384 digest of the manifest payload with the entire `security`
+    /// section excluded from the hashed input.
     pub manifest_digest: String,
     pub manifest_signature: String,
     pub manifest_signature_kid: String,

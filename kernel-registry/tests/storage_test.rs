@@ -89,6 +89,44 @@ async fn test_save_and_get_manifest() {
 }
 
 #[tokio::test]
+async fn test_manifest_digest_excludes_security_section() {
+    let store = Arc::new(InMemory::new());
+    let registry = RegistryStorage::new(store, &test_tenant_ctx());
+
+    let manifest_a = DistManifest {
+        schema_version: "1.0".to_string(),
+        id: "app_security_digest".to_string(),
+        version: "1.0.0".to_string(),
+        kind: Kind::Composition,
+        name: "Security Digest Test".to_string(),
+        protected: false,
+        composition_root: "main.tsx".to_string(),
+        routes: vec![Route { path: "/".to_string(), component: "layout".to_string() }],
+        dependencies: Dependencies {
+            components: HashMap::new(),
+            permissions: vec![],
+        },
+        configuration: HashMap::new(),
+        security: Security {
+            manifest_digest: "".to_string(),
+            manifest_signature: "sig_A".to_string(),
+            manifest_signature_kid: "kid_A".to_string(),
+            trust_root_version: "v1".to_string(),
+        },
+    };
+
+    let mut manifest_b = manifest_a.clone();
+    manifest_b.security.manifest_signature = "sig_B".to_string();
+    manifest_b.security.manifest_signature_kid = "kid_B".to_string();
+    manifest_b.security.trust_root_version = "v2".to_string();
+
+    let digest_a = registry.save_manifest(&manifest_a).await.unwrap();
+    let digest_b = registry.save_manifest(&manifest_b).await.unwrap();
+
+    assert_eq!(digest_a, digest_b);
+}
+
+#[tokio::test]
 async fn test_get_missing_manifest_returns_manifest_not_found() {
     let store = Arc::new(InMemory::new());
     let registry = RegistryStorage::new(store, &test_tenant_ctx());
