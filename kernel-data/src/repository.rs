@@ -60,11 +60,13 @@ pub trait TenantRepository: private::Sealed + Send + Sync {
         limit: u64,
     ) -> kernel::Result<Vec<entity_history::Model>>;
     async fn mark_entity_history_archived(&self, id: String) -> kernel::Result<()>;
+    async fn mark_entity_histories_archived(&self, ids: Vec<String>) -> kernel::Result<()>;
     async fn find_unarchived_audit_logs(
         &self,
         limit: u64,
     ) -> kernel::Result<Vec<audit_log::Model>>;
     async fn mark_audit_log_archived(&self, id: String) -> kernel::Result<()>;
+    async fn mark_audit_logs_archived(&self, ids: Vec<String>) -> kernel::Result<()>;
 }
 
 fn pseudonymize_user_id_for_audit(tenant_id: &str, user_id: &str) -> String {
@@ -318,22 +320,24 @@ impl TenantRepository for TenantScoped<RawConnection> {
     }
 
     async fn mark_entity_history_archived(&self, id: String) -> kernel::Result<()> {
-        let _result = EntityHistory::update_many()
+        self.mark_entity_histories_archived(vec![id]).await
+    }
+
+    async fn mark_entity_histories_archived(&self, ids: Vec<String>) -> kernel::Result<()> {
+        if ids.is_empty() {
+            return Ok(());
+        }
+        EntityHistory::update_many()
             .col_expr(
                 entity_history::Column::ArchivedAt,
                 Expr::current_timestamp().into(),
             )
-            .filter(entity_history::Column::Id.eq(id))
+            .filter(entity_history::Column::Id.is_in(ids))
             .filter(entity_history::Column::TenantId.eq(self.tenant_id.to_string()))
             .filter(entity_history::Column::ArchivedAt.is_null())
             .exec(&self.inner.txn)
             .await
             .map_err(KernelError::db_error)?;
-
-        // If rows_affected is 0, it means either:
-        // 1. Record not found
-        // 2. Already archived
-        // In the context of archiving loop, both are acceptable outcomes (idempotent).
         Ok(())
     }
 
@@ -352,18 +356,24 @@ impl TenantRepository for TenantScoped<RawConnection> {
     }
 
     async fn mark_audit_log_archived(&self, id: String) -> kernel::Result<()> {
-        let _result = AuditLog::update_many()
+        self.mark_audit_logs_archived(vec![id]).await
+    }
+
+    async fn mark_audit_logs_archived(&self, ids: Vec<String>) -> kernel::Result<()> {
+        if ids.is_empty() {
+            return Ok(());
+        }
+        AuditLog::update_many()
             .col_expr(
                 audit_log::Column::ArchivedAt,
                 Expr::current_timestamp().into(),
             )
-            .filter(audit_log::Column::Id.eq(id))
+            .filter(audit_log::Column::Id.is_in(ids))
             .filter(audit_log::Column::TenantId.eq(self.tenant_id.to_string()))
             .filter(audit_log::Column::ArchivedAt.is_null())
             .exec(&self.inner.txn)
             .await
             .map_err(KernelError::db_error)?;
-
         Ok(())
     }
 }

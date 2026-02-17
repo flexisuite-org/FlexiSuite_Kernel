@@ -23,7 +23,7 @@ use tracing::{error, info, warn};
 #[derive(Clone)]
 struct ObjectLockConfig {
     mode: ObjectLockMode,
-    retain_until: SmithyDateTime,
+    retain_days: i64,
 }
 
 #[derive(Clone)]
@@ -220,10 +220,7 @@ fn parse_object_lock_config() -> Result<Option<ObjectLockConfig>> {
         return Err(anyhow!("S3_OBJECT_LOCK_DAYS must be > 0"));
     }
 
-    let retain_until =
-        SmithyDateTime::from_secs((chrono::Utc::now() + chrono::Duration::days(days)).timestamp());
-
-    Ok(Some(ObjectLockConfig { mode, retain_until }))
+    Ok(Some(ObjectLockConfig { mode, retain_days: days }))
 }
 
 async fn run_archive_cycle(db: &DatabaseConnection, s3: &Client, config: &AppConfig) {
@@ -281,11 +278,13 @@ async fn run_archive_cycle(db: &DatabaseConnection, s3: &Client, config: &AppCon
 
         let mark_result = with_tenant_tx(db, &ctx, move |repo| {
             Box::pin(async move {
-                for id in mark_plan.entity_history_ids {
-                    repo.mark_entity_history_archived(id).await?;
+                if !mark_plan.entity_history_ids.is_empty() {
+                    repo.mark_entity_histories_archived(mark_plan.entity_history_ids)
+                        .await?;
                 }
-                for id in mark_plan.audit_log_ids {
-                    repo.mark_audit_log_archived(id).await?;
+                if !mark_plan.audit_log_ids.is_empty() {
+                    repo.mark_audit_logs_archived(mark_plan.audit_log_ids)
+                        .await?;
                 }
                 Ok(())
             })
@@ -402,9 +401,14 @@ async fn put_archive_object(
         .checksum_sha256(checksum);
 
     if let Some(lock) = object_lock {
+        // Compute retain_until at upload time so each object gets a fresh
+        // WORM timestamp, even if the archiver has been running for hours.
+        let retain_until = SmithyDateTime::from_secs(
+            (chrono::Utc::now() + chrono::Duration::days(lock.retain_days)).timestamp(),
+        );
         put_request = put_request
             .object_lock_mode(lock.mode.clone())
-            .object_lock_retain_until_date(lock.retain_until);
+            .object_lock_retain_until_date(retain_until);
     }
 
     put_request.send().await?;
