@@ -21,13 +21,21 @@ use uuid::Uuid;
 
 /// Maximum allowed length for user-supplied string fields (error_code, trace_id, etc.)
 const MAX_STRING_LEN: usize = 256;
+/// Maximum allowed length for DOM snapshot
+const MAX_DOM_SNAPSHOT_LEN: usize = 1024 * 1024; // 1MB
 
 fn validate_string_length(value: &str, field_name: &str) -> Result<(), StatusCode> {
-    if value.len() > MAX_STRING_LEN {
+    let max_len = if field_name == "dom_snapshot" {
+        MAX_DOM_SNAPSHOT_LEN
+    } else {
+        MAX_STRING_LEN
+    };
+
+    if value.len() > max_len {
         tracing::warn!(
             field = %field_name,
             len = value.len(),
-            max = MAX_STRING_LEN,
+            max = max_len,
             "Input exceeds maximum allowed length"
         );
         return Err(StatusCode::BAD_REQUEST);
@@ -72,6 +80,10 @@ async fn report_diagnostic(
     if let Some(suggestion) = payload.suggestion.as_ref()
         && let Err(status) = validate_string_length(suggestion, "suggestion")
     {
+        return status.into_response();
+    }
+
+    if let Err(status) = validate_string_length(&payload.context.dom_snapshot, "dom_snapshot") {
         return status.into_response();
     }
 
@@ -180,10 +192,12 @@ async fn get_policy(
 
     match result {
         Ok(Some(policy)) => Json(policy).into_response(),
-        Ok(None) => Json(serde_json::json!({
-            "tenant_id": ctx.tenant_id().as_str(),
-            "enabled": false
-        }))
+        Ok(None) => Json(diagnostic_policy::Model {
+            tenant_id: ctx.tenant_id().to_string(),
+            enabled: false,
+            updated_at: Utc::now().into(),
+            updated_by: None,
+        })
         .into_response(),
         Err(e) => {
             tracing::error!("Failed to get policy: {}", e);

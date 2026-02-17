@@ -6,9 +6,9 @@ use crate::entities::prelude::*;
 use crate::entities::{diagnostic_policy, diagnostic_report};
 use async_trait::async_trait;
 use kernel_core::kernel::{self, KernelError};
-use sea_orm::sea_query::OnConflict;
+use sea_orm::sea_query::{Expr, OnConflict};
 use sea_orm::{
-    ActiveModelTrait, ActiveValue, ColumnTrait, EntityTrait, IntoActiveModel, QueryFilter,
+    ActiveModelTrait, ActiveValue, ColumnTrait, EntityTrait, QueryFilter,
     QueryOrder, QuerySelect,
 };
 use uuid::Uuid;
@@ -318,20 +318,22 @@ impl TenantRepository for TenantScoped<RawConnection> {
     }
 
     async fn mark_entity_history_archived(&self, id: String) -> kernel::Result<()> {
-        let record = EntityHistory::find_by_id((id.clone(), self.tenant_id.to_string()))
-            .one(&self.inner.txn)
-            .await
-            .map_err(KernelError::db_error)?
-            .ok_or_else(|| {
-                KernelError::ValidationError(format!("entity history {id} not found"))
-            })?;
-
-        let mut active: entity_history::ActiveModel = record.into_active_model();
-        active.archived_at = ActiveValue::Set(Some(chrono::Utc::now().into()));
-        active
-            .update(&self.inner.txn)
+        let _result = EntityHistory::update_many()
+            .col_expr(
+                entity_history::Column::ArchivedAt,
+                Expr::current_timestamp().into(),
+            )
+            .filter(entity_history::Column::Id.eq(id))
+            .filter(entity_history::Column::TenantId.eq(self.tenant_id.to_string()))
+            .filter(entity_history::Column::ArchivedAt.is_null())
+            .exec(&self.inner.txn)
             .await
             .map_err(KernelError::db_error)?;
+
+        // If rows_affected is 0, it means either:
+        // 1. Record not found
+        // 2. Already archived
+        // In the context of archiving loop, both are acceptable outcomes (idempotent).
         Ok(())
     }
 
@@ -350,18 +352,18 @@ impl TenantRepository for TenantScoped<RawConnection> {
     }
 
     async fn mark_audit_log_archived(&self, id: String) -> kernel::Result<()> {
-        let record = AuditLog::find_by_id((id.clone(), self.tenant_id.to_string()))
-            .one(&self.inner.txn)
-            .await
-            .map_err(KernelError::db_error)?
-            .ok_or_else(|| KernelError::ValidationError(format!("audit log {id} not found")))?;
-
-        let mut active: audit_log::ActiveModel = record.into_active_model();
-        active.archived_at = ActiveValue::Set(Some(chrono::Utc::now().into()));
-        active
-            .update(&self.inner.txn)
+        let _result = AuditLog::update_many()
+            .col_expr(
+                audit_log::Column::ArchivedAt,
+                Expr::current_timestamp().into(),
+            )
+            .filter(audit_log::Column::Id.eq(id))
+            .filter(audit_log::Column::TenantId.eq(self.tenant_id.to_string()))
+            .filter(audit_log::Column::ArchivedAt.is_null())
+            .exec(&self.inner.txn)
             .await
             .map_err(KernelError::db_error)?;
+
         Ok(())
     }
 }
