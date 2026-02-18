@@ -198,12 +198,11 @@ impl KeyManager {
         kid: &str,
     ) -> Result<(), KeyManagerError> {
         let key = KeyRecord::find_by_id(kid).one(db).await?;
-        if let Some(key) = key {
-            let mut am: ActiveModel = key.into();
-            am.state = Set("revoked".to_string());
-            am.revoked_at = Set(Some(Utc::now().into()));
-            am.update(db).await?;
-        }
+        let key = key.ok_or_else(|| KeyManagerError::KeyNotFound(kid.to_string()))?;
+        let mut am: ActiveModel = key.into();
+        am.state = Set("revoked".to_string());
+        am.revoked_at = Set(Some(Utc::now().into()));
+        am.update(db).await?;
         Ok(())
     }
 

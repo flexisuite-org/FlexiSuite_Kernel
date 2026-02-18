@@ -2,7 +2,7 @@ use kernel_core::auth::{KeyManager, TenantContext, TenantId, UserId};
 use kernel_data::connection::{with_tenant_tx, TenantScoped, RawConnection};
 use kernel_data::repository::TenantRepository;
 use migration::MigratorTrait;
-use sea_orm::{ActiveValue, ConnectionTrait, Database, DbBackend, Statement, TransactionTrait};
+use sea_orm::{ActiveValue, ConnectionTrait, Database, DbBackend, Statement};
 use testcontainers::{RunnableImage, clients};
 use testcontainers_modules::postgres::Postgres;
 use uuid::Uuid;
@@ -33,6 +33,8 @@ async fn test_tenant_isolation_rls() {
         .expect("Failed to run migrations");
 
     // 3. Configure Internal Database Secret (GUC)
+    // NOTE: TEST_INTERNAL_SECRET is a compile-time constant in this test module.
+    // Do not copy this interpolation pattern for runtime/user-controlled values.
     db.execute_unprepared(&format!("ALTER ROLE postgres SET flexi.hmac_secret = '{}'", TEST_INTERNAL_SECRET))
         .await
         .expect("Failed to set flexi.hmac_secret for node");

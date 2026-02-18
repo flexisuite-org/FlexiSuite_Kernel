@@ -18,6 +18,8 @@ impl MigrationTrait for Migration {
                 secret_bytes BYTEA,
                 public_bytes BYTEA,
                 state TEXT NOT NULL CHECK (state IN ('active', 'next', 'retired', 'revoked')),
+                CHECK (key_type != 'hmac' OR secret_bytes IS NOT NULL),
+                CHECK (key_type != 'paseto_public' OR public_bytes IS NOT NULL),
                 created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                 activated_at TIMESTAMPTZ,
                 retired_at TIMESTAMPTZ,
@@ -81,27 +83,23 @@ impl MigrationTrait for Migration {
 
                 -- 4. Verify Signature (HMAC-SHA256) using Key from Table
 
-                -- GATE: Check for dev_mode GUC or specific mock allowed
-                IF current_setting('flexi.dev_mode', true) = 'on' AND sig = 'mock_sig' THEN
-                    -- Allow mock in dev mode
-                ELSE
-                    -- Lookup key
-                    SELECT secret_bytes INTO secret_key
-                    FROM flexi.key_record
-                    WHERE kid = kid_val
-                      AND key_type = 'hmac'
-                      AND state IN ('active', 'next', 'retired');
+                -- Lookup key
+                SELECT secret_bytes INTO secret_key
+                FROM flexi.key_record
+                WHERE kid = kid_val
+                  AND key_type = 'hmac'
+                  AND state IN ('active', 'next', 'retired')
+                  AND (state != 'retired' OR retired_at > now() - interval '48 hours');
 
-                    IF secret_key IS NULL THEN
-                        RAISE EXCEPTION 'Invalid or expired key ID: %', kid_val;
-                    END IF;
+                IF secret_key IS NULL THEN
+                    RAISE EXCEPTION 'Invalid or expired key ID: %', kid_val;
+                END IF;
 
-                    -- Real HMAC verification (fail-closed if not verified)
-                    -- Note: pgcrypto hmac takes bytea key, so we must cast data to bytea
-                    computed_sig := encode(hmac((ver || ':' || kid_val || ':' || ts_str || ':' || nonce_val || ':' || tenant_id_val)::bytea, secret_key, 'sha256'), 'hex');
-                    IF sig IS DISTINCT FROM computed_sig THEN
-                         RAISE EXCEPTION 'Invalid signature';
-                    END IF;
+                -- Real HMAC verification (fail-closed if not verified)
+                -- Note: pgcrypto hmac takes bytea key, so we must cast data to bytea
+                computed_sig := encode(hmac((ver || ':' || kid_val || ':' || ts_str || ':' || nonce_val || ':' || tenant_id_val)::bytea, secret_key, 'sha256'), 'hex');
+                IF sig IS DISTINCT FROM computed_sig THEN
+                     RAISE EXCEPTION 'Invalid signature';
                 END IF;
 
                 -- 5. Check Nonce (Consumption)
@@ -172,11 +170,8 @@ impl MigrationTrait for Migration {
                 secret := current_setting('flexi.hmac_secret', true);
                 IF secret IS NULL OR secret = '' THEN RAISE EXCEPTION 'Secret not set'; END IF;
 
-                IF current_setting('flexi.dev_mode', true) = 'on' AND sig = 'mock_sig' THEN
-                ELSE
-                    computed_sig := encode(hmac(ver || ':' || kid || ':' || ts_str || ':' || nonce_val || ':' || tenant_id_val, secret, 'sha256'), 'hex');
-                    IF sig IS DISTINCT FROM computed_sig THEN RAISE EXCEPTION 'Invalid signature'; END IF;
-                END IF;
+                computed_sig := encode(hmac(ver || ':' || kid || ':' || ts_str || ':' || nonce_val || ':' || tenant_id_val, secret, 'sha256'), 'hex');
+                IF sig IS DISTINCT FROM computed_sig THEN RAISE EXCEPTION 'Invalid signature'; END IF;
 
                 BEGIN
                     INSERT INTO flexi.flexi_nonce (nonce, created_at) VALUES (nonce_val, to_timestamp(ts::double precision));
@@ -185,7 +180,7 @@ impl MigrationTrait for Migration {
                 PERFORM set_config('flexi.current_tenant', tenant_id_val, true);
                 PERFORM set_config('flexi.ctx_sig', encode(hmac(tenant_id_val, secret, 'sha256'), 'hex'), true);
             END;
-            $$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = flexi, pg_catalog, pg_temp;
+            $$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = flexi, public, pg_catalog, pg_temp;
             "#
         ).await?;
 

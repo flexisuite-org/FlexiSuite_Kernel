@@ -14,7 +14,7 @@ use flate2::write::GzEncoder;
 use flate2::Compression;
 use kernel_core::auth::{KeyManager, TenantContext, TenantId};
 use kernel_data::entities::{audit_log, entity_history};
-use kernel_data::{init_hmac_secret, with_tenant_tx, TenantRepository};
+use kernel_data::{with_tenant_tx, TenantRepository};
 use sea_orm::{Database, DatabaseConnection};
 use sha2::{Digest, Sha256};
 use tokio::time;
@@ -91,7 +91,6 @@ async fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
 
     let config = load_config()?;
-    init_hmac_secret().map_err(|e| anyhow!("failed to initialize HMAC secret: {e}"))?;
 
     let db: DatabaseConnection = Database::connect(&config.database_url)
         .await
@@ -249,7 +248,7 @@ async fn run_archive_cycle(db: &DatabaseConnection, s3: &Client, config: &AppCon
         let bucket = config.s3_bucket.clone();
         let lock_config = config.object_lock.clone();
         let batch_size = config.batch_size;
-        let token = match KeyManager::generate_tenant_token(db, tenant_id.as_str()).await {
+        let fetch_token = match KeyManager::generate_tenant_token(db, tenant_id.as_str()).await {
             Ok(token) => token,
             Err(e) => {
                 error!("Failed to generate token for tenant {}: {}", tenant_id, e);
@@ -257,7 +256,7 @@ async fn run_archive_cycle(db: &DatabaseConnection, s3: &Client, config: &AppCon
             }
         };
 
-        let fetched = with_tenant_tx(db, &ctx, &token, |repo| {
+        let fetched = with_tenant_tx(db, &ctx, &fetch_token, |repo| {
             Box::pin(async move {
                 let histories = repo
                     .find_unarchived_entity_histories(batch_size)
@@ -328,7 +327,18 @@ async fn run_archive_cycle(db: &DatabaseConnection, s3: &Client, config: &AppCon
             continue;
         }
 
-        let mark_result = with_tenant_tx(db, &ctx, &token, move |repo| {
+        let mark_token = match KeyManager::generate_tenant_token(db, tenant_id.as_str()).await {
+            Ok(token) => token,
+            Err(e) => {
+                error!(
+                    "Failed to generate mark token for tenant {}: {}",
+                    tenant_id, e
+                );
+                continue;
+            }
+        };
+
+        let mark_result = with_tenant_tx(db, &ctx, &mark_token, move |repo| {
             Box::pin(async move {
                 if !mark_plan.entity_history_ids.is_empty() {
                     repo.mark_entity_histories_archived(mark_plan.entity_history_ids)

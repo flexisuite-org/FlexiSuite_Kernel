@@ -44,7 +44,6 @@ async fn test_auth_failures() {
     let token = "v2:unknown-kid:1234567890:nonce:tenant-x:sig";
     let res = with_tenant_tx(&db, &ctx, token, |_| Box::pin(async { Ok(()) })).await;
     assert!(res.is_err(), "Should fail with unknown kid");
-    // assert!(res.unwrap_err().to_string().contains("Invalid token format"), "Or format error if parsing fails");
 
     // 3. Test: Valid format, Invalid Signature
     // Generate a valid-ish token
@@ -64,30 +63,6 @@ async fn test_auth_failures() {
     drop(db);
     let db = Database::connect(&connection_string).await.expect("Reconnect");
 
-    // We need to generate token BEFORE resetting secret? OR can we generate it still?
-    // KeyManager::generate_tenant_token uses HMAC algorithm, which usually needs a key.
-    // If the key is stored in DB `flexi_keys`, generate_tenant_token fetches it?
-    // Wait, internal secret is used by `authorize_tenant` DB function to verify implementation integrity?
-    // As checking line 81: internal secret is needed.
-    
-    // Actually, `generate_tenant_token` needs to read keys.
-    // Let's assume keys are available.
-    
-    // But if we reset `flexi.hmac_secret`, does it affect token generation or verification?
-    // verification is done by DB function using that secret to verify signature?
-    // Or `flexi.hmac_secret` is used to HMAC the key itself?
-    
-    // Let's just trust HEAD test logic for now.
-    // But construct token first just in case.
-    let token = "v2:kid:ts:nonce:tenant-x:sig"; // Dummy, since authorize should fail before signature check if secret is missing?
-    
-    // Actually in HEAD code:
-    // let token = KeyManager::generate_tenant_token(&db, "tenant-x").await.unwrap(); 
-    // This is called AFTER reset?
-    // If generate_tenant_token depends on flexi.hmac_secret, it might fail.
-    // But line 78 in HEAD code calls it.
-    
-    // I will keep HEAD code as is.
     let token = KeyManager::generate_tenant_token(&db, "tenant-x").await.unwrap();
 
     let res = with_tenant_tx(&db, &ctx, &token, |_| Box::pin(async { Ok(()) })).await;
