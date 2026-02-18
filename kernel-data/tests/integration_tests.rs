@@ -47,18 +47,17 @@ async fn setup_test_db() -> (DatabaseConnection, PostgresNode) {
     migration::Migrator::up(&db, None)
         .await
         .expect("Failed to run migrations");
+    drop(db);
+    let db = Database::connect(&connection_string)
+        .await
+        .expect("Failed to reconnect to DB");
     db.execute(Statement::from_sql_and_values(
         DbBackend::Postgres,
         "SELECT set_config('flexi.hmac_secret', $1, false)",
         [TEST_HMAC_SECRET.into()],
     ))
     .await
-    .expect("Failed to set flexi.hmac_secret for session");
-
-    drop(db);
-    let db = Database::connect(&connection_string)
-        .await
-        .expect("Failed to reconnect to DB");
+    .expect("Failed to set flexi.hmac_secret for reconnected session");
     (db, node)
 }
 
