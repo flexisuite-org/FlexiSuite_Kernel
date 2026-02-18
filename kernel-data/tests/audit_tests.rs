@@ -1,4 +1,6 @@
-use kernel_core::auth::{KeyManager, TenantContext, TenantId, UserId};
+use kernel_data::auth_context::{TenantContext, TenantId, UserId};
+mod common;
+use common::auth::TestAuth;
 use kernel_data::connection::{RawConnection, TenantScoped, with_tenant_tx};
 use kernel_data::entities::{audit_log, entity_history, entity_record};
 use kernel_data::repository::TenantRepository;
@@ -55,7 +57,7 @@ async fn test_audit_log_creation() {
         .expect("Reconnect failed");
 
     // Init Keys
-    KeyManager::rotate_keys(&db)
+    TestAuth::init_keys(&db)
         .await
         .expect("Failed to init keys");
 
@@ -67,7 +69,7 @@ async fn test_audit_log_creation() {
     // 1. Create Entity -> Should create history
     let entity_id = Uuid::now_v7().to_string();
     let entity_id_clone = entity_id.clone();
-    let token_create = KeyManager::generate_tenant_token(&db, &tenant_id)
+    let token_create = TestAuth::generate_tenant_token(&db, &tenant_id)
         .await
         .expect("Failed to gen token for create");
 
@@ -108,7 +110,7 @@ async fn test_audit_log_creation() {
 
     // 2. Update Entity -> Should create history
     let entity_id_clone = entity_id.clone();
-    let token_update = KeyManager::generate_tenant_token(&db, &tenant_id)
+    let token_update = TestAuth::generate_tenant_token(&db, &tenant_id)
         .await
         .expect("Failed to gen token for update");
     with_tenant_tx(
@@ -146,7 +148,7 @@ async fn test_audit_log_creation() {
     );
 
     // 3. Log Audit
-    let token_audit = KeyManager::generate_tenant_token(&db, &tenant_id)
+    let token_audit = TestAuth::generate_tenant_token(&db, &tenant_id)
         .await
         .expect("Failed to gen token for audit");
     with_tenant_tx(
@@ -184,7 +186,7 @@ async fn test_audit_log_creation() {
     let other_tenant_id = TenantId::new("audit-tenant-other").unwrap();
     let other_user_id = UserId::new("user-audit-other").unwrap();
     let other_ctx = TenantContext::new(other_tenant_id.clone(), Some(other_user_id.clone()));
-    let other_token = KeyManager::generate_tenant_token(&db, &other_tenant_id)
+    let other_token = TestAuth::generate_tenant_token(&db, &other_tenant_id)
         .await
         .expect("Failed to gen token other");
 

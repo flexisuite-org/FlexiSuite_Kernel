@@ -2578,7 +2578,6 @@ dependencies = [
  "futures",
  "hex",
  "json-patch",
- "kernel-core",
  "kernel-data",
  "migration",
  "ring",

@@ -1,4 +1,6 @@
-use kernel_core::auth::{KeyManager, TenantContext, TenantId, UserId};
+use kernel_data::auth_context::{TenantContext, TenantId, UserId};
+mod common;
+use common::auth::TestAuth;
 use kernel_data::DataError;
 use kernel_data::connection::{RawConnection, TenantScoped, with_tenant_tx};
 use kernel_data::entities::entity_record;
@@ -48,8 +50,8 @@ async fn test_tenant_isolation_rls() {
         .await
         .expect("Failed to reconnect to DB");
 
-    // 5. Initialize Keys (HMAC & PASETO)
-    KeyManager::rotate_keys(&db)
+    // 5. Initialize Keys (HMAC)
+    TestAuth::init_keys(&db)
         .await
         .expect("Failed to initialize keys");
 
@@ -67,7 +69,7 @@ async fn test_tenant_isolation_rls() {
 
     // A. Insert as Tenant A
     let record_id_a = record_id.clone();
-    let token_a_1 = KeyManager::generate_tenant_token(&db, tenant_a.tenant_id())
+    let token_a_1 = TestAuth::generate_tenant_token(&db, tenant_a.tenant_id())
         .await
         .expect("gen token A1");
     with_tenant_tx(&db, &tenant_a, &token_a_1, |repo| {
@@ -78,7 +80,7 @@ async fn test_tenant_isolation_rls() {
 
     // B. Read as Tenant A (Should succeed)
     let record_id_clone = record_id.clone();
-    let token_a_2 = KeyManager::generate_tenant_token(&db, tenant_a.tenant_id())
+    let token_a_2 = TestAuth::generate_tenant_token(&db, tenant_a.tenant_id())
         .await
         .expect("gen token A2");
     with_tenant_tx(&db, &tenant_a, &token_a_2, |repo| {
@@ -93,7 +95,7 @@ async fn test_tenant_isolation_rls() {
 
     // C. Read as Tenant B (Should fail/empty)
     let record_id_clone = record_id.clone();
-    let token_b_1 = KeyManager::generate_tenant_token(&db, tenant_b.tenant_id())
+    let token_b_1 = TestAuth::generate_tenant_token(&db, tenant_b.tenant_id())
         .await
         .expect("gen token B1");
     with_tenant_tx(&db, &tenant_b, &token_b_1, |repo| {
@@ -110,7 +112,7 @@ async fn test_tenant_isolation_rls() {
     // Note: ID reuse across tenants?
     // entity_record PK is (id, tenant_id). So same ID is allowed for different tenant.
     let record_id_b = record_id.clone();
-    let token_b_2 = KeyManager::generate_tenant_token(&db, tenant_b.tenant_id())
+    let token_b_2 = TestAuth::generate_tenant_token(&db, tenant_b.tenant_id())
         .await
         .expect("gen token B2");
     with_tenant_tx(&db, &tenant_b, &token_b_2, |repo| {
