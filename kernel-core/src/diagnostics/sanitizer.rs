@@ -1,5 +1,6 @@
 use regex::{Captures, Regex};
 use serde_json::Value;
+use std::collections::HashMap;
 use std::sync::LazyLock;
 use url::Url;
 
@@ -115,25 +116,19 @@ impl PIISanitizer {
                     .map(|(k, v)| (k.clone(), v.clone()))
                     .collect();
                 obj.clear();
+                let mut key_counters: HashMap<String, usize> = HashMap::new();
 
                 for (key, mut val) in entries {
                     let sanitized_key = Self::sanitize_text(&key);
                     Self::sanitize_value_inner(&mut val, remaining_depth - 1);
-
-                    // Handle key collisions by appending a suffix
-                    if obj.contains_key(&sanitized_key) {
-                        let mut idx = 1;
-                        loop {
-                            let candidate = format!("{}_{}", sanitized_key, idx);
-                            if !obj.contains_key(&candidate) {
-                                obj.insert(candidate, val);
-                                break;
-                            }
-                            idx += 1;
-                        }
+                    let key_index = key_counters.entry(sanitized_key.clone()).or_insert(0);
+                    let output_key = if *key_index == 0 {
+                        sanitized_key
                     } else {
-                        obj.insert(sanitized_key, val);
-                    }
+                        format!("{}_{}", sanitized_key, *key_index)
+                    };
+                    *key_index += 1;
+                    obj.insert(output_key, val);
                 }
             }
             _ => {}

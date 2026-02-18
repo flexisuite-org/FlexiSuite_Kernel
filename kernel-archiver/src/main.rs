@@ -12,9 +12,9 @@ use aws_smithy_types::DateTime as SmithyDateTime;
 use base64::Engine as _;
 use flate2::write::GzEncoder;
 use flate2::Compression;
-use kernel_core::auth::{TenantContext, TenantId};
+use kernel_core::auth::{KeyManager, TenantContext, TenantId};
 use kernel_data::entities::{audit_log, entity_history};
-use kernel_data::{init_hmac_secret, with_tenant_tx, TenantRepository};
+use kernel_data::{with_tenant_tx, TenantRepository};
 use sea_orm::{Database, DatabaseConnection};
 use sha2::{Digest, Sha256};
 use tokio::time;
@@ -91,12 +91,19 @@ async fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
 
     let config = load_config()?;
-    init_hmac_secret().map_err(|e| anyhow!("failed to initialize HMAC secret: {e}"))?;
 
-    let db: DatabaseConnection = Database::connect(&config.database_url)
-        .await
-        .context("failed to connect database")?;
+    let db = std::sync::Arc::new(
+        Database::connect(&config.database_url)
+            .await
+            .context("failed to connect database")?,
+    );
     info!("Connected to database");
+
+    use kernel_core::auth::SystemTenantContext;
+    let init_ctx = TenantContext::from(SystemTenantContext).with_db(db.clone());
+    KeyManager::rotate_keys(&init_ctx)
+        .await
+        .context("failed to initialize key rotation state at startup")?;
 
     let region_provider = RegionProviderChain::first_try(Region::new(config.region_name.clone()));
     let aws_config = aws_config::defaults(aws_config::BehaviorVersion::latest())
@@ -246,14 +253,27 @@ fn parse_object_lock_config() -> Result<Option<ObjectLockConfig>> {
     }))
 }
 
-async fn run_archive_cycle(db: &DatabaseConnection, s3: &Client, config: &AppConfig) -> Result<()> {
+async fn run_archive_cycle(
+    db: &std::sync::Arc<DatabaseConnection>,
+    s3: &Client,
+    config: &AppConfig,
+) -> Result<()> {
+    use kernel_core::auth::SystemTenantContext;
+    let system_ctx = TenantContext::from(SystemTenantContext).with_db(db.clone());
+    KeyManager::rotate_keys(&system_ctx)
+        .await
+        .context("failed to ensure active keys before archive cycle")?;
+
     for tenant_id in &config.tenant_ids {
         let ctx = TenantContext::new(tenant_id.clone(), None);
         let bucket = config.s3_bucket.clone();
         let lock_config = config.object_lock.clone();
         let batch_size = config.batch_size;
+        let Some(fetch_token) = generate_token_with_recovery(db, tenant_id, "fetch").await else {
+            continue;
+        };
 
-        let fetched = with_tenant_tx(db, &ctx, |repo| {
+        let fetched = with_tenant_tx(db, &ctx, &fetch_token, |repo| {
             Box::pin(async move {
                 let histories = repo.find_unarchived_entity_histories(batch_size).await?;
                 let logs = repo.find_unarchived_audit_logs(batch_size).await?;
@@ -325,7 +345,11 @@ async fn run_archive_cycle(db: &DatabaseConnection, s3: &Client, config: &AppCon
             continue;
         }
 
-        let mark_result = with_tenant_tx(db, &ctx, move |repo| {
+        let Some(mark_token) = generate_token_with_recovery(db, tenant_id, "mark").await else {
+            continue;
+        };
+
+        let mark_result = with_tenant_tx(db, &ctx, &mark_token, move |repo| {
             Box::pin(async move {
                 if !mark_plan.entity_history_ids.is_empty() {
                     repo.mark_entity_histories_archived(mark_plan.entity_history_ids)
@@ -349,6 +373,45 @@ async fn run_archive_cycle(db: &DatabaseConnection, s3: &Client, config: &AppCon
     }
 
     Ok(())
+}
+
+async fn generate_token_with_recovery(
+    db: &std::sync::Arc<DatabaseConnection>,
+    tenant_id: &TenantId,
+    purpose: &str,
+) -> Option<String> {
+    use kernel_core::auth::SystemTenantContext;
+    let system_ctx = TenantContext::from(SystemTenantContext).with_db(db.clone());
+
+    match KeyManager::generate_tenant_token(&system_ctx, tenant_id).await {
+        Ok(token) => Some(token),
+        Err(kernel_core::auth::KeyManagerError::NoActiveKey(_)) => {
+            if let Err(rotate_err) = KeyManager::rotate_keys(&system_ctx).await {
+                error!(
+                    "Failed to recover missing active {} key for tenant {}: {}",
+                    purpose, tenant_id, rotate_err
+                );
+                return None;
+            }
+            match KeyManager::generate_tenant_token(&system_ctx, tenant_id).await {
+                Ok(token) => Some(token),
+                Err(e) => {
+                    error!(
+                        "Failed to generate {} token for tenant {} after recovery: {}",
+                        purpose, tenant_id, e
+                    );
+                    None
+                }
+            }
+        }
+        Err(e) => {
+            error!(
+                "Failed to generate {} token for tenant {}: {}",
+                purpose, tenant_id, e
+            );
+            None
+        }
+    }
 }
 
 async fn archive_items<T>(
