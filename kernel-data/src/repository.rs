@@ -27,11 +27,13 @@ pub trait TenantRepository: private::Sealed + Send + Sync {
         &self,
         active_model: entity_record::ActiveModel,
     ) -> Result<entity_record::Model, DataError>;
+    async fn get_entity(&self, id: &str) -> Result<Option<entity_record::Model>, DataError>;
     async fn update_entity(
         &self,
+        id: &str,
         active_model: entity_record::ActiveModel,
     ) -> Result<entity_record::Model, DataError>;
-    async fn get_entity(&self, id: &str) -> Result<Option<entity_record::Model>, DataError>;
+    async fn delete_entity(&self, id: &str) -> Result<(), DataError>;
 
     // Diagnostic methods
     async fn create_diagnostic_report(
@@ -148,32 +150,63 @@ impl TenantRepository for TenantScoped<RawConnection> {
         Ok(result)
     }
 
+    async fn get_entity(&self, id: &str) -> Result<Option<entity_record::Model>, DataError> {
+        // Since we have a composite primary key (id, tenant_id), we must provide both.
+        // RLS will also filter this, but SeaORM requires both for the PK lookup.
+        let result =
+            EntityRecord::find_by_id((id.to_string(), self.tenant_id.to_string()))
+                .one(&self.inner.txn)
+                .await
+                .map_err(DataError::DbError)?;
+        Ok(result)
+    }
+
     async fn update_entity(
         &self,
+        id: &str,
         mut active_model: entity_record::ActiveModel,
     ) -> Result<entity_record::Model, DataError> {
         // Enforce tenant scoping
         active_model.tenant_id = ActiveValue::Unchanged(self.tenant_id.to_string());
 
-        let entity_id = required_active_value(&active_model.id, "Entity ID")?;
-
-        let existing = EntityRecord::find_by_id((entity_id.clone(), self.tenant_id.to_string()))
-            .one(&self.inner.txn)
-            .await
-            .map_err(DataError::DbError)?
-            .ok_or_else(|| DataError::EntityNotFound(format!("Entity {} not found", entity_id)))?;
-
-        match active_model.version.clone() {
-            ActiveValue::Set(v) | ActiveValue::Unchanged(v) if v != existing.version => {
+        match active_model.id.clone() {
+            ActiveValue::Set(model_id) | ActiveValue::Unchanged(model_id) if model_id != id => {
                 return Err(DataError::ValidationError(format!(
-                    "version conflict: expected {}, got {}",
-                    existing.version, v
+                    "entity id mismatch: path={id}, payload={model_id}"
                 )));
             }
             _ => {}
         }
+        active_model.id = ActiveValue::Unchanged(id.to_string());
 
-        let next_version = existing.version + 1;
+        let existing = EntityRecord::find_by_id((id.to_string(), self.tenant_id.to_string()))
+            .lock_exclusive()
+            .one(&self.inner.txn)
+            .await
+            .map_err(DataError::DbError)?
+            .ok_or_else(|| DataError::ValidationError("Entity not found".into()))?;
+
+        match active_model.version.clone() {
+            ActiveValue::Set(v) | ActiveValue::Unchanged(v) => {
+                if v != existing.version {
+                    return Err(DataError::ValidationError(format!(
+                        "version conflict: expected {}, got {}",
+                        existing.version, v
+                    )));
+                }
+            }
+            ActiveValue::NotSet => {
+                return Err(DataError::ValidationError(
+                    "version is required for update".into(),
+                ));
+            }
+        }
+
+        let next_version = existing.version.checked_add(1).ok_or_else(|| {
+            DataError::ValidationError(
+                "version overflow: cannot increment entity version".into(),
+            )
+        })?;
         active_model.version = ActiveValue::Set(next_version);
         active_model.updated_at = ActiveValue::Set(chrono::Utc::now().into());
 
@@ -194,7 +227,7 @@ impl TenantRepository for TenantScoped<RawConnection> {
         let history = entity_history::ActiveModel {
             id: ActiveValue::Set(Uuid::now_v7().to_string()),
             tenant_id: ActiveValue::Set(self.tenant_id.to_string()),
-            entity_id: ActiveValue::Set(entity_id),
+            entity_id: ActiveValue::Set(id.to_string()),
             entity_type: ActiveValue::Set(result.entity_type.clone()),
             change_type: ActiveValue::Set("UPDATE".to_string()),
             version: ActiveValue::Set(next_version),
@@ -211,21 +244,59 @@ impl TenantRepository for TenantScoped<RawConnection> {
         Ok(result)
     }
 
-    async fn get_entity(&self, id: &str) -> Result<Option<entity_record::Model>, DataError> {
-        // Since we have a composite primary key (id, tenant_id), we must provide both.
-        // RLS will also filter this, but SeaORM requires both for the PK lookup.
-        let result =
-            EntityRecord::find_by_id((id.to_string(), self.tenant_id.as_str().to_string()))
-                .one(&self.inner.txn)
+    async fn delete_entity(&self, id: &str) -> Result<(), DataError> {
+        let user_id_str = history_actor_id(self.tenant_id.as_str(), self.user_id.as_ref());
+
+        let existing = EntityRecord::find_by_id((id.to_string(), self.tenant_id.to_string()))
+            .lock_exclusive()
+            .one(&self.inner.txn)
+            .await
+            .map_err(DataError::DbError)?
+            .ok_or_else(|| DataError::ValidationError("Entity not found".into()))?;
+        let deleted_snapshot = serde_json::to_value(&existing).map_err(|e| {
+            DataError::SerializationError(format!(
+                "failed to serialize deleted entity snapshot: {e}"
+            ))
+        })?;
+
+        // 1. Insert History
+        let history = entity_history::ActiveModel {
+            id: ActiveValue::Set(Uuid::now_v7().to_string()),
+            tenant_id: ActiveValue::Set(self.tenant_id.to_string()),
+            entity_id: ActiveValue::Set(id.to_string()),
+            entity_type: ActiveValue::Set(existing.entity_type.clone()),
+            change_type: ActiveValue::Set("DELETE".to_string()),
+            version: ActiveValue::Set(existing.version),
+            // Store the deleted entity snapshot for auditability.
+            diff: ActiveValue::Set(deleted_snapshot),
+            created_at: ActiveValue::Set(chrono::Utc::now().into()),
+            created_by: ActiveValue::Set(user_id_str),
+            archived_at: ActiveValue::NotSet,
+        };
+        history
+            .insert(&self.inner.txn)
+            .await
+            .map_err(DataError::DbError)?;
+
+        // 2. Delete Entity
+        let delete_result =
+            entity_record::Entity::delete_by_id((id.to_string(), self.tenant_id.to_string()))
+                .exec(&self.inner.txn)
                 .await
                 .map_err(DataError::DbError)?;
-        Ok(result)
+
+        if delete_result.rows_affected == 0 {
+            // Defensive guard in case of a concurrent delete.
+            return Err(DataError::ValidationError("Entity not found".into()));
+        }
+        Ok(())
     }
 
     async fn create_diagnostic_report(
         &self,
         mut active_model: diagnostic_report::ActiveModel,
     ) -> Result<diagnostic_report::Model, DataError> {
+        required_active_value(&active_model.trace_id, "DiagnosticReport ID")?;
         active_model.tenant_id = sea_orm::ActiveValue::Set(self.tenant_id.to_string());
         let result = active_model
             .insert(&self.inner.txn)

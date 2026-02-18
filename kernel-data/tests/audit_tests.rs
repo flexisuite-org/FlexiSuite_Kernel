@@ -111,24 +111,21 @@ async fn test_audit_log_creation() {
     let token_update = TestAuth::generate_tenant_token(&db, &tenant_id)
         .await
         .expect("Failed to gen token for update");
-    with_tenant_tx(
-        &db,
-        &ctx,
-        &token_update,
-        |repo: &TenantScoped<RawConnection>| {
-            Box::pin(async move {
-                let active_model = entity_record::ActiveModel {
-                    id: ActiveValue::Set(entity_id_clone),
-                    content: ActiveValue::Set(serde_json::json!({"val": 2})),
-                    ..Default::default()
-                };
-                repo.update_entity(active_model).await?;
-                Ok(())
-            })
-        },
-    )
+    with_tenant_tx(&db, &ctx, &token_update, |repo| {
+        Box::pin(async move {
+            let active_model = entity_record::ActiveModel {
+                id: ActiveValue::Set(entity_id_clone.clone()),
+                content: ActiveValue::Set(serde_json::json!({"val": 2})),
+                version: ActiveValue::Set(1),
+                ..Default::default()
+            };
+            repo.update_entity(&entity_id_clone, active_model).await?;
+            Ok(())
+        })
+    })
     .await
     .expect("Update entity failed");
+
 
     // Verification-only direct query. Never use unscoped direct queries in production code.
     let histories = entity_history::Entity::find()

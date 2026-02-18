@@ -1058,6 +1058,7 @@ impl ActionStore for RedisActionStore {
     async fn cleanup(&self) {}
 }
 
+
 #[async_trait]
 pub trait QuotaStore: Send + Sync {
     async fn check_and_update(
@@ -1277,16 +1278,17 @@ impl QuotaStore for RedisQuotaStore {
                 if allowed == 1 {
                     Ok(())
                 } else {
+                    let retry_after_s = val.ceil() as u64;
                     Err(QuotaViolation {
                         layer,
-                        retry_after_s: val.ceil() as u64,
+                        retry_after_s,
                     })
                 }
             }
             Err(e) => {
                 error!("Redis script error: {}", e);
                 Err(QuotaViolation {
-                    layer,
+                    layer: QuotaLayer::SystemHardLimit,
                     retry_after_s: 1,
                 })
             }
@@ -1327,14 +1329,23 @@ impl QuotaStore for RedisQuotaStore {
             Ok((1, _, _)) => Ok(()),
             Ok((0, idx, retry_after)) => {
                 let layer_idx = (idx.saturating_sub(1)) as usize;
-                let layer = checks
-                    .get(layer_idx)
-                    .map(|(layer, _, _, _, _)| *layer)
-                    .unwrap_or(QuotaLayer::SystemHardLimit);
-                Err(QuotaViolation {
-                    layer,
-                    retry_after_s: retry_after.ceil() as u64,
-                })
+                let retry_after_s = retry_after.ceil() as u64;
+                if let Some((layer, _, _, _, _)) = checks.get(layer_idx) {
+                    Err(QuotaViolation {
+                        layer: *layer,
+                        retry_after_s,
+                    })
+                } else {
+                    error!(
+                        "Lua script returned invalid index for failed quota layer: {} (checks={})",
+                        idx,
+                        checks.len()
+                    );
+                    Err(QuotaViolation {
+                        layer: QuotaLayer::SystemHardLimit,
+                        retry_after_s,
+                    })
+                }
             }
             Ok(other) => {
                 error!("Unexpected quota multi script response: {:?}", other);
@@ -1824,18 +1835,6 @@ fn build_replay_response(record: &IdempotencyRecord) -> Response {
     res
 }
 
-fn violation_to_response(v: &QuotaViolation) -> Response {
-    let mut res = violation_to_status(v).into_response();
-    for (name, val) in v.headers() {
-        res.headers_mut().insert(
-            HeaderName::from_bytes(name.as_bytes())
-                .unwrap_or(HeaderName::from_static("retry-after")),
-            val.parse()
-                .unwrap_or_else(|_| HeaderValue::from_static("1")),
-        );
-    }
-    res
-}
 
 pub async fn quota_middleware(req: Request<Body>, next: Next) -> Result<Response, Response> {
     let (parts, body) = req.into_parts();
@@ -1856,7 +1855,7 @@ pub async fn quota_middleware(req: Request<Body>, next: Next) -> Result<Response
         }
     };
 
-    #[cfg(debug_assertions)]
+    #[cfg(any(test, feature = "test-utils"))]
     {
         if parts.headers.contains_key("X-Mock-Quota-System") {
             let violation = QuotaViolation {
@@ -1912,9 +1911,46 @@ fn response_not_cacheable_for_replay(headers: &HeaderMap, max_size: usize) -> bo
         .is_some_and(|n| n > max_size)
 }
 
-fn violation_to_status(v: &QuotaViolation) -> StatusCode {
+pub fn violation_to_status(v: &QuotaViolation) -> StatusCode {
     match v.layer {
         QuotaLayer::SystemHardLimit => StatusCode::SERVICE_UNAVAILABLE,
-        _ => StatusCode::TOO_MANY_REQUESTS,
+        QuotaLayer::CircuitBreaker => StatusCode::SERVICE_UNAVAILABLE,
+        QuotaLayer::TenantBudget | QuotaLayer::ApiRateLimit => StatusCode::TOO_MANY_REQUESTS,
     }
+}
+
+pub fn violation_to_response(v: &QuotaViolation) -> Response {
+    let status = violation_to_status(v);
+    let message = match status {
+        StatusCode::TOO_MANY_REQUESTS => "Rate limit exceeded",
+        _ => "Quota limit exceeded",
+    };
+    let mut res = (status, message).into_response();
+
+    // Inject headers from violation
+    let headers = res.headers_mut();
+    for (name, value) in v.headers() {
+        if let Ok(hname) = HeaderName::from_bytes(name.as_bytes()) {
+            if let Ok(hval) = HeaderValue::from_str(&value) {
+                headers.insert(hname, hval);
+            }
+        }
+    }
+
+    #[cfg(any(test, feature = "test-utils"))]
+    {
+        // For tests, we might want to inspect specific violation details via headers
+        let violation_type = match v.layer {
+            QuotaLayer::SystemHardLimit => "system_hard_limit",
+            QuotaLayer::CircuitBreaker => "circuit_breaker",
+            QuotaLayer::TenantBudget => "tenant_budget",
+            QuotaLayer::ApiRateLimit => "api_rate_limit",
+        };
+        headers.insert(
+            "X-Violation-Type",
+            HeaderValue::from_str(violation_type).unwrap_or(HeaderValue::from_static("unknown")),
+        );
+    }
+
+    res
 }
