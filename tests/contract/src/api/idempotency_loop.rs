@@ -84,6 +84,17 @@ async fn test_idempotency_loop_limit() {
         }
     }
 
+    assert_eq!(
+        _other_count, 0,
+        "Unexpected status responses detected: {}",
+        _other_count
+    );
+    assert_eq!(
+        service_unavailable_count + _internal_error_count + _conflict_count,
+        num_requests,
+        "Missing responses from idempotency loop"
+    );
+
     // We expect some requests to process (return 500) and some to fail acquiring (return 503).
     assert!(
         service_unavailable_count > 0,
