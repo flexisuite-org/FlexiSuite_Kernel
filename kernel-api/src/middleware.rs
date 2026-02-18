@@ -199,6 +199,7 @@ pub struct IdempotencyLease {
 pub enum IdempotencyAcquireResult {
     Acquired(IdempotencyLease),
     Existing(IdempotencyEntry),
+    Retry,
 }
 
 #[derive(Clone, Debug)]
@@ -563,7 +564,11 @@ impl RedisIdempotencyStore {
                     should_notify = true;
                 }
             }
-            Ok(None) => {}
+            Ok(None) => {
+                // The in-flight key may have been released between GET and waiter registration.
+                // Wake waiters so they can retry acquisition immediately instead of timing out.
+                should_notify = true;
+            }
             Err(e) => {
                 warn!("Redis get error while registering waiter: {}", e);
             }
@@ -689,7 +694,9 @@ impl IdempotencyStore for RedisIdempotencyStore {
                 if let Some(entry) = existing {
                     Ok(IdempotencyAcquireResult::Existing(entry))
                 } else {
-                    Err(IdempotencyStoreError::BackendUnavailable)
+                    // Lost race: lock holder released/completed between NX failure and GET.
+                    // Let caller retry instead of returning a false backend-unavailable error.
+                    Ok(IdempotencyAcquireResult::Retry)
                 }
             }
             Err(e) => {
@@ -1581,6 +1588,7 @@ pub async fn idempotency_middleware(
             .await
         {
             Ok(IdempotencyAcquireResult::Acquired(lease)) => break lease,
+            Ok(IdempotencyAcquireResult::Retry) => continue,
             Ok(IdempotencyAcquireResult::Existing(entry)) => match entry {
                 IdempotencyEntry::Completed(record) => {
                     if body_hash != record.body_hash {
