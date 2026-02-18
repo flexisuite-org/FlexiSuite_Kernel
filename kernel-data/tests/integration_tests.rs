@@ -1,3 +1,15 @@
+//! Integration tests for tenant isolation and authorization.
+//!
+//! # TenantContext Exception Notice
+//!
+//! The setup helpers in this module (role creation, `ALTER ROLE`, and
+//! `migration::Migrator::up`) intentionally bypass `TenantContext` and call
+//! `execute_unprepared` / `query_all` directly on the raw `DatabaseConnection`.
+//! This is an **explicit, test-only exception** to the project-wide rule that
+//! all DB access must go through `TenantContext`.  These operations are
+//! administrative bootstrap steps that have no tenant scope by nature (they run
+//! as the superuser before any tenant exists).  Production code MUST NOT follow
+//! this pattern.
 use kernel_data::auth_context::{TenantContext, TenantId, UserId};
 mod common;
 use common::auth::TestAuth;

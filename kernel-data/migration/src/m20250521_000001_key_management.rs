@@ -156,19 +156,18 @@ impl MigrationTrait for Migration {
     async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
         let db = manager.get_connection();
 
-        // Revert authorize_tenant to original version (using GUC only)
-        // Note: Ideally we should restore the exact previous version, but for simplicity here we just drop the table.
-        // If we drop the table, the function will fail if it references it.
-        // So we should revert the function first.
-
-        // Re-create original authorize_tenant
+        // Restore authorize_tenant to the exact original implementation from
+        // m20240216_000001_init_rls.rs so that rollback behaviour is fully
+        // compatible with the previous migration contract.  All guards, error
+        // messages, control flow, nonce handling, HMAC computations, timestamp
+        // checks, and set_config calls match the original verbatim.
         db.execute_unprepared(
             r#"
             CREATE OR REPLACE FUNCTION flexi.authorize_tenant(token_val text) RETURNS void AS $$
             DECLARE
                 parts text[];
                 ver text;
-                kid text;
+                kid_val text;
                 ts_str text;
                 nonce_val text;
                 tenant_id_val text;
@@ -178,31 +177,65 @@ impl MigrationTrait for Migration {
                 now_ts bigint;
                 secret text;
             BEGIN
-                -- Original Logic (Simplified for rollback)
-                IF token_val IS NULL OR token_val = '' THEN RAISE EXCEPTION 'Missing token'; END IF;
+                -- 1. Input Validation
+                IF token_val IS NULL OR token_val = '' THEN
+                    RAISE EXCEPTION 'Missing or empty tenant token';
+                END IF;
+
+                -- 2. Parse Token (v2:kid:ts:nonce:tenant_id:sig)
                 parts := string_to_array(token_val, ':');
-                IF array_length(parts, 1) != 6 THEN RAISE EXCEPTION 'Invalid token'; END IF;
-                ver := parts[1]; kid := parts[2]; ts_str := parts[3]; nonce_val := parts[4]; tenant_id_val := parts[5]; sig := parts[6];
+                IF array_length(parts, 1) != 6 THEN
+                    RAISE EXCEPTION 'Invalid token format';
+                END IF;
+
+                ver := parts[1];
+                kid_val := parts[2];
+                ts_str := parts[3];
+                nonce_val := parts[4];
+                tenant_id_val := parts[5];
+                sig := parts[6];
 
                 IF ver != 'v2' THEN
                     RAISE EXCEPTION 'Unsupported token version: %', ver;
                 END IF;
 
+                -- 3. Validate Timestamp (±30s)
                 ts := ts_str::bigint;
                 now_ts := extract(epoch from now())::bigint;
-                IF ts < (now_ts - 30) OR ts > (now_ts + 30) THEN RAISE EXCEPTION 'Expired'; END IF;
+                IF ts < (now_ts - 30) OR ts > (now_ts + 30) THEN
+                    RAISE EXCEPTION 'Token timestamp expired or future (skew > 30s)';
+                END IF;
 
+                -- 4. Verify Signature (HMAC-SHA256)
                 secret := current_setting('flexi.hmac_secret', true);
-                IF secret IS NULL OR secret = '' THEN RAISE EXCEPTION 'Secret not set'; END IF;
+                IF secret IS NULL OR secret = '' THEN
+                    RAISE EXCEPTION 'HMAC secret not set';
+                END IF;
 
-                computed_sig := encode(hmac(ver || ':' || kid || ':' || ts_str || ':' || nonce_val || ':' || tenant_id_val, secret, 'sha256'), 'hex');
-                IF sig IS DISTINCT FROM computed_sig THEN RAISE EXCEPTION 'Invalid signature'; END IF;
+                computed_sig := encode(
+                    hmac(ver || ':' || kid_val || ':' || ts_str || ':' || nonce_val || ':' || tenant_id_val, secret, 'sha256'),
+                    'hex'
+                );
+                IF sig IS DISTINCT FROM computed_sig THEN
+                    RAISE EXCEPTION 'Invalid signature';
+                END IF;
 
+                -- 5. Check Nonce (Consumption)
+                -- The trigger 'nonce_uniqueness_trigger' ensures global uniqueness of 'nonce'
+                -- even if 'created_at' (partition key) is different.
                 BEGIN
-                    INSERT INTO flexi.flexi_nonce (nonce, created_at) VALUES (nonce_val, to_timestamp(ts::double precision));
-                EXCEPTION WHEN unique_violation THEN RAISE EXCEPTION 'Nonce used'; END;
+                    INSERT INTO flexi.flexi_nonce (nonce, created_at) 
+                    VALUES (nonce_val, to_timestamp(ts::double precision));
+                EXCEPTION WHEN unique_violation THEN
+                    RAISE EXCEPTION 'Nonce already used';
+                END;
 
+                -- 6. Set Context
                 PERFORM set_config('flexi.current_tenant', tenant_id_val, true);
+
+                -- 7. Set Context Integrity Signature (Anti-Tampering)
+                -- We sign the tenant_id with the internal secret so authorized_tenant_id() can verify
+                -- that the context was set by this authorized function and not by a raw SET command.
                 PERFORM set_config('flexi.ctx_sig', encode(hmac(tenant_id_val, secret, 'sha256'), 'hex'), true);
             END;
             $$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = flexi, pg_catalog, pg_temp;

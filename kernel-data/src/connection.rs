@@ -76,7 +76,7 @@ where
     let txn = pool.begin().await.map_err(DataError::DbError)?;
 
     // 1. Authorize
-    if let Err(e) = txn
+    if let Err(_e) = txn
         .execute(Statement::from_sql_and_values(
             DbBackend::Postgres,
             "SELECT flexi.authorize_tenant($1)",
@@ -84,11 +84,15 @@ where
         ))
         .await
     {
-        warn!("Tenant authorization failed via DB: {}", e);
+        // Log a sanitized message only; do not interpolate the raw DB error
+        // to avoid leaking token KID or other sensitive fields into log sinks.
+        warn!("Tenant authorization failed");
         if let Err(rollback_err) = txn.rollback().await {
             error!("rollback failed after authorization failure: {rollback_err}");
         }
-        return Err(DataError::TenantAuthorizationFailed(e.to_string()));
+        return Err(DataError::TenantAuthorizationFailed(
+            "tenant authorization failed".to_string(),
+        ));
     }
 
     let token_tenant = if let Some(tid) = parse_tenant_from_token(token) {
@@ -156,20 +160,23 @@ fn parse_tenant_from_token(token: &str) -> Option<&str> {
     Some(tenant_id)
 }
 
-// Legacy exports for compatibility if needed (deprecated)
+// Legacy exports retained for binary compatibility during migration.
+// These shims now fail loudly so callers are forced to migrate.
 #[deprecated(
-    note = "Legacy migration shim; no-op - remove callers and use token-based authorization API"
+    note = "Legacy migration shim; removed - use token-based authorization API"
 )]
 pub fn init_hmac_secret() -> Result<(), String> {
-    // No-op or return error as it's no longer used
-    Ok(())
+    Err(String::from(
+        "init_hmac_secret is removed/deprecated: use token-based authorization API",
+    ))
 }
 
 #[cfg(feature = "test-utils")]
 #[deprecated(
-    note = "Legacy migration shim; no-op - remove callers and use test fixtures with KeyManager"
+    note = "Legacy migration shim; removed - use test fixtures with KeyManager"
 )]
 pub fn init_hmac_secret_for_test(_secret: impl Into<String>) -> Result<(), String> {
-    // No-op
-    Ok(())
+    Err(String::from(
+        "init_hmac_secret_for_test is removed/deprecated: use test fixtures with KeyManager",
+    ))
 }
