@@ -8,6 +8,7 @@ pub struct Model {
     pub tenant_id: String,
     #[sea_orm(primary_key, auto_increment = false)]
     pub event_id: Uuid,
+    pub event_type: String,
     pub order_mode: String,
     pub entity_id: Option<Uuid>,
     pub entity_seq: Option<i64>,

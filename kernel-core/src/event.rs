@@ -56,6 +56,7 @@ pub struct EventEnvelope {
     pub order_mode: OrderMode,
     pub payload: Value,
     pub created_at: DateTime<Utc>,
+    pub event_type: String, // Added for routing/filtering
 }
 
 #[derive(Debug, Clone)]
@@ -66,6 +67,7 @@ pub struct PublishAck {
 #[derive(Debug, Clone)]
 pub struct Delivery {
     pub delivery_id: String, // Redis ID
+    pub stream_key: String,  // The actual shard key this message came from
     pub event: EventEnvelope,
 }
 
@@ -74,43 +76,57 @@ pub trait ReliableProducer: Send + Sync {
     async fn publish(&self, stream: &str, event: EventEnvelope) -> Result<PublishAck, EventError>;
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RetryPolicy {
+    Immediate,
+    BackoffUntil(DateTime<Utc>),
+}
+
 #[async_trait]
 pub trait ReliableConsumer: Send + Sync {
+    /// Polls for messages from the given base stream.
+    ///
+    /// Implementations MUST internally fan-out across shards (e.g., `{stream}:0`..`{stream}:63`).
     async fn poll(
         &self,
-        stream: &str,
+        stream_base: &str,
         consumer_group: &str,
         consumer_name: &str,
         max_count: usize,
     ) -> Result<Vec<Delivery>, EventError>;
 
+    /// Acknowledges a message.
+    ///
+    /// `stream_key` should be the specific shard key from `Delivery::stream_key`.
     async fn ack(
         &self,
-        stream: &str,
+        stream_key: &str,
         consumer_group: &str,
         delivery_id: &str,
     ) -> Result<(), EventError>;
 
     /// Nack (negative acknowledgement) a message for retry.
     ///
-    /// The `retry_at` parameter defines when the message should be retried.
+    /// The `policy` parameter defines when the message should be retried.
     /// Implementations are expected to handle this based on the storage backend:
     /// - For Redis Streams: This might involve implementing a delay queue or
     ///   re-inserting the message with a delay, as Redis Streams doesn't natively
     ///   support visibility timeouts per message.
     /// - Callers can expect at-least-once delivery; however, ordering might
     ///   be impacted during retries depending on the implementation.
+    ///
+    /// `stream_key` should be the specific shard key from `Delivery::stream_key`.
     async fn nack(
         &self,
-        stream: &str,
+        stream_key: &str,
         consumer_group: &str,
         delivery_id: &str,
-        retry_at: DateTime<Utc>,
+        policy: RetryPolicy,
     ) -> Result<(), EventError>;
 
     async fn claim_pending(
         &self,
-        stream: &str,
+        stream_base: &str,
         consumer_group: &str,
         consumer_name: &str,
         min_idle_ms: u64,
