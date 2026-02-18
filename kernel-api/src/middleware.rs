@@ -191,10 +191,9 @@ impl IdempotencyStore for InMemoryIdempotencyStore {
                 IdempotencyEntry::InFlight { expires_at, .. } => *expires_at > now,
                 IdempotencyEntry::Completed(record) => record.expires_at > now,
             };
-            if !keep
-                && let IdempotencyEntry::InFlight { notify, .. } = entry {
-                    expired_inflight_notifies.push(notify.clone());
-                }
+            if !keep && let IdempotencyEntry::InFlight { notify, .. } = entry {
+                expired_inflight_notifies.push(notify.clone());
+            }
             keep
         });
         drop(lock);
@@ -611,76 +610,8 @@ pub struct MiddlewareState {
 }
 
 impl MiddlewareState {
-    pub fn new(config: MiddlewareConfig) -> Self {
-        // We need an async context to create ConnectionManager.
-        // MiddlewareState::new is usually called in `main` which is async.
-        // But `build_app` calls `MiddlewareState::new`.
-        // `build_app` is synchronous in `lib.rs`?
-        // No, `build_app` returns `(Router, JoinHandle)`.
-        // Let's check `lib.rs`.
-        // `pub fn build_app(config: MiddlewareConfig) -> (Router, JoinHandle<()>)`
-        // It calls `MiddlewareState::new(config)`.
-        // `MiddlewareState::new` is synchronous in definition: `pub fn new(config) -> Self`.
-        // So I cannot await inside `new`.
-        // But `redis::Client::get_connection_manager` is async.
-        // Solution: Create the manager outside `MiddlewareState::new` or make `new` async.
-        // `main.rs` calls `build_app`. `main` is async.
-        // I should change `build_app` and `MiddlewareState::new` to be async.
-        // Or, lazily initialize? No, Manager needs initialization.
-        // I'll make them async.
-
-        // However, I cannot change strict signatures if they are part of a larger contract.
-        // But `kernel-api` is the leaf here (main app).
-        // Let's modify signatures.
-
-        Self::new_sync_fallback(config)
-    }
-
-    // Temporary helper until I update `lib.rs` signature
-    fn new_sync_fallback(config: MiddlewareConfig) -> Self {
-        // Since I cannot await here, and I need ConnectionManager for Redis stores,
-        // I have to either:
-        // 1. Block (bad for async runtime).
-        // 2. Fallback to InMemory here, but provide an async `init` method.
-        // 3. Make `new` async and update callers.
-
-        // I will choose option 3. But for now, to make this file compile while I update `lib.rs` later,
-        // I will use `std::thread::spawn`? No, bad.
-        // I will just use InMemory in `new` (sync), and add `new_async`?
-
-        // Let's assume I will update `lib.rs` to call `build_app` which calls `MiddlewareState::new`.
-        // I will change `MiddlewareState::new` to `pub async fn new`.
-        // But I need to update `lib.rs` first? No, I am editing `middleware.rs`.
-        // If I change `new` to async here, `lib.rs` will break until I update it.
-        // I'll do it in this step or next?
-        // I'll update `middleware.rs` now to have `async fn new`, and then update `lib.rs`.
-
-        // Wait, `redis::Client::open` is sync. `get_connection_manager` is async.
-        // If I want to keep `new` sync, I could use `redis::Client` and create manager on first use?
-        // No, manager needs to be stored.
-
-        // So `new` MUST be async.
-
-        // But for this specific `write_file` operation, I cannot change `lib.rs` simultaneously.
-        // I will change `new` to `async` here. `lib.rs` compilation will fail until next step?
-        // I can use `plan_step_complete` after this file, then update `lib.rs`.
-        // But `cargo check` will fail.
-        // I can update `lib.rs` in the NEXT step.
-        // I will comment out the `Redis` logic in `new` temporarily or just make it async and accept breakage for a moment?
-        // Better: Introduce `new_from_manager` and let `main` create manager?
-        // Or just make `new` async.
-
-        // I'll make `new` async.
-
-        // Wait, if I make `new` async, I need to update `lib.rs` to await it.
-        // And `main.rs` to await `build_app`.
-
-        Self::with_store(
-            config,
-            Arc::new(InMemoryIdempotencyStore::new()),
-            Arc::new(InMemoryActionStore::new()),
-            Arc::new(InMemoryQuotaStore::new()),
-        )
+    pub async fn new(config: MiddlewareConfig) -> Self {
+        Self::new_with_redis(config).await
     }
 
     pub async fn new_with_redis(config: MiddlewareConfig) -> Self {
@@ -824,6 +755,11 @@ pub async fn idempotency_middleware(
         idempotency_key: idempotency_key.clone(),
     };
 
+    // Body hash MUST be derived from the actual request body.
+    // DoS Protection: Limit body size
+    // Note: This forces buffering. For streams > 10MB, Idempotency is not supported by this middleware.
+
+    // Check Store
     let state = parts
         .extensions
         .get::<MiddlewareState>()
@@ -833,7 +769,10 @@ pub async fn idempotency_middleware(
     let body_bytes = match to_bytes(body, state.config.max_body_size).await {
         Ok(b) => b,
         Err(_) => {
-            warn!("Request body exceeded max_body_size ({})", state.config.max_body_size);
+            warn!(
+                "Request body exceeded max_body_size ({})",
+                state.config.max_body_size
+            );
             return Err(StatusCode::BAD_REQUEST);
         }
     };
@@ -854,15 +793,25 @@ pub async fn idempotency_middleware(
                 "Exceeded max attempts waiting for in-flight idempotent request"
             );
             let mut res = StatusCode::SERVICE_UNAVAILABLE.into_response();
-            let retry_after = state.config.inflight_wait_timeout.as_secs().max(1).to_string();
+            let retry_after = state
+                .config
+                .inflight_wait_timeout
+                .as_secs()
+                .max(1)
+                .to_string();
             if let Ok(val) = HeaderValue::from_str(&retry_after) {
-                res.headers_mut().insert(axum::http::header::RETRY_AFTER, val);
+                res.headers_mut()
+                    .insert(axum::http::header::RETRY_AFTER, val);
             }
             return Ok(res);
         }
 
         match store
-            .try_acquire(scope_key.clone(), body_hash.clone(), state.config.idempotency_ttl)
+            .try_acquire(
+                scope_key.clone(),
+                body_hash.clone(),
+                state.config.idempotency_ttl,
+            )
             .await
         {
             None => {
@@ -893,7 +842,10 @@ pub async fn idempotency_middleware(
                             );
                             return Err(StatusCode::CONFLICT);
                         }
-                        
+
+                        // Wait for the in-flight request to complete
+                        // Use enable() pattern to avoid missed wakeups if notify_waiters() fires
+                        // between try_acquire returning and awaiting notified()
                         let notified = notify.notified();
                         tokio::pin!(notified);
                         notified.as_mut().enable();
@@ -908,9 +860,15 @@ pub async fn idempotency_middleware(
                                 "Timed out waiting for in-flight idempotent request"
                             );
                             let mut res = StatusCode::SERVICE_UNAVAILABLE.into_response();
-                            let retry_after = state.config.inflight_wait_timeout.as_secs().max(1).to_string();
+                            let retry_after = state
+                                .config
+                                .inflight_wait_timeout
+                                .as_secs()
+                                .max(1)
+                                .to_string();
                             if let Ok(val) = HeaderValue::from_str(&retry_after) {
-                                res.headers_mut().insert(axum::http::header::RETRY_AFTER, val);
+                                res.headers_mut()
+                                    .insert(axum::http::header::RETRY_AFTER, val);
                             }
                             return Ok(res);
                         }

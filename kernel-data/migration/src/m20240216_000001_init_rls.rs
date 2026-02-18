@@ -9,7 +9,8 @@ impl MigrationTrait for Migration {
         let db = manager.get_connection();
 
         // 1. Create Schema
-        db.execute_unprepared("CREATE SCHEMA IF NOT EXISTS flexi").await?;
+        db.execute_unprepared("CREATE SCHEMA IF NOT EXISTS flexi")
+            .await?;
 
         // 2. Create Nonce Table (Partitioned by day)
         db.execute_unprepared(
@@ -20,7 +21,8 @@ impl MigrationTrait for Migration {
                 PRIMARY KEY (nonce, created_at)
             ) PARTITION BY RANGE (created_at);
             "#,
-        ).await?;
+        )
+        .await?;
 
         // Initial Partitions (Today + Next day)
         // Uses a DEFAULT partition for initial setup. In production, replace with
@@ -37,7 +39,8 @@ impl MigrationTrait for Migration {
                 created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
             );
             "#,
-        ).await?;
+        )
+        .await?;
 
         // 3. Create Uniqueness Trigger (Global uniqueness via nonce_uniqueness table)
         db.execute_unprepared(
@@ -54,15 +57,19 @@ impl MigrationTrait for Migration {
             END;
             $$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = flexi, pg_catalog, pg_temp;
 
+            REVOKE ALL ON FUNCTION flexi.check_nonce_uniqueness() FROM PUBLIC;
+
             DROP TRIGGER IF EXISTS nonce_uniqueness_trigger ON flexi.flexi_nonce;
             CREATE TRIGGER nonce_uniqueness_trigger
             BEFORE INSERT ON flexi.flexi_nonce
             FOR EACH ROW EXECUTE FUNCTION flexi.check_nonce_uniqueness();
-            "#
-        ).await?;
+            "#,
+        )
+        .await?;
 
         // 4. Create Authorize Function
-        db.execute_unprepared("CREATE EXTENSION IF NOT EXISTS pgcrypto SCHEMA flexi").await?;
+        db.execute_unprepared("CREATE EXTENSION IF NOT EXISTS pgcrypto SCHEMA flexi")
+            .await?;
         db.execute_unprepared(
             r#"
             CREATE OR REPLACE FUNCTION flexi.authorize_tenant(token_val text) RETURNS void AS $$
@@ -214,7 +221,8 @@ impl MigrationTrait for Migration {
 
     async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
         let db = manager.get_connection();
-        db.execute_unprepared("DROP SCHEMA IF EXISTS flexi CASCADE").await?;
+        db.execute_unprepared("DROP SCHEMA IF EXISTS flexi CASCADE")
+            .await?;
         Ok(())
     }
 }

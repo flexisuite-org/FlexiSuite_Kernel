@@ -1,8 +1,9 @@
+pub mod auth;
 pub mod idempotency;
+pub mod kernel;
 pub mod quota;
 pub mod supplychain;
-pub mod kernel;
-pub mod auth;
+pub mod diagnostics;
 
 // Re-export common types if needed
 pub use idempotency::canonicalize_request_target;
