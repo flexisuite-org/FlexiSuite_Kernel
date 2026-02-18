@@ -1,7 +1,7 @@
 
 use chrono::Utc;
 use kernel_data::auth_context::TenantId;
-use kernel_data::entities::key_record::{self, ActiveModel};
+use kernel_data::entities::key_record::{self, ActiveModel, KeyState, KeyType};
 use ring::rand::{SecureRandom, SystemRandom};
 use sea_orm::{ActiveModelTrait, DatabaseConnection, EntityTrait, Set};
 use uuid::Uuid;
@@ -19,11 +19,11 @@ impl TestAuth {
 
         let active_model = ActiveModel {
             kid: Set(kid.clone()),
-            key_type: Set("hmac".to_string()),
+            key_type: Set(KeyType::Hmac),
             algorithm: Set("HS256".to_string()),
             secret_bytes: Set(Some(key)),
             public_bytes: Set(None),
-            state: Set("active".to_string()),
+            state: Set(KeyState::Active),
             created_at: Set(Utc::now().into()),
             activated_at: Set(Some(Utc::now().into())),
             retired_at: Set(None),
@@ -35,6 +35,9 @@ impl TestAuth {
         Ok(())
     }
 
+    /// Helper that mirrors `KeyManager::generate_tenant_token` (v2:kid:ts:nonce:tenant_id:sig).
+    /// WARNING: This logic duplicates `KeyManager` implementation. If the token format or signing
+    /// logic changes in `KeyManager`, this MUST be updated to match.
     pub async fn generate_tenant_token(
         db: &DatabaseConnection,
         tenant_id: &TenantId,
@@ -42,8 +45,8 @@ impl TestAuth {
         use sea_orm::{ColumnTrait, QueryFilter};
 
         let key_record = key_record::Entity::find()
-            .filter(key_record::Column::KeyType.eq("hmac"))
-            .filter(key_record::Column::State.eq("active"))
+            .filter(key_record::Column::KeyType.eq(KeyType::Hmac))
+            .filter(key_record::Column::State.eq(KeyState::Active))
             .one(db)
             .await?
             .ok_or("No active HMAC key found")?;

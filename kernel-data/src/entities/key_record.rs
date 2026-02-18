@@ -7,18 +7,40 @@ use std::fmt;
 pub struct Model {
     #[sea_orm(primary_key, auto_increment = false)]
     pub kid: String,
-    pub key_type: String,  // 'hmac', 'paseto_public', 'paseto_private'
+    pub key_type: KeyType,
     pub algorithm: String, // 'HS256', 'Ed25519'
     #[sea_orm(column_type = "Blob", nullable)]
     pub secret_bytes: Option<Vec<u8>>,
     #[sea_orm(column_type = "Blob", nullable)]
     pub public_bytes: Option<Vec<u8>>,
-    pub state: String, // 'active', 'next', 'retired', 'revoked'
+    pub state: KeyState,
     pub created_at: DateTimeWithTimeZone,
     pub activated_at: Option<DateTimeWithTimeZone>,
     pub retired_at: Option<DateTimeWithTimeZone>,
     pub revoked_at: Option<DateTimeWithTimeZone>,
     pub expires_at: Option<DateTimeWithTimeZone>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
+#[sea_orm(rs_type = "String", db_type = "Text")]
+pub enum KeyType {
+    #[sea_orm(string_value = "hmac")]
+    Hmac,
+    #[sea_orm(string_value = "paseto_public")]
+    PasetoPublic,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
+#[sea_orm(rs_type = "String", db_type = "Text")]
+pub enum KeyState {
+    #[sea_orm(string_value = "active")]
+    Active,
+    #[sea_orm(string_value = "next")]
+    Next,
+    #[sea_orm(string_value = "retired")]
+    Retired,
+    #[sea_orm(string_value = "revoked")]
+    Revoked,
 }
 
 impl fmt::Debug for Model {
@@ -62,10 +84,10 @@ impl From<&Model> for KeyRecordDto {
     fn from(value: &Model) -> Self {
         Self {
             kid: value.kid.clone(),
-            key_type: value.key_type.clone(),
+            key_type: value.key_type.to_value(),
             algorithm: value.algorithm.clone(),
             public_bytes: value.public_bytes.clone(),
-            state: value.state.clone(),
+            state: value.state.to_value(),
             created_at: value.created_at.clone(),
             activated_at: value.activated_at.clone(),
             retired_at: value.retired_at.clone(),

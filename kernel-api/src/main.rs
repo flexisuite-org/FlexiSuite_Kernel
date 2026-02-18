@@ -1,5 +1,6 @@
 use kernel_api::build_app;
 use kernel_api::middleware::MiddlewareConfig;
+use kernel_core::auth::KeyManager;
 use sea_orm::{ConnectOptions, Database};
 use std::net::SocketAddr;
 use std::time::Duration;
@@ -21,11 +22,6 @@ async fn main() {
         std::process::exit(1);
     }
 
-    if let Err(msg) = kernel_data::init_hmac_secret() {
-        eprintln!("kernel-api startup error (data): {msg}");
-        std::process::exit(1);
-    }
-
     // Initialize Database
     let db_url = std::env::var("DATABASE_URL").unwrap_or_else(|e| {
         eprintln!("DATABASE_URL must be set: {e}");
@@ -40,6 +36,11 @@ async fn main() {
 
     let db = Database::connect(opt).await.unwrap_or_else(|e| {
         eprintln!("Failed to connect to database: {e}");
+        std::process::exit(1);
+    });
+
+    KeyManager::rotate_keys(&db).await.unwrap_or_else(|e| {
+        eprintln!("Failed to initialize key rotation state: {e}");
         std::process::exit(1);
     });
 
