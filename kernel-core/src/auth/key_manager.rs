@@ -23,6 +23,8 @@ pub enum KeyManagerError {
     NoActiveKey(String),
     #[error("Key not found: {0}")]
     KeyNotFound(String),
+    #[error("Unauthorized: {0}")]
+    Unauthorized(String),
 }
 
 pub struct KeyManager;
@@ -30,20 +32,20 @@ pub struct KeyManager;
 impl KeyManager {
     /// Rotates keys for all supported types.
     pub async fn rotate_keys(
-        _ctx: &TenantContext,
-        db: &DatabaseConnection,
+        ctx: &TenantContext,
     ) -> Result<(), KeyManagerError> {
+        let db = ctx.db().map_err(|e| sea_orm::DbErr::Custom(e))?;
         let key_types = vec![(KeyType::Hmac, "HS256"), (KeyType::PasetoPublic, "Ed25519")];
 
         for (k_type, alg) in key_types {
-            Self::rotate_key_type_db(db, k_type, alg).await?;
+            Self::rotate_key_type(db, k_type, alg).await?;
         }
 
         Ok(())
     }
 
     /// Internal rotation logic using raw DatabaseConnection.
-    async fn rotate_key_type_db(
+    async fn rotate_key_type(
         db: &DatabaseConnection,
         key_type: KeyType,
         alg: &str,
@@ -207,10 +209,10 @@ impl KeyManager {
     /// For HMAC signing keys, we always read the authoritative active key from DB
     /// to avoid stale process-local cache after cross-instance revocation.
     pub async fn get_active_key(
-        _ctx: &TenantContext,
-        db: &DatabaseConnection,
+        ctx: &TenantContext,
         key_type: KeyType,
     ) -> Result<Model, KeyManagerError> {
+        let db = ctx.db().map_err(|e| sea_orm::DbErr::Custom(e))?;
         let key = KeyRecord::find()
             .filter(key_record::Column::KeyType.eq(key_type.clone()))
             .filter(key_record::Column::State.eq(KeyState::Active))
@@ -222,10 +224,10 @@ impl KeyManager {
 
     /// Gets a specific key by KID (for verification).
     pub async fn get_key(
-        _ctx: &TenantContext,
-        db: &DatabaseConnection,
+        ctx: &TenantContext,
         kid: &str,
     ) -> Result<Model, KeyManagerError> {
+        let db = ctx.db().map_err(|e| sea_orm::DbErr::Custom(e))?;
         KeyRecord::find_by_id(kid)
             .one(db)
             .await?
@@ -234,10 +236,10 @@ impl KeyManager {
 
     /// Revokes a key immediately.
     pub async fn revoke_key(
-        _ctx: &TenantContext,
-        db: &DatabaseConnection,
+        ctx: &TenantContext,
         kid: &str,
     ) -> Result<(), KeyManagerError> {
+        let db = ctx.db().map_err(|e| sea_orm::DbErr::Custom(e))?;
         let txn = db.begin().await?;
         let key = KeyRecord::find_by_id(kid)
             .lock_exclusive()
@@ -291,10 +293,18 @@ impl KeyManager {
     /// Generates a tenant token using the active HMAC key for the given `TenantId`.
     pub async fn generate_tenant_token(
         ctx: &TenantContext,
-        db: &DatabaseConnection,
         tenant_id: &TenantId,
     ) -> Result<String, KeyManagerError> {
-        let active_key = Self::get_active_key(ctx, db, KeyType::Hmac).await?;
+        // Enforce tenant isolation: only system context or the tenant themselves can generate a token.
+        if !ctx.is_system() && ctx.tenant_id() != tenant_id {
+            return Err(KeyManagerError::Unauthorized(format!(
+                "Context tenant {} cannot generate token for tenant {}",
+                ctx.tenant_id(),
+                tenant_id
+            )));
+        }
+
+        let active_key = Self::get_active_key(ctx, KeyType::Hmac).await?;
         let secret = active_key.secret_bytes.ok_or_else(|| {
             KeyManagerError::KeyGenError("No secret bytes for HMAC key".to_string())
         })?;

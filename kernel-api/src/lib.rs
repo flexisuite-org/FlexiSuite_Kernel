@@ -37,7 +37,7 @@ pub struct ActionStatusResponse {
 
 pub async fn build_app(
     config: MiddlewareConfig,
-    db: DatabaseConnection,
+    db: Arc<DatabaseConnection>,
 ) -> Result<(Router, JoinHandle<()>), String> {
     let state = MiddlewareState::new(config).await?;
     Ok(build_app_with_state(state, db))
@@ -45,7 +45,7 @@ pub async fn build_app(
 
 pub fn build_app_with_state(
     state: MiddlewareState,
-    db: DatabaseConnection,
+    db: Arc<DatabaseConnection>,
 ) -> (Router, JoinHandle<()>) {
     let cleanup_handle = state.start_cleanup_task();
 
@@ -66,7 +66,7 @@ pub fn build_app_with_state(
             .merge(public_router)
             .merge(protected_router)
             .layer(Extension(state))
-            .layer(Extension(Arc::new(db))), // Inject DB connection
+            .layer(Extension(db)), // Inject DB connection
         cleanup_handle,
     )
 }

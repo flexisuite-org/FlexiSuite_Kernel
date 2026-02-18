@@ -30,8 +30,15 @@ impl<'a> TestAdminTenantContext<'a> {
         Ok(())
     }
 
-    /// Sets a secret for the 'flexi' role.
+    /// Sets a secret for the 'postgres' role.
     pub async fn set_secret(&self, secret: &str) -> Result<(), Box<dyn std::error::Error>> {
+        // PostgreSQL's ALTER ROLE ... SET does not support parameters ($1).
+        // Since this is a test helper and the secret is generated internally,
+        // we use string formatting but validate that it only contains safe characters.
+        if !secret.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+            return Err("Secret contains invalid characters".into());
+        }
+        
         self.db
             .execute_unprepared(&format!(
                 "ALTER ROLE postgres SET flexi.hmac_secret = '{}'",

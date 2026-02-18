@@ -92,11 +92,14 @@ async fn main() -> Result<()> {
 
     let config = load_config()?;
 
-    let db: DatabaseConnection = Database::connect(&config.database_url)
+    let db = std::sync::Arc::new(Database::connect(&config.database_url)
         .await
-        .context("failed to connect database")?;
+        .context("failed to connect database")?);
     info!("Connected to database");
-    KeyManager::rotate_keys(&db)
+    
+    use kernel_core::auth::SystemTenantContext;
+    let init_ctx = TenantContext::from(SystemTenantContext).with_db(db.clone());
+    KeyManager::rotate_keys(&init_ctx)
         .await
         .context("failed to initialize key rotation state at startup")?;
 
@@ -248,8 +251,10 @@ fn parse_object_lock_config() -> Result<Option<ObjectLockConfig>> {
     }))
 }
 
-async fn run_archive_cycle(db: &DatabaseConnection, s3: &Client, config: &AppConfig) -> Result<()> {
-    KeyManager::rotate_keys(db)
+async fn run_archive_cycle(db: &std::sync::Arc<DatabaseConnection>, s3: &Client, config: &AppConfig) -> Result<()> {
+    use kernel_core::auth::SystemTenantContext;
+    let system_ctx = TenantContext::from(SystemTenantContext).with_db(db.clone());
+    KeyManager::rotate_keys(&system_ctx)
         .await
         .context("failed to ensure active keys before archive cycle")?;
 
@@ -365,21 +370,24 @@ async fn run_archive_cycle(db: &DatabaseConnection, s3: &Client, config: &AppCon
 }
 
 async fn generate_token_with_recovery(
-    db: &DatabaseConnection,
+    db: &std::sync::Arc<DatabaseConnection>,
     tenant_id: &TenantId,
     purpose: &str,
 ) -> Option<String> {
-    match KeyManager::generate_tenant_token(db, tenant_id).await {
+    use kernel_core::auth::SystemTenantContext;
+    let system_ctx = TenantContext::from(SystemTenantContext).with_db(db.clone());
+
+    match KeyManager::generate_tenant_token(&system_ctx, tenant_id).await {
         Ok(token) => Some(token),
         Err(kernel_core::auth::KeyManagerError::NoActiveKey(_)) => {
-            if let Err(rotate_err) = KeyManager::rotate_keys(db).await {
+            if let Err(rotate_err) = KeyManager::rotate_keys(&system_ctx).await {
                 error!(
                     "Failed to recover missing active {} key for tenant {}: {}",
                     purpose, tenant_id, rotate_err
                 );
                 return None;
             }
-            match KeyManager::generate_tenant_token(db, tenant_id).await {
+            match KeyManager::generate_tenant_token(&system_ctx, tenant_id).await {
                 Ok(token) => Some(token),
                 Err(e) => {
                     error!(
