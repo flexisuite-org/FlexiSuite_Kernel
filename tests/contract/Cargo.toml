@@ -24,5 +24,9 @@ kernel-api = { path = "../../kernel-api" }
 # Tracking: https://github.com/tokio-rs/tracing/issues/3455
 # Internal Tracking: https://github.com/flexisuite-org/FlexiSuite_Kernel/issues/25
 tracing = "=0.1.43"
+# TODO(security): Pinned to =0.3.22 for compatibility with tracing = "=0.1.43"; upgrading tracing-subscriber
+# may pull in a newer tracing API that conflicts with the pinned version.
+# Tracking: https://github.com/tokio-rs/tracing/issues/3455
+# Internal Tracking: https://github.com/flexisuite-org/FlexiSuite_Kernel/issues/25
 tracing-subscriber = "=0.3.22"
 sea-orm = { version = "1.1.19", features = ["mock", "runtime-tokio-rustls"] }
