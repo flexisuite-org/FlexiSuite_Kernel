@@ -267,17 +267,22 @@ impl IdempotencyStore for InMemoryIdempotencyStore {
         key: &IdempotencyScopeKey,
     ) -> Result<Option<IdempotencyEntry>, IdempotencyStoreError> {
         let mut lock = self.inner.lock().await;
-        if let Some(entry) = lock.get(key) {
-            if let IdempotencyEntry::InFlight { expires_at, .. } = entry {
+        match lock.get(key) {
+            Some(IdempotencyEntry::InFlight { expires_at, .. }) => {
                 if *expires_at <= Instant::now() {
                     lock.remove(key);
                     return Ok(None);
                 }
             }
-            Ok(lock.get(key).cloned())
-        } else {
-            Ok(None)
+            Some(IdempotencyEntry::Completed(record)) => {
+                if record.expires_at <= Instant::now() {
+                    lock.remove(key);
+                    return Ok(None);
+                }
+            }
+            None => return Ok(None),
         }
+        Ok(lock.get(key).cloned())
     }
 
     async fn try_acquire(
