@@ -152,17 +152,26 @@ impl SandboxRuntime for WasmSandbox {
             Ok(_) => {}
             Err(e) => {
                 cancel_watchdog.store(true, Ordering::SeqCst);
-                if is_wall_timeout.load(Ordering::SeqCst) {
-                    return Err(SandboxError::Timeout);
+                let mapped = map_wasm_error(e);
+                if matches!(mapped, SandboxError::RuntimeError(_)) {
+                    if is_wall_timeout.load(Ordering::SeqCst) {
+                        return Err(SandboxError::Timeout);
+                    }
                 }
-                return Err(map_wasm_error(e));
+                return Err(mapped);
             }
         }
 
         cancel_watchdog.store(true, Ordering::SeqCst);
 
-        let stdout = store.data().stdout.contents();
-        let output = String::from_utf8_lossy(&stdout).into_owned();
+        let stdout_bytes = store.data().stdout.contents();
+        let output = String::from_utf8(stdout_bytes.to_vec()).map_err(|e| {
+            SandboxError::RuntimeError(format!(
+                "stdout contains invalid UTF-8: {}. Raw bytes (hex): {}",
+                e,
+                stdout_bytes.iter().map(|b| format!("{:02x}", b)).collect::<String>()
+            ))
+        })?;
         Ok(serde_json::Value::String(output))
     }
 }
