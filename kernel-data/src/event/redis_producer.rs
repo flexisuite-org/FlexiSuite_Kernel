@@ -1,36 +1,55 @@
 use async_trait::async_trait;
-use kernel_core::event::{EventEnvelope, EventError, OrderMode, PublishAck, ReliableProducer, SHARD_COUNT};
+use kernel_core::event::{EventEnvelope, EventError, PublishAck, ReliableProducer, SHARD_COUNT};
 use redis::aio::ConnectionManager;
-use redis::{AsyncCommands, Client};
-use ring::digest::{Context, SHA256};
+use redis::Client;
+use std::hash::Hasher;
 use std::time::Duration;
 use tokio::time::timeout;
 use tracing::{debug, error, instrument};
-
-
+use twox_hash::XxHash64;
 
 #[derive(Clone)]
 pub struct RedisProducer {
     connection_manager: ConnectionManager,
+    publish_timeout: Duration,
+    stream_maxlen: usize,
 }
 
 impl RedisProducer {
+    const DEFAULT_PUBLISH_TIMEOUT: Duration = Duration::from_secs(5);
+    // Stream size cap per shard. Uses Redis approximate MAXLEN trim for O(1)-ish write path.
+    const DEFAULT_STREAM_MAXLEN: usize = 10_000;
+
     pub async fn new(client: Client) -> Result<Self, EventError> {
         let connection_manager = client.get_connection_manager().await.map_err(|e| {
             EventError::Producer(format!("failed to create connection manager: {}", e))
         })?;
-        Ok(Self { connection_manager })
+        Ok(Self {
+            connection_manager,
+            publish_timeout: Self::DEFAULT_PUBLISH_TIMEOUT,
+            stream_maxlen: Self::DEFAULT_STREAM_MAXLEN,
+        })
+    }
+
+    pub async fn new_with_config(
+        client: Client,
+        publish_timeout: Duration,
+        stream_maxlen: usize,
+    ) -> Result<Self, EventError> {
+        let connection_manager = client.get_connection_manager().await.map_err(|e| {
+            EventError::Producer(format!("failed to create connection manager: {}", e))
+        })?;
+        Ok(Self {
+            connection_manager,
+            publish_timeout,
+            stream_maxlen,
+        })
     }
 
     fn calculate_shard(key: &str) -> u64 {
-        let mut context = Context::new(&SHA256);
-        context.update(key.as_bytes());
-        let digest = context.finish();
-        let bytes = digest.as_ref();
-        // Use first 8 bytes as u64 (Big Endian)
-        let mut buf = [0u8; 8];
-        buf.copy_from_slice(&bytes[0..8]);
-        let num = u64::from_be_bytes(buf);
+        let mut hasher = XxHash64::default();
+        hasher.write(key.as_bytes());
+        let num = hasher.finish();
         num % SHARD_COUNT
     }
 }
@@ -43,16 +62,7 @@ impl ReliableProducer for RedisProducer {
         stream_base: &str,
         event: EventEnvelope,
     ) -> Result<PublishAck, EventError> {
-        let key_str = match &event.order_mode {
-            OrderMode::Entity { entity_id, .. } => {
-                format!("{}:{}", event.tenant_id, entity_id)
-            }
-            OrderMode::Causality { key, .. } => {
-                format!("{}:{}", event.tenant_id, key)
-            }
-        };
-
-        let shard = Self::calculate_shard(&key_str);
+        let shard = Self::calculate_shard(&event.order_mode.shard_input(&event.tenant_id));
         // Ensure tenant isolation in stream namespace
         let stream_key = format!("{}:{}:{}", event.tenant_id, stream_base, shard);
 
@@ -61,10 +71,17 @@ impl ReliableProducer for RedisProducer {
         // ConnectionManager handles reconnections and multiplexing.
         let mut conn = self.connection_manager.clone();
 
-        let id: String = timeout(
-            Duration::from_secs(5),
-            conn.xadd(&stream_key, "*", &[("data", payload_json)]),
-        )
+        // Use MAXLEN ~ N to bound stream growth without per-insert exact trimming cost.
+        let mut cmd = redis::cmd("XADD");
+        cmd.arg(&stream_key)
+            .arg("MAXLEN")
+            .arg("~")
+            .arg(self.stream_maxlen)
+            .arg("*")
+            .arg("data")
+            .arg(payload_json);
+
+        let id: String = timeout(self.publish_timeout, cmd.query_async(&mut conn))
         .await
         .map_err(|_| EventError::Producer("redis publish timed out".to_string()))?
         .map_err(|e| {
@@ -106,6 +123,6 @@ mod tests {
         for i in 0..100 {
             shards.insert(RedisProducer::calculate_shard(&format!("key-{}", i)));
         }
-        assert!(shards.len() > 10);
+        assert!(shards.len() > 40);
     }
 }

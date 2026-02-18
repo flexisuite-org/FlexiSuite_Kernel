@@ -34,11 +34,15 @@ pub enum OrderMode {
 }
 
 impl OrderMode {
-    pub fn key_string(&self) -> String {
+    pub fn entity_or_causality_key(&self) -> String {
         match self {
             OrderMode::Entity { entity_id, .. } => entity_id.to_string(),
             OrderMode::Causality { key, .. } => key.clone(),
         }
+    }
+
+    pub fn shard_input(&self, tenant_id: &TenantId) -> String {
+        format!("{}:{}", tenant_id, self.entity_or_causality_key())
     }
 
     pub fn seq(&self) -> Option<u64> {
@@ -88,9 +92,12 @@ pub enum RetryPolicy {
 pub trait ReliableConsumer: Send + Sync {
     /// Polls for messages from the given base stream.
     ///
-    /// Implementations MUST internally fan-out across shards (e.g., `{stream}:0`..`{stream}:63`).
+    /// `stream_base` is a logical stream name (e.g., `orders`) and MUST NOT include tenant prefix.
+    /// Implementations MUST scope by `tenant_id` and internally fan-out across shards
+    /// (e.g., `{tenant_id}:{stream}:0`..`{tenant_id}:{stream}:63`).
     async fn poll(
         &self,
+        tenant_id: &TenantId,
         stream_base: &str,
         consumer_group: &str,
         consumer_name: &str,
@@ -100,8 +107,12 @@ pub trait ReliableConsumer: Send + Sync {
     /// Acknowledges a message.
     ///
     /// `stream_key` should be the specific shard key from `Delivery::stream_key`.
+    /// `stream_key` is expected to be tenant-less logical shard identifier unless
+    /// the backend contract documents otherwise; implementations MUST use `tenant_id`
+    /// to enforce tenant isolation.
     async fn ack(
         &self,
+        tenant_id: &TenantId,
         stream_key: &str,
         consumer_group: &str,
         delivery_id: &str,
@@ -118,16 +129,33 @@ pub trait ReliableConsumer: Send + Sync {
     ///   be impacted during retries depending on the implementation.
     ///
     /// `stream_key` should be the specific shard key from `Delivery::stream_key`.
+    /// `stream_key` is expected to be tenant-less logical shard identifier unless
+    /// the backend contract documents otherwise; implementations MUST use `tenant_id`
+    /// to enforce tenant isolation.
     async fn nack(
         &self,
+        tenant_id: &TenantId,
         stream_key: &str,
         consumer_group: &str,
         delivery_id: &str,
         policy: RetryPolicy,
     ) -> Result<(), EventError>;
 
+    /// Claims pending deliveries from a logical stream for a consumer in the same group.
+    ///
+    /// - `tenant_id`: tenant scope used to build physical stream keys.
+    /// - `stream_base`: logical stream name (e.g., `orders`) without tenant prefix.
+    /// - `consumer_group`: Redis Streams consumer group name to claim from.
+    /// - `consumer_name`: target consumer name that will receive claimed deliveries.
+    /// - `min_idle_ms`: minimum idle time (milliseconds) before a pending delivery is claimable.
+    /// - `max_count`: upper bound of deliveries to claim in one call.
+    ///
+    /// Returns claimed deliveries on success, or `EventError` on backend/network/protocol failure.
+    /// Implementations should preserve at-least-once delivery semantics. Under concurrent claimers,
+    /// ownership may shift across consumers after `min_idle_ms`, and callers must handle duplicates.
     async fn claim_pending(
         &self,
+        tenant_id: &TenantId,
         stream_base: &str,
         consumer_group: &str,
         consumer_name: &str,

@@ -24,7 +24,6 @@ impl EventRepository {
         let event_id = Uuid::now_v7();
 
         // 1. Generate Sequence
-        // 1. Generate Sequence
         let (seq, metadata_mode_str) = match &order_mode {
             OrderMode::Entity { entity_id, .. } => {
                 let seq = Self::next_entity_seq(db, tenant_id.as_str(), *entity_id)
@@ -44,7 +43,6 @@ impl EventRepository {
             }
         };
 
-        // 2. Prepare OrderMode with seq
         // 2. Prepare OrderMode with seq
         // Safety: seq is generated from i64 in DB (BIGINT), we assumes it fits in u64 if non-negative.
         // Logic ensures strictly positive seq from next_*_seq.
