@@ -13,14 +13,18 @@
 | REQ-ID | 検証ゲート | 主検証ジョブ/手段 | 失敗条件 |
 |---|---|---|---|
 | `REQ-AUTH-SEC` | PR-Blocking | `ci:lint-sql-security`, `ci:test-contract`（auth suite）, `ci:e2e-frontend-security` | `SECURITY DEFINER` 標準契約違反、`X-Tenant-Id` の本番許容、`401/403` 境界の逸脱 |
+| `REQ-AUTH-SOURCE` | PR-Blocking | `ci:test-auth-contract` | Token/Header抽出不備、Debugヘッダの本番受理 |
 | `REQ-CONTRACT-VERIFY` | PR-Blocking | `ci:lint-traceability`, `ci:test-contract`, `ci:test-observability` | 契約ドキュメントと実装/検証の不整合、契約テスト欠落、メトリクス契約欠落 |
 | `REQ-TENANT-TOKEN-V2` | PR-Blocking + Nightly | `ci:test-auth-contract`, `nightly:test-token-compat`, `nightly:test-token-version-usage` | v2発行不備、`kid` 欠落受理、互換期限超過受理、14日連続ゼロ未達でv1停止 |
 | `REQ-KEY-REVOCATION-SLO` | PR-Blocking + Nightly + Drill | `ci:lint-drill-readiness`, `nightly:test-key-revocation-chaos`, 月次失効演習 | Readiness欠落、失効伝播 `p95 > 60s`、失効鍵で検証成功 |
 | `REQ-QUOTA-HTTP-CONTRACT` | PR-Blocking | `ci:test-contract`（quota suite） | 判定表と異なるHTTPコード、`Retry-After` 欠落/異常 |
 | `REQ-IDEMPOTENCY-HEADER` | PR-Blocking | `ci:test-contract`（idempotency suite） | `Idempotency-Key` 契約逸脱、衝突時 `409` 不履行 |
+| `REQ-IDEMPOTENCY-CONFLICT` | PR-Blocking | `ci:test-contract`（idempotency suite） | 衝突検知（同一キー・異Body）の失敗 |
 | `REQ-PROTOCOL-FALLBACK-UX` | PR-Blocking | `ci:e2e-frontend-security`, `ci:e2e-worker-protocol-fallback-a11y` | `protocol.error` 時に標準フォールバック/A11y要件未達 |
 | `REQ-DIAG-CONSENT` | PR-Blocking + Nightly | `ci:test-contract`（diagnostics consent suite）, `nightly:test-diagnostics-revocation-lag` | 同意なし送信、撤回後5分超で送信継続 |
 | `REQ-MANIFEST-TRUST-ROOT` | PR-Blocking + Nightly | `ci:lint-manifest-trust-root`, `ci:test-manifest-signature-contract`, `ci:test-manifest-break-glass`, `nightly:test-manifest-revocation-propagation`, `nightly:test-manifest-retired-window` | 署名検証順序違反、`revoked kid` 受理、`retired` 窓外受理、信頼ルート署名不一致、break-glassの時限/スコープ違反 |
+| `REQ-SUPPLYCHAIN-DIGEST-FORMAT` | PR-Blocking | `ci:test-contract` (supplychain) | digest prefix (`sha256-`/`sha384-`) 違反 |
+| `REQ-SUPPLYCHAIN-DIGEST-MATCH` | PR-Blocking | `ci:test-contract` (supplychain) | Manifest digest と artifact digest の不一致 |
 | `REQ-SIDELOADING-WARNING` | PR-Blocking | `ci:e2e-sideloading-warning` | Developer Mode時の警告・同意フロー欠落 |
 | `REQ-SLO-ENV-PROFILE` | PR-Blocking + Nightly | `ci:lint-slo-profile`, `nightly:test-slo-smoke` | `ops/slo_profile.yaml` 未一致でSLO判定 |
 | `REQ-DR-REHEARSAL` | PR-Blocking + Drill | `ci:lint-drill-readiness`, 月次ステージング/四半期本番相当演習 | Readiness欠落、RPO/RTO未達、演習記録欠落 |

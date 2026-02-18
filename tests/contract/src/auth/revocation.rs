@@ -66,7 +66,7 @@ fn generate_token(kid: &str) -> String {
 async fn test_key_revocation_slo() {
     setup();
     // Use public setup_app
-    let app = setup_app();
+    let app = setup_app().await;
 
     // REQ-KEY-REVOCATION-SLO: Revoked key must be rejected.
 

@@ -66,7 +66,7 @@ fn generate_token(kid: Option<&str>, valid: bool) -> String {
 #[tokio::test]
 async fn test_tenant_token_v2_kid_required() {
     setup();
-    let app = setup_app();
+    let app = setup_app().await;
 
     // Case 1: Token with KID (should pass)
     let token_with_kid = generate_token(Some("key-1"), true);
