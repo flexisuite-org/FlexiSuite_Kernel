@@ -13,8 +13,6 @@ pub struct EventRepository;
 impl EventRepository {
     /// Creates an event and inserts it into the outbox within the given transaction.
     /// Returns the fully formed EventEnvelope with the assigned sequence number.
-    /// Creates an event and inserts it into the outbox within the given transaction.
-    /// Returns the fully formed EventEnvelope with the assigned sequence number.
     pub async fn create_event(
         db: &TenantScoped<RawConnection>,
         event_type: String,
