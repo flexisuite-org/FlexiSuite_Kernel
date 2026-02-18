@@ -14,7 +14,7 @@ async fn test_key_revocation_slo() {
     // REQ-KEY-REVOCATION-SLO: Revoked key must be rejected.
 
     // Case 1: Active Key -> OK
-    let token_active = generate_token(Some("active-key-1"), true);
+    let token_active = generate_token(true);
     let req = Request::builder()
         .uri("/test")
         .method("POST")
@@ -36,7 +36,7 @@ async fn test_key_revocation_slo() {
     // TODO: Wire mock revocation store once revocation support is implemented in the middleware.
     // Tracking Issue: [REF-AUTH-REVOCATION]
     /*
-    let token_revoked = generate_token(Some("revoked-key-1"), true);
+    let token_revoked = generate_token(true);
     let req = Request::builder()
         .uri("/test")
         .method("POST")

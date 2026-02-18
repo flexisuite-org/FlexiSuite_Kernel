@@ -1,8 +1,8 @@
 use rusty_paseto::prelude::*;
 use rusty_paseto::core::{Key, PasetoAsymmetricPrivateKey};
-use std::sync::{OnceLock};
+use std::sync::OnceLock;
 use chrono::{Duration, Utc, SecondsFormat};
-use kernel_api::auth::init_auth_config;
+use kernel_api::auth::init_auth_config_with_public_key_b64url;
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 
 // Global initializer for auth config
@@ -14,10 +14,7 @@ pub fn setup() {
     let (_, pub_b64) = get_test_keypair();
     AUTH_INIT.get_or_init(|| {
         let _ = tracing_subscriber::fmt().with_test_writer().try_init();
-        unsafe {
-            std::env::set_var("FLEXI_PASETO_V4_PUBLIC_KEY_B64URL", &pub_b64);
-        }
-        let _ = init_auth_config().expect("auth config init");
+        let _ = init_auth_config_with_public_key_b64url(&pub_b64).expect("auth config init");
         ()
     });
 }
@@ -43,7 +40,7 @@ fn get_test_keypair() -> (Vec<u8>, String) {
     (priv_bytes.clone(), pub_b64.clone())
 }
 
-pub fn generate_token(_kid: Option<&str>, valid: bool) -> String {
+pub fn generate_token(valid: bool) -> String {
     let (combined_bytes, _) = get_test_keypair();
     let key_array: [u8; 64] = combined_bytes.try_into().unwrap();
     let key = Key::<64>::from(key_array);
@@ -65,10 +62,6 @@ pub fn generate_token(_kid: Option<&str>, valid: bool) -> String {
     builder.set_claim(ExpirationClaim::try_from(exp_str.as_str()).unwrap());
     builder.set_claim(NotBeforeClaim::try_from(nbf_str.as_str()).unwrap());
     builder.set_claim(IssuedAtClaim::try_from(iat_str.as_str()).unwrap());
-
-    // COMPLETELY REMOVED FOOTER SUPPORT.
-    // The current kernel-api parser doesn't support footers and will return FooterInvalid.
-    // For contract tests, we'll bypass KID validation for now as it's not implemented in the middleware anyway.
 
     builder.build(&private_key).expect("Paseto build failed")
 }
