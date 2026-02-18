@@ -47,19 +47,19 @@ multiple-versions = "deny"
 wildcards = "deny"
 
 # ---------------------------------------------------------------------------
-# Temporary exact-version pins
+# Exact-version pins requiring periodic upstream verification
 #
-# Each entry MUST reference the internal tracking issue so that the pin is
-# automatically re-evaluated when the issue is closed.
+# Each entry MUST reference the internal tracking issue and upstream issue so
+# the pin can be re-evaluated during dependency maintenance reviews.
 #
 # tracing =0.1.43
 #   Reason : 0.1.44 introduced a ~10 MB binary size regression because
 #            test-macros were accidentally included in the release artifact.
 #   Upstream: https://github.com/tokio-rs/tracing/issues/3455
 #   Internal: https://github.com/flexisuite-org/FlexiSuite_Kernel/issues/25
-#   Action  : Remove this skip entry once tracing >=0.1.45 (or whichever
-#             version resolves the regression) is released and all four
-#             Cargo.toml pins are removed.
+#   Action  : This is an indefinite workaround. Remove this skip entry only
+#             after an upstream fix is released and verified in this workspace;
+#             monitor tokio-rs/tracing#3455 periodically.
 # ---------------------------------------------------------------------------
 [[bans.skip]]
 name    = "tracing"
