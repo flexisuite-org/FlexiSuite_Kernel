@@ -1,3 +1,11 @@
+//! This test intentionally performs raw/unscoped DB setup and migrations
+//! for testing only and is exempt from the rule "Every database access
+//! MUST go through TenantContext".
+//!
+//! This is a test-only exception and should not be copied into production code.
+//!
+//! Relevant symbols: [`TenantContext`], [`with_tenant_tx`], [`TestAuth`], [`migration::Migrator`].
+
 use kernel_data::auth_context::{TenantContext, TenantId, UserId};
 mod common;
 use common::auth::TestAuth;
@@ -12,7 +20,7 @@ async fn test_auth_failures() {
     let docker = clients::Cli::default();
     let image = RunnableImage::from(Postgres::default()).with_tag("15-alpine");
     let node = docker.run(image);
-    let port = node.get_host_port_ipv4(5432).unwrap();
+    let port = node.get_host_port_ipv4(5432);
     let connection_string = format!("postgres://postgres:postgres@127.0.0.1:{}/postgres", port);
 
     let db = Database::connect(&connection_string)
