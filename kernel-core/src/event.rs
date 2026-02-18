@@ -71,9 +71,11 @@ pub struct Delivery {
     pub event: EventEnvelope,
 }
 
+pub const SHARD_COUNT: u64 = 64;
+
 #[async_trait]
 pub trait ReliableProducer: Send + Sync {
-    async fn publish(&self, stream: &str, event: EventEnvelope) -> Result<PublishAck, EventError>;
+    async fn publish(&self, stream_base: &str, event: EventEnvelope) -> Result<PublishAck, EventError>;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

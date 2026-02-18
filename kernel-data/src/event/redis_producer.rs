@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use kernel_core::event::{EventEnvelope, EventError, OrderMode, PublishAck, ReliableProducer};
+use kernel_core::event::{EventEnvelope, EventError, OrderMode, PublishAck, ReliableProducer, SHARD_COUNT};
 use redis::aio::ConnectionManager;
 use redis::{AsyncCommands, Client};
 use ring::digest::{Context, SHA256};
@@ -7,7 +7,7 @@ use std::time::Duration;
 use tokio::time::timeout;
 use tracing::{debug, error, instrument};
 
-const SHARD_COUNT: u64 = 64;
+
 
 #[derive(Clone)]
 pub struct RedisProducer {
@@ -106,6 +106,6 @@ mod tests {
         for i in 0..100 {
             shards.insert(RedisProducer::calculate_shard(&format!("key-{}", i)));
         }
-        assert!(shards.len() > 1);
+        assert!(shards.len() > 10);
     }
 }

@@ -15,13 +15,13 @@ impl EventRepository {
     /// Returns the fully formed EventEnvelope with the assigned sequence number.
     pub async fn create_event(
         db: &TenantScoped<RawConnection>,
-        event_id: Uuid,
         event_type: String,
         order_mode: OrderMode,
         payload: serde_json::Value,
     ) -> Result<EventEnvelope, EventError> {
         let tenant_id = &db.tenant_id;
         let now = chrono::Utc::now();
+        let event_id = Uuid::now_v7();
 
         // 1. Generate Sequence
         // 1. Generate Sequence

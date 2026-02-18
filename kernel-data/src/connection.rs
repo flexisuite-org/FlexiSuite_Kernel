@@ -80,9 +80,7 @@ impl<C> TenantScoped<C> {
 }
 
 impl TenantScoped<RawConnection> {
-    pub(crate) fn txn(&self) -> &DatabaseTransaction {
-        &self.inner.txn
-    }
+
 
     pub(crate) async fn commit(self) -> Result<(), DbErr> {
         self.inner.txn.commit().await
@@ -91,17 +89,9 @@ impl TenantScoped<RawConnection> {
     pub(crate) async fn rollback(self) -> Result<(), DbErr> {
         self.inner.txn.rollback().await
     }
-
-    /// Exposes the underlying database transaction.
-    ///
-    /// # Warning
-    ///
-    /// Using the raw transaction bypasses any strict type-level checks provided by `TenantScoped`.
-    /// Ensure that any queries run against this transaction are properly scoped to the tenant.
-    pub fn txn(&self) -> &DatabaseTransaction {
-        &self.inner.txn
-    }
 }
+
+
 
 // Implement Sealed trait for TenantScoped
 impl super::repository::private::Sealed for TenantScoped<RawConnection> {}
