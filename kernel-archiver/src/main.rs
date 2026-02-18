@@ -258,31 +258,8 @@ async fn run_archive_cycle(db: &DatabaseConnection, s3: &Client, config: &AppCon
         let bucket = config.s3_bucket.clone();
         let lock_config = config.object_lock.clone();
         let batch_size = config.batch_size;
-        let fetch_token = match KeyManager::generate_tenant_token(db, tenant_id).await {
-            Ok(token) => token,
-            Err(kernel_core::auth::KeyManagerError::NoActiveKey(_)) => {
-                if let Err(rotate_err) = KeyManager::rotate_keys(db).await {
-                    error!(
-                        "Failed to recover missing active key for tenant {}: {}",
-                        tenant_id, rotate_err
-                    );
-                    continue;
-                }
-                match KeyManager::generate_tenant_token(db, tenant_id).await {
-                    Ok(token) => token,
-                    Err(e) => {
-                        error!(
-                            "Failed to generate token for tenant {} after recovery: {}",
-                            tenant_id, e
-                        );
-                        continue;
-                    }
-                }
-            }
-            Err(e) => {
-                error!("Failed to generate token for tenant {}: {}", tenant_id, e);
-                continue;
-            }
+        let Some(fetch_token) = generate_token_with_recovery(db, tenant_id, "fetch").await else {
+            continue;
         };
 
         let fetched = with_tenant_tx(db, &ctx, &fetch_token, |repo| {
@@ -357,34 +334,8 @@ async fn run_archive_cycle(db: &DatabaseConnection, s3: &Client, config: &AppCon
             continue;
         }
 
-        let mark_token = match KeyManager::generate_tenant_token(db, tenant_id).await {
-            Ok(token) => token,
-            Err(kernel_core::auth::KeyManagerError::NoActiveKey(_)) => {
-                if let Err(rotate_err) = KeyManager::rotate_keys(db).await {
-                    error!(
-                        "Failed to recover missing active mark key for tenant {}: {}",
-                        tenant_id, rotate_err
-                    );
-                    continue;
-                }
-                match KeyManager::generate_tenant_token(db, tenant_id).await {
-                    Ok(token) => token,
-                    Err(e) => {
-                        error!(
-                            "Failed to generate mark token for tenant {} after recovery: {}",
-                            tenant_id, e
-                        );
-                        continue;
-                    }
-                }
-            }
-            Err(e) => {
-                error!(
-                    "Failed to generate mark token for tenant {}: {}",
-                    tenant_id, e
-                );
-                continue;
-            }
+        let Some(mark_token) = generate_token_with_recovery(db, tenant_id, "mark").await else {
+            continue;
         };
 
         let mark_result = with_tenant_tx(db, &ctx, &mark_token, move |repo| {
@@ -411,6 +362,42 @@ async fn run_archive_cycle(db: &DatabaseConnection, s3: &Client, config: &AppCon
     }
 
     Ok(())
+}
+
+async fn generate_token_with_recovery(
+    db: &DatabaseConnection,
+    tenant_id: &TenantId,
+    purpose: &str,
+) -> Option<String> {
+    match KeyManager::generate_tenant_token(db, tenant_id).await {
+        Ok(token) => Some(token),
+        Err(kernel_core::auth::KeyManagerError::NoActiveKey(_)) => {
+            if let Err(rotate_err) = KeyManager::rotate_keys(db).await {
+                error!(
+                    "Failed to recover missing active {} key for tenant {}: {}",
+                    purpose, tenant_id, rotate_err
+                );
+                return None;
+            }
+            match KeyManager::generate_tenant_token(db, tenant_id).await {
+                Ok(token) => Some(token),
+                Err(e) => {
+                    error!(
+                        "Failed to generate {} token for tenant {} after recovery: {}",
+                        purpose, tenant_id, e
+                    );
+                    None
+                }
+            }
+        }
+        Err(e) => {
+            error!(
+                "Failed to generate {} token for tenant {}: {}",
+                purpose, tenant_id, e
+            );
+            None
+        }
+    }
 }
 
 async fn archive_items<T>(

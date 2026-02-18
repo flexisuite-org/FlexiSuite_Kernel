@@ -49,8 +49,9 @@ async fn test_auth_failures() {
     assert!(res.is_err(), "Should fail with invalid token format");
 
     // 2. Test: Token signed with unknown Key ID
-    let token = "v2:unknown-kid:1234567890:nonce:tenant-x:sig";
-    let res = with_tenant_tx(&db, &ctx, token, |_| Box::pin(async { Ok(()) })).await;
+    let current_ts = chrono::Utc::now().timestamp();
+    let token = format!("v2:unknown-kid:{current_ts}:nonce:tenant-x:sig");
+    let res = with_tenant_tx(&db, &ctx, &token, |_| Box::pin(async { Ok(()) })).await;
     assert!(res.is_err(), "Should fail with unknown kid");
 
     // 3. Test: Valid format, Invalid Signature

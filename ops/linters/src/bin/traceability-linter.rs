@@ -87,7 +87,11 @@ fn main() -> Result<()> {
     // 4. Scan Codebase
     for entry in WalkDir::new(root).into_iter().filter_entry(|entry| {
         let p = entry.path();
-        let mut components = p.components();
+        let rel = match p.strip_prefix(root) {
+            Ok(rel) => rel,
+            Err(_) => return false,
+        };
+        let mut components = rel.components();
         let mut prev = None;
         let mut is_ops_linters_path = false;
         let mut has_target = false;

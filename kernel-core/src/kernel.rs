@@ -15,7 +15,4 @@ pub enum KernelError {
 
     #[error("Commit failed: {0}")]
     CommitUnknown(String),
-    // Other errors...
 }
-
-// Helper to convert DataError to KernelError (impl From is derived)

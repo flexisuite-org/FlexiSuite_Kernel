@@ -10,6 +10,8 @@ use testcontainers::{RunnableImage, clients};
 use testcontainers_modules::postgres::Postgres;
 use uuid::Uuid;
 
+// NOTE: This module intentionally performs direct SeaORM read-back queries for test verification.
+// TODO: Keep production DB access strictly within TenantScoped/TenantContext APIs; do not copy these patterns outside tests.
 const TEST_INTERNAL_SECRET: &str = "test_internal_secret_for_audit";
 
 fn expected_actor_id(tenant_id: &TenantId, user_id: &UserId) -> String {
@@ -89,7 +91,7 @@ async fn test_audit_log_creation() {
     .await
     .expect("Create entity failed");
 
-    // Verify History
+    // Verification-only direct query. Never use unscoped direct queries in production code.
     let histories = entity_history::Entity::find()
         .filter(entity_history::Column::EntityId.eq(entity_id.clone()))
         .all(&db)
@@ -128,6 +130,7 @@ async fn test_audit_log_creation() {
     .await
     .expect("Update entity failed");
 
+    // Verification-only direct query. Never use unscoped direct queries in production code.
     let histories = entity_history::Entity::find()
         .filter(entity_history::Column::EntityId.eq(entity_id.clone()))
         .order_by_asc(entity_history::Column::Version)
@@ -165,6 +168,7 @@ async fn test_audit_log_creation() {
     .await
     .expect("Log audit failed");
 
+    // Verification-only direct query. Never use unscoped direct queries in production code.
     let logs = audit_log::Entity::find()
         .filter(audit_log::Column::TenantId.eq(tenant_id.to_string()))
         .all(&db)

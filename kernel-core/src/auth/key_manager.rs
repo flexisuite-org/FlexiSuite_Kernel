@@ -2,9 +2,8 @@ use chrono::{Duration, Utc};
 use kernel_data::auth_context::TenantId;
 use kernel_data::entities::key_record::{self, ActiveModel, Model};
 use kernel_data::entities::prelude::KeyRecord;
-use rand::{RngCore, rngs::OsRng};
 use ring::{
-    rand::SystemRandom,
+    rand::{SecureRandom, SystemRandom},
     signature::{Ed25519KeyPair, KeyPair},
 };
 use sea_orm::{
@@ -13,6 +12,7 @@ use sea_orm::{
 };
 use std::sync::{LazyLock, RwLock};
 use thiserror::Error;
+use tracing::warn;
 use uuid::Uuid;
 
 #[derive(Debug, Error)]
@@ -33,22 +33,39 @@ static ACTIVE_HMAC_KEY_CACHE: LazyLock<RwLock<Option<Model>>> = LazyLock::new(||
 
 impl KeyManager {
     fn clear_active_hmac_cache() {
-        if let Ok(mut cache) = ACTIVE_HMAC_KEY_CACHE.write() {
-            *cache = None;
+        match ACTIVE_HMAC_KEY_CACHE.write() {
+            Ok(mut cache) => {
+                *cache = None;
+            }
+            Err(poisoned) => {
+                warn!(error = %poisoned, "ACTIVE_HMAC_KEY_CACHE poisoned while clearing");
+                let mut cache = poisoned.into_inner();
+                *cache = None;
+            }
         }
     }
 
     fn read_active_hmac_cache() -> Option<Model> {
-        ACTIVE_HMAC_KEY_CACHE
-            .read()
-            .ok()
-            .and_then(|cache| cache.clone())
+        match ACTIVE_HMAC_KEY_CACHE.read() {
+            Ok(cache) => cache.clone(),
+            Err(poisoned) => {
+                warn!(error = %poisoned, "ACTIVE_HMAC_KEY_CACHE poisoned while reading");
+                poisoned.into_inner().clone()
+            }
+        }
     }
 
     fn write_active_hmac_cache(model: &Model) {
         if model.key_type == "hmac" && model.state == "active" {
-            if let Ok(mut cache) = ACTIVE_HMAC_KEY_CACHE.write() {
-                *cache = Some(model.clone());
+            match ACTIVE_HMAC_KEY_CACHE.write() {
+                Ok(mut cache) => {
+                    *cache = Some(model.clone());
+                }
+                Err(poisoned) => {
+                    warn!(error = %poisoned, "ACTIVE_HMAC_KEY_CACHE poisoned while writing");
+                    let mut cache = poisoned.into_inner();
+                    *cache = Some(model.clone());
+                }
             }
         }
     }
@@ -168,8 +185,10 @@ impl KeyManager {
 
         let (secret, public) = match key_type {
             "hmac" => {
+                let rng = SystemRandom::new();
                 let mut key = vec![0u8; 32];
-                OsRng.fill_bytes(&mut key);
+                rng.fill(&mut key)
+                    .map_err(|_| KeyManagerError::KeyGenError("Failed to fill HMAC key".into()))?;
                 (Some(key), None)
             }
             "paseto_public" => {
@@ -251,13 +270,53 @@ impl KeyManager {
 
     /// Revokes a key immediately.
     pub async fn revoke_key(db: &DatabaseConnection, kid: &str) -> Result<(), KeyManagerError> {
-        let key = KeyRecord::find_by_id(kid).one(db).await?;
+        let txn = db.begin().await?;
+        let key = KeyRecord::find_by_id(kid)
+            .lock_exclusive()
+            .one(&txn)
+            .await?;
         let key = key.ok_or_else(|| KeyManagerError::KeyNotFound(kid.to_string()))?;
+
+        let now = Utc::now();
         let key_type = key.key_type.clone();
+        let algorithm = key.algorithm.clone();
+        let was_active = key.state == "active";
+
         let mut am: ActiveModel = key.into();
         am.state = Set("revoked".to_string());
-        am.revoked_at = Set(Some(Utc::now().into()));
-        am.update(db).await?;
+        am.revoked_at = Set(Some(now.into()));
+        am.update(&txn).await?;
+
+        if was_active {
+            let active_replacement = KeyRecord::find()
+                .filter(key_record::Column::KeyType.eq(key_type.clone()))
+                .filter(key_record::Column::State.eq("active"))
+                .lock_exclusive()
+                .one(&txn)
+                .await?;
+
+            if active_replacement.is_none() {
+                let next_key = KeyRecord::find()
+                    .filter(key_record::Column::KeyType.eq(key_type.clone()))
+                    .filter(key_record::Column::State.eq("next"))
+                    .lock_exclusive()
+                    .one(&txn)
+                    .await?;
+
+                if let Some(next) = next_key {
+                    let mut next_am: ActiveModel = next.into();
+                    next_am.state = Set("active".to_string());
+                    next_am.activated_at = Set(Some(now.into()));
+                    next_am.update(&txn).await?;
+                    Self::create_key(&txn, &key_type, &algorithm, "next").await?;
+                } else {
+                    Self::create_key(&txn, &key_type, &algorithm, "active").await?;
+                    Self::create_key(&txn, &key_type, &algorithm, "next").await?;
+                }
+            }
+        }
+
+        txn.commit().await?;
         if key_type == "hmac" {
             Self::clear_active_hmac_cache();
         }

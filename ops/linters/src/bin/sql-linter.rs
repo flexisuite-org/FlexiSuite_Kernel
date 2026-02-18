@@ -30,7 +30,7 @@ fn main() -> Result<()> {
         Regex::new(r"(?i)SET\s+search_path\s*=\s*flexi\s*,\s*pg_catalog\s*,\s*pg_temp").unwrap();
     // Use (?s) to allow '.' to match newlines for multi-line REVOKE statements
     let re_revoke = Regex::new(r"(?si)REVOKE\s+.*?FROM\s+PUBLIC").unwrap();
-    let re_kernel_mode = Regex::new(r"flexi\.kernel_mode").unwrap();
+    let re_kernel_mode = Regex::new(r"(?i)flexi\.kernel_mode").unwrap();
 
     let mut errors = false;
 
@@ -75,15 +75,6 @@ fn main() -> Result<()> {
                         }
                     }
 
-                    // Check SECURITY DEFINER template vs REVOKE count
-                    let security_definer_count = re_security_definer.find_iter(&content).count();
-                    let revoke_count = re_revoke.find_iter(&content).count();
-
-                    if security_definer_count > revoke_count {
-                        eprintln!("{}: SECURITY DEFINER found {} times but 'REVOKE ... FROM PUBLIC' found only {} times.", path.display(), security_definer_count, revoke_count);
-                        errors = true;
-                    }
-
                     for cap in re_security_definer.find_iter(&content) {
                         let start = cap.start();
                         let line = get_line_number(&content, start);
@@ -97,12 +88,21 @@ fn main() -> Result<()> {
                         let mut end_search = std::cmp::min(content.len(), start + 500);
                         // Ensure we slice at a valid char boundary
                         while !content.is_char_boundary(end_search) {
-                            end_search -= 1;
+                            end_search = end_search.saturating_sub(1);
                         }
                         let window = &content[start_search..end_search];
 
                         if !re_search_path.is_match(window) {
                             eprintln!("{}:{}: SECURITY DEFINER found without 'SET search_path = flexi, pg_catalog, pg_temp' nearby", path.display(), line);
+                            errors = true;
+                        }
+
+                        if re_revoke.find_iter(window).next().is_none() {
+                            eprintln!(
+                                "{}:{}: SECURITY DEFINER found without nearby 'REVOKE ... FROM PUBLIC'",
+                                path.display(),
+                                line
+                            );
                             errors = true;
                         }
                     }

@@ -27,14 +27,8 @@ impl fmt::Debug for Model {
             .field("kid", &self.kid)
             .field("key_type", &self.key_type)
             .field("algorithm", &self.algorithm)
-            .field(
-                "secret_bytes",
-                &self.secret_bytes.as_ref().map(|_| "[REDACTED]"),
-            )
-            .field(
-                "public_bytes",
-                &self.public_bytes.as_ref().map(|_| "[REDACTED]"),
-            )
+            .field("secret_bytes_present", &self.secret_bytes.is_some())
+            .field("public_bytes_present", &self.public_bytes.is_some())
             .field("state", &self.state)
             .field("created_at", &self.created_at)
             .field("activated_at", &self.activated_at)
