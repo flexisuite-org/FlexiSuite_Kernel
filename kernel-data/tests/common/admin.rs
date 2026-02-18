@@ -33,16 +33,13 @@ impl<'a> TestAdminTenantContext<'a> {
     /// Sets a secret for the 'postgres' role.
     pub async fn set_secret(&self, secret: &str) -> Result<(), Box<dyn std::error::Error>> {
         // PostgreSQL's ALTER ROLE ... SET does not support parameters ($1).
-        // Since this is a test helper and the secret is generated internally,
-        // we use string formatting but validate that it only contains safe characters.
-        if !secret.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
-            return Err("Secret contains invalid characters".into());
-        }
-        
+        // Escape single quotes to keep SQL string literal boundaries intact.
+        let escaped_secret = secret.replace('\'', "''");
+
         self.db
             .execute_unprepared(&format!(
                 "ALTER ROLE postgres SET flexi.hmac_secret = '{}'",
-                secret
+                escaped_secret
             ))
             .await?;
         Ok(())
@@ -63,7 +60,7 @@ impl<'a> TestAdminTenantContext<'a> {
         Ok(())
     }
 
-     /// Queries for scalar values using raw SQL.
+    /// Queries for scalar values using raw SQL.
     ///
     /// # Safety
     /// This method allows executing arbitrary SQL, bypassing type checks and
@@ -72,21 +69,26 @@ impl<'a> TestAdminTenantContext<'a> {
         &self,
         sql: &str,
     ) -> Result<Option<sea_orm::QueryResult>, Box<dyn std::error::Error>> {
-       let res = self.db.query_one(Statement::from_string(
-           DbBackend::Postgres,
-            sql.to_owned()
-        )).await?;
+        let res = self
+            .db
+            .query_one(Statement::from_string(DbBackend::Postgres, sql.to_owned()))
+            .await?;
         Ok(res)
     }
 
-     pub async fn query_all_check(
+    /// Queries for multiple rows using raw SQL.
+    ///
+    /// # Safety
+    /// This method allows executing arbitrary SQL, bypassing type checks and
+    /// tenant isolation. It should ONLY be used for test assertions.
+    pub async fn query_all_check(
         &self,
         sql: &str,
     ) -> Result<Vec<sea_orm::QueryResult>, Box<dyn std::error::Error>> {
-       let res = self.db.query_all(Statement::from_string(
-           DbBackend::Postgres,
-            sql.to_owned()
-        )).await?;
+        let res = self
+            .db
+            .query_all(Statement::from_string(DbBackend::Postgres, sql.to_owned()))
+            .await?;
         Ok(res)
     }
 }

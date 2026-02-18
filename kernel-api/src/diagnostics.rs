@@ -6,7 +6,7 @@ use axum::{
     routing::{get, post},
 };
 use chrono::Utc;
-use kernel_core::auth::{KeyManager, TenantContext};
+use kernel_core::auth::{KeyManager, KeyManagerError, TenantContext};
 use kernel_core::diagnostics::{DiagnosticContext, sanitizer::PIISanitizer};
 use kernel_data::{
     DataError, TenantRepository, TenantScoped,
@@ -77,8 +77,12 @@ async fn generate_token_or_500(
     match KeyManager::generate_tenant_token(&ctx_with_db, ctx.tenant_id()).await {
         Ok(token) => Ok(token),
         Err(e) => {
-            tracing::error!("Failed to generate tenant token: {}", e);
-            Err(StatusCode::INTERNAL_SERVER_ERROR)
+            let status = match &e {
+                KeyManagerError::NoActiveKey(_) => StatusCode::SERVICE_UNAVAILABLE,
+                _ => StatusCode::INTERNAL_SERVER_ERROR,
+            };
+            tracing::error!(error = %e, status = %status, "Failed to generate tenant token");
+            Err(status)
         }
     }
 }

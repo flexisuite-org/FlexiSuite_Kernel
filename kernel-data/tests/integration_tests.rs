@@ -2,8 +2,8 @@
 //!
 //! # TenantContext Exception Notice
 //!
-//! The setup helpers in this module (admin operations handled via `TestAdminTenantContext`) 
-//! intentionally bypass `TenantContext`. This is an **explicit, test-only exception** to the 
+//! The setup helpers in this module (admin operations handled via `TestAdminTenantContext`)
+//! intentionally bypass `TenantContext`. This is an **explicit, test-only exception** to the
 //! project-wide rule that all DB access must go through `TenantContext`. These operations are
 //! administrative bootstrap steps that have no tenant scope by nature (they run
 //! as the superuser before any tenant exists). Production code MUST NOT follow
@@ -39,15 +39,24 @@ async fn test_tenant_isolation_rls() {
     let admin = TestAdminTenantContext::new(&db);
 
     // Verify Role Exists
-    admin.create_role().await.expect("Failed to create role flexi");
+    admin
+        .create_role()
+        .await
+        .expect("Failed to create role flexi");
 
     // 2. Run Migrations
-    admin.run_migrations().await.expect("Failed to run migrations");
+    admin
+        .run_migrations()
+        .await
+        .expect("Failed to run migrations");
 
     // 3. Configure Internal Database Secret (GUC)
     // NOTE: TEST_INTERNAL_SECRET is a compile-time constant in this test module.
     // Do not copy this interpolation pattern for runtime/user-controlled values.
-    admin.set_secret(TEST_INTERNAL_SECRET).await.expect("Failed to set flexi.hmac_secret for node");
+    admin
+        .set_secret(TEST_INTERNAL_SECRET)
+        .await
+        .expect("Failed to set flexi.hmac_secret for node");
 
     // 4. Reconnect to ensure all pool connections pick up the new GUC
     drop(db);
@@ -164,7 +173,8 @@ async fn test_migration_succeeds_without_flexi_role() {
     assert_eq!(rows.len(), 0, "Role flexi should not exist yet");
 
     // Run Migrations
-    admin.run_migrations()
+    admin
+        .run_migrations()
         .await
         .expect("Migration failed when role flexi is missing");
 
@@ -187,11 +197,20 @@ async fn test_authorize_rejects_nonce_reuse() {
     let db = Database::connect(&connection_string)
         .await
         .expect("Failed to connect to DB");
-    
+
     let admin = TestAdminTenantContext::new(&db);
-    admin.create_role().await.expect("Failed to create role flexi");
-    admin.run_migrations().await.expect("Failed to run migrations");
-    admin.set_secret(TEST_INTERNAL_SECRET).await.expect("Failed to set flexi.hmac_secret");
+    admin
+        .create_role()
+        .await
+        .expect("Failed to create role flexi");
+    admin
+        .run_migrations()
+        .await
+        .expect("Failed to run migrations");
+    admin
+        .set_secret(TEST_INTERNAL_SECRET)
+        .await
+        .expect("Failed to set flexi.hmac_secret");
     drop(db);
 
     let db = Database::connect(&connection_string)
@@ -235,20 +254,26 @@ async fn test_authorized_tenant_id_rejects_manual_context_tampering() {
         .expect("Failed to connect to DB");
 
     let admin = TestAdminTenantContext::new(&db);
-    admin.create_role().await.expect("Failed to create role flexi");
-    admin.run_migrations().await.expect("Failed to run migrations");
+    admin
+        .create_role()
+        .await
+        .expect("Failed to create role flexi");
+    admin
+        .run_migrations()
+        .await
+        .expect("Failed to run migrations");
 
     // We use a transaction here to simulate a session where we try to tamper
     let txn = db.begin().await.expect("Failed to start transaction");
-    
-    // We cannot use the safe admin helper here because we need to be inside *this* transaction 
-    // to test the session-local state tampering. We are simulating an attacker who has 
+
+    // We cannot use the safe admin helper here because we need to be inside *this* transaction
+    // to test the session-local state tampering. We are simulating an attacker who has
     // somehow gotten raw SQL access within a transaction.
     //
     // Note: This test explicitly verifies that *even if* someone tries to set these variables
     // manually, our security functions will reject it if the signature logic isn't satisfied
     // (which is checked by authorized_tenant_id).
-    
+
     // 1. Manually set the secret (simulating server config)
     txn.execute(Statement::from_sql_and_values(
         DbBackend::Postgres,

@@ -79,11 +79,25 @@ fn tokenize_args(args_list: &str) -> Result<Vec<String>, String> {
             continue;
         }
 
-        let default_pos = parts.iter().position(|&p| p.to_uppercase() == "DEFAULT");
+        let mut parts_slice = parts.as_slice();
+        let leading_mode = parts_slice[0].to_ascii_uppercase();
+        if matches!(leading_mode.as_str(), "IN" | "OUT" | "INOUT" | "VARIADIC") {
+            if leading_mode == "OUT" {
+                continue;
+            }
+            parts_slice = &parts_slice[1..];
+            if parts_slice.is_empty() {
+                continue;
+            }
+        }
+
+        let default_pos = parts_slice
+            .iter()
+            .position(|&p| p.eq_ignore_ascii_case("DEFAULT"));
         let type_parts = if let Some(pos) = default_pos {
-            &parts[..pos]
+            &parts_slice[..pos]
         } else {
-            &parts[..]
+            parts_slice
         };
 
         if type_parts.len() >= 2 {
@@ -230,7 +244,13 @@ fn parse_create_function_signature(
             '"' => in_double_quote = true,
             '(' => depth += 1,
             ')' => {
-                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    return Err(
+                        "Unbalanced closing parenthesis while parsing CREATE FUNCTION arguments"
+                            .to_string(),
+                    );
+                }
+                depth -= 1;
                 if depth == 0 {
                     let args = input[args_start..i].to_string();
                     let func_name = identifier_parts.join(".");
@@ -383,8 +403,14 @@ fn main() -> Result<()> {
                             func_name_regex, arg_signature
                         );
 
+                        let mut revoke_search_start = last_func.start();
+                        while !content.is_char_boundary(revoke_search_start) {
+                            revoke_search_start = revoke_search_start.saturating_sub(1);
+                        }
+                        let revoke_window = &content[revoke_search_start..];
+
                         let re_targeted_revoke = Regex::new(&revoke_pattern).unwrap();
-                        if !re_targeted_revoke.is_match(window) {
+                        if !re_targeted_revoke.is_match(revoke_window) {
                             eprintln!(
                                 "{}:{}: SECURITY DEFINER found for function '{}' without nearby 'REVOKE ... ON FUNCTION {}({}) FROM PUBLIC'",
                                 path.display(),

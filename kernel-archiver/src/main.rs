@@ -92,11 +92,13 @@ async fn main() -> Result<()> {
 
     let config = load_config()?;
 
-    let db = std::sync::Arc::new(Database::connect(&config.database_url)
-        .await
-        .context("failed to connect database")?);
+    let db = std::sync::Arc::new(
+        Database::connect(&config.database_url)
+            .await
+            .context("failed to connect database")?,
+    );
     info!("Connected to database");
-    
+
     use kernel_core::auth::SystemTenantContext;
     let init_ctx = TenantContext::from(SystemTenantContext).with_db(db.clone());
     KeyManager::rotate_keys(&init_ctx)
@@ -251,7 +253,11 @@ fn parse_object_lock_config() -> Result<Option<ObjectLockConfig>> {
     }))
 }
 
-async fn run_archive_cycle(db: &std::sync::Arc<DatabaseConnection>, s3: &Client, config: &AppConfig) -> Result<()> {
+async fn run_archive_cycle(
+    db: &std::sync::Arc<DatabaseConnection>,
+    s3: &Client,
+    config: &AppConfig,
+) -> Result<()> {
     use kernel_core::auth::SystemTenantContext;
     let system_ctx = TenantContext::from(SystemTenantContext).with_db(db.clone());
     KeyManager::rotate_keys(&system_ctx)

@@ -30,10 +30,18 @@ pub enum KeyManagerError {
 pub struct KeyManager;
 
 impl KeyManager {
+    fn ensure_system(ctx: &TenantContext) -> Result<(), KeyManagerError> {
+        if !ctx.is_system() {
+            return Err(KeyManagerError::Unauthorized(
+                "Key management operation requires system tenant context".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
     /// Rotates keys for all supported types.
-    pub async fn rotate_keys(
-        ctx: &TenantContext,
-    ) -> Result<(), KeyManagerError> {
+    pub async fn rotate_keys(ctx: &TenantContext) -> Result<(), KeyManagerError> {
+        Self::ensure_system(ctx)?;
         let db = ctx.db().map_err(|e| sea_orm::DbErr::Custom(e))?;
         let key_types = vec![(KeyType::Hmac, "HS256"), (KeyType::PasetoPublic, "Ed25519")];
 
@@ -212,6 +220,14 @@ impl KeyManager {
         ctx: &TenantContext,
         key_type: KeyType,
     ) -> Result<Model, KeyManagerError> {
+        Self::ensure_system(ctx)?;
+        Self::get_active_key_internal(ctx, key_type).await
+    }
+
+    async fn get_active_key_internal(
+        ctx: &TenantContext,
+        key_type: KeyType,
+    ) -> Result<Model, KeyManagerError> {
         let db = ctx.db().map_err(|e| sea_orm::DbErr::Custom(e))?;
         let key = KeyRecord::find()
             .filter(key_record::Column::KeyType.eq(key_type.clone()))
@@ -223,10 +239,8 @@ impl KeyManager {
     }
 
     /// Gets a specific key by KID (for verification).
-    pub async fn get_key(
-        ctx: &TenantContext,
-        kid: &str,
-    ) -> Result<Model, KeyManagerError> {
+    pub async fn get_key(ctx: &TenantContext, kid: &str) -> Result<Model, KeyManagerError> {
+        Self::ensure_system(ctx)?;
         let db = ctx.db().map_err(|e| sea_orm::DbErr::Custom(e))?;
         KeyRecord::find_by_id(kid)
             .one(db)
@@ -235,10 +249,8 @@ impl KeyManager {
     }
 
     /// Revokes a key immediately.
-    pub async fn revoke_key(
-        ctx: &TenantContext,
-        kid: &str,
-    ) -> Result<(), KeyManagerError> {
+    pub async fn revoke_key(ctx: &TenantContext, kid: &str) -> Result<(), KeyManagerError> {
+        Self::ensure_system(ctx)?;
         let db = ctx.db().map_err(|e| sea_orm::DbErr::Custom(e))?;
         let txn = db.begin().await?;
         let key = KeyRecord::find_by_id(kid)
@@ -304,7 +316,7 @@ impl KeyManager {
             )));
         }
 
-        let active_key = Self::get_active_key(ctx, KeyType::Hmac).await?;
+        let active_key = Self::get_active_key_internal(ctx, KeyType::Hmac).await?;
         let secret = active_key.secret_bytes.ok_or_else(|| {
             KeyManagerError::KeyGenError("No secret bytes for HMAC key".to_string())
         })?;
