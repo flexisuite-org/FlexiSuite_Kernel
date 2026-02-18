@@ -10,7 +10,6 @@ use axum::{
 use base64::prelude::*;
 use http_body_util::BodyExt;
 use kernel_core::idempotency::canonicalize_request_target;
-#[cfg(any(test, feature = "test-utils"))]
 use kernel_core::quota::{QuotaLayer, QuotaViolation};
 use redis::AsyncCommands;
 use ring::digest::{SHA256, digest};
@@ -1825,7 +1824,6 @@ fn build_replay_response(record: &IdempotencyRecord) -> Response {
     res
 }
 
-#[cfg(any(test, feature = "test-utils"))]
 fn violation_to_response(v: &QuotaViolation) -> Response {
     let mut res = violation_to_status(v).into_response();
     for (name, val) in v.headers() {
@@ -1914,7 +1912,6 @@ fn response_not_cacheable_for_replay(headers: &HeaderMap, max_size: usize) -> bo
         .is_some_and(|n| n > max_size)
 }
 
-#[cfg(any(test, feature = "test-utils"))]
 fn violation_to_status(v: &QuotaViolation) -> StatusCode {
     match v.layer {
         QuotaLayer::SystemHardLimit => StatusCode::SERVICE_UNAVAILABLE,
