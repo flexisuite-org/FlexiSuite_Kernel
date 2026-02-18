@@ -76,16 +76,20 @@ where
     let txn = pool.begin().await.map_err(DataError::DbError)?;
 
     // 1. Authorize
-    txn.execute(Statement::from_sql_and_values(
-        DbBackend::Postgres,
-        "SELECT flexi.authorize_tenant($1)",
-        [token.into()],
-    ))
-    .await
-    .map_err(|e| {
+    if let Err(e) = txn
+        .execute(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "SELECT flexi.authorize_tenant($1)",
+            [token.into()],
+        ))
+        .await
+    {
         warn!("Tenant authorization failed via DB: {}", e);
-        DataError::TenantAuthorizationFailed(e.to_string())
-    })?;
+        if let Err(rollback_err) = txn.rollback().await {
+            error!("rollback failed after authorization failure: {rollback_err}");
+        }
+        return Err(DataError::TenantAuthorizationFailed(e.to_string()));
+    }
 
     let token_tenant = if let Some(tid) = parse_tenant_from_token(token) {
         tid

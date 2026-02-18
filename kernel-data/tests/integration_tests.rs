@@ -18,7 +18,7 @@ async fn test_tenant_isolation_rls() {
     let docker = clients::Cli::default();
     let image = RunnableImage::from(Postgres::default()).with_tag("15-alpine");
     let node = docker.run(image);
-    let port = node.get_host_port_ipv4(5432);
+    let port = node.get_host_port_ipv4(5432).unwrap();
     let connection_string = format!("postgres://postgres:postgres@127.0.0.1:{}/postgres", port);
 
     // 1. Connect
@@ -142,7 +142,7 @@ async fn test_migration_succeeds_without_flexi_role() {
     let docker = clients::Cli::default();
     let image = RunnableImage::from(Postgres::default()).with_tag("15-alpine");
     let node = docker.run(image);
-    let port = node.get_host_port_ipv4(5432);
+    let port = node.get_host_port_ipv4(5432).unwrap();
     let connection_string = format!("postgres://postgres:postgres@127.0.0.1:{}/postgres", port);
 
     let db = Database::connect(&connection_string)
@@ -182,7 +182,7 @@ async fn test_authorize_rejects_nonce_reuse() {
     let docker = clients::Cli::default();
     let image = RunnableImage::from(Postgres::default()).with_tag("15-alpine");
     let node = docker.run(image);
-    let port = node.get_host_port_ipv4(5432);
+    let port = node.get_host_port_ipv4(5432).unwrap();
     let connection_string = format!("postgres://postgres:postgres@127.0.0.1:{}/postgres", port);
 
     let db = Database::connect(&connection_string)
@@ -235,7 +235,7 @@ async fn test_authorized_tenant_id_rejects_manual_context_tampering() {
     let docker = clients::Cli::default();
     let image = RunnableImage::from(Postgres::default()).with_tag("15-alpine");
     let node = docker.run(image);
-    let port = node.get_host_port_ipv4(5432);
+    let port = node.get_host_port_ipv4(5432).unwrap();
     let connection_string = format!("postgres://postgres:postgres@127.0.0.1:{}/postgres", port);
 
     let db = Database::connect(&connection_string)

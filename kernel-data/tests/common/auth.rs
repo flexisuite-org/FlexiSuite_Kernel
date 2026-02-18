@@ -34,6 +34,13 @@ impl TestAuth {
     }
 
     /// Helper that mirrors `KeyManager::generate_tenant_token` (v2:kid:ts:nonce:tenant_id:sig).
+    ///
+    /// TODO: Ideally this should call `KeyManager::generate_tenant_token` directly from kernel-core.
+    /// However, adding kernel-core as a dev-dependency of kernel-data creates a circular dependency
+    /// (kernel-data → kernel-core → kernel-data). Until this cycle is resolved (e.g., by extracting
+    /// shared token logic into a separate crate), this helper must be kept in sync with
+    /// `KeyManager::generate_tenant_token` manually.
+    ///
     /// WARNING: This logic duplicates `KeyManager` implementation. If the token format or signing
     /// logic changes in `KeyManager`, this MUST be updated to match.
     pub async fn generate_tenant_token(

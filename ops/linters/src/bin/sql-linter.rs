@@ -43,8 +43,7 @@ fn main() -> Result<()> {
             let s = c.as_os_str().to_string_lossy();
             s.starts_with('.') && s != "." && s != ".."
         }) || path.components().any(|c| c.as_os_str() == "target")
-            || path.iter().any(|c| c.to_string_lossy() == "ops")
-                && path.iter().any(|c| c.to_string_lossy() == "linters")
+            || path.starts_with(Path::new("ops").join("linters"))
         {
             continue;
         }
