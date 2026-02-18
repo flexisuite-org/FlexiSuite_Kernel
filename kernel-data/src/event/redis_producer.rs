@@ -1,5 +1,5 @@
-use async_trait::async_trait;
 use crate::event::{EventEnvelope, EventError, PublishAck, ReliableProducer, SHARD_COUNT};
+use async_trait::async_trait;
 use redis::Client;
 use redis::aio::ConnectionManager;
 use std::hash::Hasher;

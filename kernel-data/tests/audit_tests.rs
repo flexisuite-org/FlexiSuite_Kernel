@@ -57,9 +57,7 @@ async fn test_audit_log_creation() {
         .expect("Reconnect failed");
 
     // Init Keys
-    TestAuth::init_keys(&db)
-        .await
-        .expect("Failed to init keys");
+    TestAuth::init_keys(&db).await.expect("Failed to init keys");
 
     // Tenant Context
     let tenant_id = TenantId::new("audit-tenant").unwrap();

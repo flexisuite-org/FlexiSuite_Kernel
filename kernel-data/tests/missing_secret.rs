@@ -39,9 +39,7 @@ async fn test_auth_failures() {
         .expect("Failed to reconnect");
 
     // Init Keys
-    TestAuth::init_keys(&db)
-        .await
-        .expect("Failed to init keys");
+    TestAuth::init_keys(&db).await.expect("Failed to init keys");
 
     let tenant_id = TenantId::new("tenant-x").unwrap();
     let ctx = TenantContext::new(tenant_id.clone(), Some(UserId::new("user-1").unwrap()));

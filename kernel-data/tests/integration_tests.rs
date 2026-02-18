@@ -6,7 +6,7 @@ use kernel_data::connection::{RawConnection, TenantScoped, with_tenant_tx};
 use kernel_data::entities::entity_record;
 use kernel_data::repository::TenantRepository;
 use migration::MigratorTrait;
-use sea_orm::{ActiveValue, ConnectionTrait, Database, DbBackend, Statement};
+use sea_orm::{ActiveValue, ConnectionTrait, Database, DbBackend, Statement, TransactionTrait};
 use testcontainers::{RunnableImage, clients};
 use testcontainers_modules::postgres::Postgres;
 use uuid::Uuid;
@@ -175,4 +175,108 @@ async fn test_migration_succeeds_without_flexi_role() {
         .await
         .expect("Failed to query schema");
     assert_eq!(schema_exists.len(), 1, "Schema flexi should exist");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_authorize_rejects_nonce_reuse() {
+    let docker = clients::Cli::default();
+    let image = RunnableImage::from(Postgres::default()).with_tag("15-alpine");
+    let node = docker.run(image);
+    let port = node.get_host_port_ipv4(5432);
+    let connection_string = format!("postgres://postgres:postgres@127.0.0.1:{}/postgres", port);
+
+    let db = Database::connect(&connection_string)
+        .await
+        .expect("Failed to connect to DB");
+    db.execute_unprepared("DO $$ BEGIN IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = 'flexi') THEN CREATE ROLE flexi; END IF; END $$;")
+        .await
+        .expect("Failed to create role flexi");
+    migration::Migrator::up(&db, None)
+        .await
+        .expect("Failed to run migrations");
+    db.execute_unprepared(&format!(
+        "ALTER ROLE postgres SET flexi.hmac_secret = '{}'",
+        TEST_INTERNAL_SECRET
+    ))
+    .await
+    .expect("Failed to set flexi.hmac_secret");
+    drop(db);
+
+    let db = Database::connect(&connection_string)
+        .await
+        .expect("Failed to reconnect to DB");
+    TestAuth::init_keys(&db).await.expect("Failed to init keys");
+
+    let tenant_id = TenantId::new("nonce-tenant").unwrap();
+    let ctx = TenantContext::new(tenant_id.clone(), Some(UserId::new("user-1").unwrap()));
+    let token = TestAuth::generate_tenant_token(&db, &tenant_id)
+        .await
+        .expect("Failed to generate token");
+
+    with_tenant_tx(&db, &ctx, &token, |_| Box::pin(async { Ok(()) }))
+        .await
+        .expect("First token usage should succeed");
+
+    let second = with_tenant_tx(&db, &ctx, &token, |_| Box::pin(async { Ok(()) })).await;
+    assert!(
+        second.is_err(),
+        "Second token usage must fail due to nonce reuse"
+    );
+    let err = second.unwrap_err().to_string();
+    assert!(
+        err.contains("Nonce already used"),
+        "Expected nonce reuse error, got: {}",
+        err
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_authorized_tenant_id_rejects_manual_context_tampering() {
+    let docker = clients::Cli::default();
+    let image = RunnableImage::from(Postgres::default()).with_tag("15-alpine");
+    let node = docker.run(image);
+    let port = node.get_host_port_ipv4(5432);
+    let connection_string = format!("postgres://postgres:postgres@127.0.0.1:{}/postgres", port);
+
+    let db = Database::connect(&connection_string)
+        .await
+        .expect("Failed to connect to DB");
+    db.execute_unprepared("DO $$ BEGIN IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = 'flexi') THEN CREATE ROLE flexi; END IF; END $$;")
+        .await
+        .expect("Failed to create role flexi");
+    migration::Migrator::up(&db, None)
+        .await
+        .expect("Failed to run migrations");
+
+    let txn = db.begin().await.expect("Failed to start transaction");
+    txn.execute(Statement::from_sql_and_values(
+        DbBackend::Postgres,
+        "SELECT set_config('flexi.hmac_secret', $1, true)",
+        [TEST_INTERNAL_SECRET.into()],
+    ))
+    .await
+    .expect("Failed to set test secret in transaction");
+    txn.execute(Statement::from_sql_and_values(
+        DbBackend::Postgres,
+        "SELECT set_config('flexi.current_tenant', 'attacker', true)",
+        [],
+    ))
+    .await
+    .expect("Failed to tamper tenant context");
+
+    let res = txn
+        .query_one(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "SELECT flexi.authorized_tenant_id()",
+            [],
+        ))
+        .await;
+
+    assert!(res.is_err(), "Tampered context must be rejected");
+    let err = res.unwrap_err().to_string();
+    assert!(
+        err.contains("Tenant context integrity check failed"),
+        "Expected integrity error, got: {}",
+        err
+    );
 }
