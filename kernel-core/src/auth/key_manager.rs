@@ -10,9 +10,7 @@ use sea_orm::{
     ActiveModelTrait, ColumnTrait, ConnectionTrait, DatabaseConnection, DbBackend, EntityTrait,
     QueryFilter, QuerySelect, Set, Statement, TransactionTrait,
 };
-use std::sync::{LazyLock, RwLock};
 use thiserror::Error;
-use tracing::warn;
 use uuid::Uuid;
 
 #[derive(Debug, Error)]
@@ -29,56 +27,7 @@ pub enum KeyManagerError {
 
 pub struct KeyManager;
 
-/// Process-local cache for the active HMAC key.
-///
-/// This cache is NOT coherent across multiple service instances.
-/// - It allows this specific process to validate tokens without hitting the DB for every request.
-/// - If another instance rotates the keys, this cache remains stale until `KeyManager::rotate_keys`
-///   runs on THIS instance (or the cache TTL/invalidation logic triggers).
-/// - `authorize_tenant` allows retired keys for 48 hours, so signing with an old active key (stale cache)
-///   is acceptable during that transition window.
-/// - All instances MUST run `rotate_keys` periodically (e.g., via cron) to ensure local consistency.
-static ACTIVE_HMAC_KEY_CACHE: LazyLock<RwLock<Option<Model>>> = LazyLock::new(|| RwLock::new(None));
-
 impl KeyManager {
-    fn clear_active_hmac_cache() {
-        match ACTIVE_HMAC_KEY_CACHE.write() {
-            Ok(mut cache) => {
-                *cache = None;
-            }
-            Err(poisoned) => {
-                warn!(error = %poisoned, "ACTIVE_HMAC_KEY_CACHE poisoned while clearing");
-                let mut cache = poisoned.into_inner();
-                *cache = None;
-            }
-        }
-    }
-
-    fn read_active_hmac_cache() -> Option<Model> {
-        match ACTIVE_HMAC_KEY_CACHE.read() {
-            Ok(cache) => cache.clone(),
-            Err(poisoned) => {
-                warn!(error = %poisoned, "ACTIVE_HMAC_KEY_CACHE poisoned while reading");
-                poisoned.into_inner().clone()
-            }
-        }
-    }
-
-    fn write_active_hmac_cache(model: &Model) {
-        if model.key_type == KeyType::Hmac && model.state == KeyState::Active {
-            match ACTIVE_HMAC_KEY_CACHE.write() {
-                Ok(mut cache) => {
-                    *cache = Some(model.clone());
-                }
-                Err(poisoned) => {
-                    warn!(error = %poisoned, "ACTIVE_HMAC_KEY_CACHE poisoned while writing");
-                    let mut cache = poisoned.into_inner();
-                    *cache = Some(model.clone());
-                }
-            }
-        }
-    }
-
     /// Rotates keys for all supported types.
     pub async fn rotate_keys(db: &DatabaseConnection) -> Result<(), KeyManagerError> {
         let key_types = vec![(KeyType::Hmac, "HS256"), (KeyType::PasetoPublic, "Ed25519")];
@@ -184,9 +133,6 @@ impl KeyManager {
             .await?;
 
         txn.commit().await?;
-        if key_type == KeyType::Hmac {
-            Self::clear_active_hmac_cache();
-        }
         Ok(())
     }
 
@@ -248,36 +194,24 @@ impl KeyManager {
             expires_at: Set(None), // Can set hard expiry if needed
         };
 
-        let res = active_model.insert(db).await?;
-        if key_type == KeyType::Hmac && state == KeyState::Active {
-            Self::write_active_hmac_cache(&res);
-        }
-        Ok(res)
+        active_model.insert(db).await.map_err(Into::into)
     }
 
-    /// Gets the current active key for signing.
-    /// Gets the current active key for signing.
+    /// Gets the current active key for signing/verification.
+    ///
+    /// For HMAC signing keys, we always read the authoritative active key from DB
+    /// to avoid stale process-local cache after cross-instance revocation.
     pub async fn get_active_key(
         db: &DatabaseConnection,
         key_type: KeyType,
     ) -> Result<Model, KeyManagerError> {
-        if key_type == KeyType::Hmac {
-            if let Some(cached) = Self::read_active_hmac_cache() {
-                return Ok(cached);
-            }
-        }
-
         let key = KeyRecord::find()
             .filter(key_record::Column::KeyType.eq(key_type.clone()))
             .filter(key_record::Column::State.eq(KeyState::Active))
             .one(db)
             .await?;
 
-        let key = key.ok_or_else(|| KeyManagerError::NoActiveKey(format!("{:?}", key_type)))?;
-        if key_type == KeyType::Hmac {
-            Self::write_active_hmac_cache(&key);
-        }
-        Ok(key)
+        key.ok_or_else(|| KeyManagerError::NoActiveKey(format!("{:?}", key_type)))
     }
 
     /// Gets a specific key by KID (for verification).
@@ -337,9 +271,6 @@ impl KeyManager {
         }
 
         txn.commit().await?;
-        if key_type == KeyType::Hmac {
-            Self::clear_active_hmac_cache();
-        }
         Ok(())
     }
 

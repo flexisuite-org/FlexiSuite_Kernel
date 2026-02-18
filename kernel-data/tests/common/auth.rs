@@ -1,4 +1,3 @@
-
 use chrono::Utc;
 use kernel_data::auth_context::TenantId;
 use kernel_data::entities::key_record::{self, ActiveModel, KeyState, KeyType};
@@ -12,8 +11,7 @@ impl TestAuth {
     pub async fn init_keys(db: &DatabaseConnection) -> Result<(), Box<dyn std::error::Error>> {
         let rng = SystemRandom::new();
         let mut key = vec![0u8; 32];
-        rng.fill(&mut key)
-            .map_err(|_| "Failed to fill HMAC key")?;
+        rng.fill(&mut key).map_err(|_| "Failed to fill HMAC key")?;
 
         let kid = format!("hmac-{}-{}", Utc::now().timestamp(), Uuid::now_v7());
 
