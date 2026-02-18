@@ -44,7 +44,9 @@ async fn main() {
     KeyManager::rotate_keys(&init_ctx)
         .await
         .unwrap_or_else(|e| {
-            eprintln!("Failed to initialize key rotation state: {e}");
+            eprintln!(
+                "Failed to initialize key rotation state: {e}. If this is due to missing key-management migrations, run migrations for key_record or perform a preflight migration check."
+            );
             std::process::exit(1);
         });
 

@@ -333,8 +333,15 @@ fn main() -> Result<()> {
                         let start = cap.start();
                         let line = get_line_number(&content, start);
 
-                        // Check search_path and REVOKE in the vicinity (bidirectional 1000 chars total)
-                        let mut start_lookback = if start > 500 { start - 500 } else { 0 };
+                        let last_func_span = re_create_function
+                            .find_iter(&content[..start])
+                            .last()
+                            .map(|m| (m.start(), m.end()));
+
+                        // search_path must be set from CREATE FUNCTION through SECURITY DEFINER.
+                        let mut start_lookback = last_func_span
+                            .map(|(func_start, _)| func_start)
+                            .unwrap_or(0);
                         while !content.is_char_boundary(start_lookback) {
                             start_lookback = start_lookback.saturating_sub(1);
                         }
@@ -351,9 +358,7 @@ fn main() -> Result<()> {
                         }
 
                         // Targeted REVOKE check
-                        let Some(last_func) =
-                            re_create_function.find_iter(&content[..start]).last()
-                        else {
+                        let Some((last_func_start, last_func_end)) = last_func_span else {
                             eprintln!(
                                 "{}:{}: SECURITY DEFINER found but no preceding CREATE FUNCTION could be located for targeted REVOKE validation",
                                 path.display(),
@@ -365,7 +370,7 @@ fn main() -> Result<()> {
 
                         let (func_name, args_list) = match parse_create_function_signature(
                             &content,
-                            last_func.end(),
+                            last_func_end,
                         ) {
                             Ok(parsed) => parsed,
                             Err(e) => {
@@ -403,7 +408,7 @@ fn main() -> Result<()> {
                             func_name_regex, arg_signature
                         );
 
-                        let mut revoke_search_start = last_func.start();
+                        let mut revoke_search_start = last_func_start;
                         while !content.is_char_boundary(revoke_search_start) {
                             revoke_search_start = revoke_search_start.saturating_sub(1);
                         }
