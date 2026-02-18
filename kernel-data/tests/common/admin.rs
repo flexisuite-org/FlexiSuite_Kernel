@@ -34,6 +34,8 @@ impl<'a> TestAdminTenantContext<'a> {
     pub async fn set_secret(&self, secret: &str) -> Result<(), Box<dyn std::error::Error>> {
         // PostgreSQL's ALTER ROLE ... SET does not support parameters ($1).
         // Escape single quotes to keep SQL string literal boundaries intact.
+        // WARNING: This escaping is acceptable only for test-only, compile-time-controlled
+        // inputs. Callers MUST NEVER pass user-provided data into this method.
         let escaped_secret = secret.replace('\'', "''");
 
         self.db

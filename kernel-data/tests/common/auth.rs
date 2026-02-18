@@ -47,9 +47,11 @@ impl TestAuth {
     /// (kernel-data → kernel-core → kernel-data). Until this cycle is resolved (e.g., by extracting
     /// shared token logic into a separate crate), this helper must be kept in sync with
     /// `KeyManager::generate_tenant_token` manually.
+    /// Tracking Issue: `docs/tech_debt/issue_kernel_token_extraction.md`
     ///
     /// WARNING: This logic duplicates `KeyManager` implementation. If the token format or signing
     /// logic changes in `KeyManager`, this MUST be updated to match.
+    /// See: `docs/tech_debt/issue_kernel_token_extraction.md`
     pub async fn generate_tenant_token(
         db: &DatabaseConnection,
         tenant_id: &TenantId,
