@@ -1,5 +1,6 @@
 pub mod connection;
 pub mod entities;
+pub mod event;
 pub mod repository;
 
 pub use connection::{TenantScoped, with_tenant_tx, init_hmac_secret};
