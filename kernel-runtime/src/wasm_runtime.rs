@@ -12,6 +12,7 @@ use wasmtime_wasi::p2::pipe::{MemoryInputPipe, MemoryOutputPipe};
 pub struct WasmSandbox {
     engine: Engine,
     options: RuntimeOptions,
+    watchdog: Option<(Arc<AtomicBool>, std::thread::JoinHandle<()>)>,
 }
 
 impl WasmSandbox {
@@ -23,7 +24,7 @@ impl WasmSandbox {
 
         let engine = Engine::new(&config).map_err(|e| SandboxError::InitError(e.to_string()))?;
 
-        Ok(Self { engine, options })
+        Ok(Self { engine, options, watchdog: None })
     }
 }
 
@@ -38,18 +39,18 @@ fn map_wasm_error(error: anyhow::Error) -> SandboxError {
         return match trap {
             Trap::OutOfFuel => SandboxError::CpuLimitExceeded,
             Trap::Interrupt => SandboxError::Timeout,
-            Trap::AllocationTooLarge | Trap::MemoryOutOfBounds => SandboxError::MemoryLimitExceeded,
+            Trap::AllocationTooLarge => SandboxError::MemoryLimitExceeded,
+            Trap::MemoryOutOfBounds => SandboxError::RuntimeError("memory out of bounds".to_string()),
             _ => SandboxError::RuntimeError(error.to_string()),
         };
     }
 
     let message = error.to_string();
     // String mapping fallback for wasmtime 41.0.3 diagnostics when no Trap is available.
-    if message.contains("allocation too large")
-        || message.contains("memory out of bounds")
-        || message.contains("exceeds memory limits")
-    {
+    if message.contains("allocation too large") || message.contains("exceeded memory limits") {
         SandboxError::MemoryLimitExceeded
+    } else if message.contains("memory out of bounds") {
+        SandboxError::RuntimeError(message)
     } else {
         SandboxError::RuntimeError(message)
     }
@@ -73,8 +74,8 @@ impl SandboxRuntime for WasmSandbox {
         wasmtime_wasi::p1::add_to_linker_async(&mut linker, |ctx: &mut Ctx| &mut ctx.wasi)
             .map_err(|e| SandboxError::InitError(e.to_string()))?;
 
-        const MAX_STDOUT_SIZE: usize = 1 << 20;
-        let stdout = MemoryOutputPipe::new(MAX_STDOUT_SIZE);
+        let max_stdout = self.options.max_output_size.unwrap_or(1 << 20);
+        let stdout = MemoryOutputPipe::new(max_stdout);
         let input_json = serde_json::to_string(&input)
             .map_err(|e| SandboxError::RuntimeError(format!("failed to serialize input: {e}")))?;
         let mut wasi_builder = WasiCtxBuilder::new();
@@ -105,16 +106,19 @@ impl SandboxRuntime for WasmSandbox {
         store
             .set_fuel(fuel)
             .map_err(|e| SandboxError::InitError(e.to_string()))?;
+        if let Some((cancel, handle)) = self.watchdog.take() {
+            cancel.store(true, Ordering::SeqCst);
+            let _ = handle.join();
+        }
         store.set_epoch_deadline(1);
         store.epoch_deadline_trap();
-
         let engine_clone = self.engine.clone();
         let timeout = self.options.wall_clock_limit;
         let cancel_watchdog = Arc::new(AtomicBool::new(false));
         let is_wall_timeout = Arc::new(AtomicBool::new(false));
         let watchdog_cancel = cancel_watchdog.clone();
         let wall_timeout_flag = is_wall_timeout.clone();
-        std::thread::spawn(move || {
+        let watchdog_handle = std::thread::spawn(move || {
             let sleep_slice = Duration::from_millis(10);
             let started = std::time::Instant::now();
             while started.elapsed() < timeout {
@@ -128,6 +132,7 @@ impl SandboxRuntime for WasmSandbox {
                 engine_clone.increment_epoch();
             }
         });
+        self.watchdog = Some((cancel_watchdog.clone(), watchdog_handle));
 
         let compile_engine = self.engine.clone();
         let compile_code = code.to_string();
@@ -165,6 +170,12 @@ impl SandboxRuntime for WasmSandbox {
         cancel_watchdog.store(true, Ordering::SeqCst);
 
         let stdout_bytes = store.data().stdout.contents();
+        if stdout_bytes.len() >= max_stdout {
+            return Err(SandboxError::RuntimeError(format!(
+                "stdout limit exceeded (max: {} bytes). Output may be truncated.",
+                max_stdout
+            )));
+        }
         let output = String::from_utf8(stdout_bytes.to_vec()).map_err(|e| {
             SandboxError::RuntimeError(format!(
                 "stdout contains invalid UTF-8: {}. Raw bytes (hex): {}",

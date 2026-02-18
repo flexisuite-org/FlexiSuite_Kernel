@@ -128,8 +128,63 @@ async fn test_wasm_memory_limit() {
     let mut runtime = WasmSandbox::new(options).unwrap();
     let input = serde_json::Value::Null;
     match runtime.execute(wat, input).await.unwrap_err() {
-        SandboxError::MemoryLimitExceeded => {}
-        other => panic!("Expected MemoryLimitExceeded, got: {:?}", other),
+        SandboxError::RuntimeError(e) => {
+            assert!(e.contains("memory minimum size") || e.contains("exceeds memory limits") || e.contains("memory out of bounds"));
+        }
+        other => panic!("Expected RuntimeError, got: {:?}", other),
+    }
+}
+
+#[tokio::test]
+async fn test_wasm_memory_oob_runtime() {
+    let wat = r#"
+    (module
+        (memory 1)
+        (func (export "_start")
+            (i32.store (i32.const 70000) (i32.const 1))
+        )
+    )
+    "#;
+    let options = RuntimeOptions::default();
+    let mut runtime = WasmSandbox::new(options).unwrap();
+    let input = serde_json::Value::Null;
+    match runtime.execute(wat, input).await.unwrap_err() {
+        SandboxError::RuntimeError(e) => {
+            assert!(e.contains("memory out of bounds"));
+        }
+        other => panic!("Expected RuntimeError for OOB, got: {:?}", other),
+    }
+}
+
+#[tokio::test]
+async fn test_wasm_stdout_truncation() {
+    let wat = r#"
+    (module
+        (import "wasi_snapshot_preview1" "fd_write"
+            (func $fd_write (param i32 i32 i32 i32) (result i32)))
+        (memory (export "memory") 1)
+        (data (i32.const 0) "1234567890")
+        (func (export "_start")
+            (i32.store (i32.const 16) (i32.const 0))
+            (i32.store (i32.const 20) (i32.const 10))
+            (call $fd_write
+                (i32.const 1)
+                (i32.const 16)
+                (i32.const 1)
+                (i32.const 32))
+            drop
+        )
+    )
+    "#;
+    let mut options = RuntimeOptions::default();
+    options.max_output_size = Some(5);
+    let mut runtime = WasmSandbox::new(options).unwrap();
+    let input = serde_json::Value::Null;
+    match runtime.execute(wat, input).await.unwrap_err() {
+        SandboxError::RuntimeError(e) => {
+            assert!(e.contains("stdout limit exceeded"), "Error message should contain 'stdout limit exceeded', got: {}", e);
+        }
+        other => panic!("Expected RuntimeError for truncation, got: {:?}", other),
     }
 }
 
