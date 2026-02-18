@@ -17,6 +17,7 @@ kernel-data = { path = "../kernel-data" }
 sea-orm = { version = "1.1.0", features = ["sqlx-postgres", "runtime-tokio-rustls", "macros"] }
 # TODO(security): Revisit once upstream tracing fix is published and validated.
 tracing = "=0.1.43"
+async-trait = "0.1"
 regex = "1.12.3"
 serde_json = "1.0.149"
 uuid = { version = "1.21.0", features = ["serde", "v7"] }

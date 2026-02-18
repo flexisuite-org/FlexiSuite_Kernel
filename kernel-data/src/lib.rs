@@ -2,6 +2,7 @@ pub mod auth_context;
 pub mod connection;
 pub mod entities;
 pub mod error;
+pub mod event;
 pub mod repository;
 
 pub use auth_context::{TenantContext, TenantId, UserId};
