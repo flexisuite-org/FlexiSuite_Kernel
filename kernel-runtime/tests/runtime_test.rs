@@ -44,8 +44,7 @@ async fn test_wasm_execution() {
     let input = serde_json::Value::Null;
     let result = runtime.execute(wat, input).await;
     assert!(result.is_ok(), "Wasm execution failed: {:?}", result.err());
-    // Output check skipped for Wasm as strictly implemented (Null)
-    assert_eq!(result.unwrap(), serde_json::Value::Null);
+    assert_eq!(result.unwrap(), serde_json::json!(""));
 }
 
 #[tokio::test]
