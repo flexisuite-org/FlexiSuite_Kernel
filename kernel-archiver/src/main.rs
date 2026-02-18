@@ -272,28 +272,52 @@ async fn run_archive_cycle(db: &DatabaseConnection, s3: &Client, config: &AppCon
             }
         };
 
-        let tenant_id = ctx.tenant_id().to_string();
+        let tenant_id_str = ctx.tenant_id().to_string();
+        
+        let entity_histories_result = archive_items(
+            "entity history",
+            "entity-history",
+            histories,
+            s3,
+            &bucket,
+            lock_config.as_ref(),
+            &tenant_id_str,
+        )
+        .await;
+
+        let audit_logs_result = archive_items(
+            "audit log",
+            "audit-logs",
+            logs,
+            s3,
+            &bucket,
+            lock_config.as_ref(),
+            &tenant_id_str,
+        )
+        .await;
+
+        let (entity_history_ids, audit_log_ids) = match (entity_histories_result, audit_logs_result) {
+            (Ok(h_ids), Ok(l_ids)) => (h_ids, l_ids),
+            (res_h, res_l) => {
+                if let Err(e) = res_h {
+                    error!(
+                        "Tenant {} failed to archive entity history: {}",
+                        tenant_id, e
+                    );
+                }
+                if let Err(e) = res_l {
+                    error!(
+                        "Tenant {} failed to archive audit logs: {}",
+                        tenant_id, e
+                    );
+                }
+                continue;
+            }
+        };
+
         let mark_plan = MarkPlan {
-            entity_history_ids: archive_items(
-                "entity history",
-                "entity-history",
-                histories,
-                s3,
-                &bucket,
-                lock_config.as_ref(),
-                &tenant_id,
-            )
-            .await?,
-            audit_log_ids: archive_items(
-                "audit log",
-                "audit-logs",
-                logs,
-                s3,
-                &bucket,
-                lock_config.as_ref(),
-                &tenant_id,
-            )
-            .await?,
+            entity_history_ids,
+            audit_log_ids,
         };
 
         if mark_plan.entity_history_ids.is_empty() && mark_plan.audit_log_ids.is_empty() {
