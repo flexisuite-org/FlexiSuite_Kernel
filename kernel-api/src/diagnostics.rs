@@ -226,6 +226,7 @@ async fn update_policy(
     Extension(_ctx): Extension<TenantContext>,
     Json(_payload): Json<UpdatePolicyRequest>,
 ) -> impl IntoResponse {
-    // TODO: enforce tenant-admin via RBAC once available.
+    // TODO(issue-rbac-update-policy-20260218): tenant-admin RBAC check for update_policy を実装する。
+    // Ticket: .kiro/specs/coderabbit_jules_linkage/tickets/issue-rbac-update-policy-20260218.md
     StatusCode::FORBIDDEN.into_response()
 }
