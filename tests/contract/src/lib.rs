@@ -2,8 +2,9 @@ pub mod idempotency;
 pub mod quota;
 pub mod supplychain;
 
-// Contract definitions (mocks/traits)
+#[cfg(test)]
 pub mod event;
+#[cfg(test)]
 pub mod diagnostics;
 
 #[cfg(test)]
