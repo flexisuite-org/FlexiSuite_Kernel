@@ -60,6 +60,7 @@ fn main() -> Result<()> {
                         Ok(c) => c,
                         Err(e) => {
                             eprintln!("Warning: Failed to read file {}: {}", path.display(), e);
+                            errors = true;
                             continue;
                         }
                     };

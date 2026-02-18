@@ -174,6 +174,7 @@ pub struct IdempotencyRecord {
 #[derive(Clone, Debug)]
 pub enum IdempotencyEntry {
     InFlight {
+        owner_token: String,
         body_hash: String,
         notify: Arc<Notify>,
         expires_at: Instant,
@@ -278,6 +279,7 @@ impl IdempotencyStore for InMemoryIdempotencyStore {
         lock.insert(
             key,
             IdempotencyEntry::InFlight {
+                owner_token: lease.owner_token.clone(),
                 body_hash,
                 notify: Arc::new(Notify::new()),
                 expires_at: Instant::now() + ttl,
@@ -289,28 +291,41 @@ impl IdempotencyStore for InMemoryIdempotencyStore {
     async fn complete(
         &self,
         key: IdempotencyScopeKey,
-        _lease: &IdempotencyLease,
+        lease: &IdempotencyLease,
         record: IdempotencyRecord,
     ) -> Result<(), IdempotencyStoreError> {
         let mut lock = self.inner.lock().await;
-        if let Some(IdempotencyEntry::InFlight { notify, .. }) = lock.remove(&key) {
-            lock.insert(key, IdempotencyEntry::Completed(record));
-            notify.notify_waiters();
-        } else {
-            lock.insert(key, IdempotencyEntry::Completed(record));
-        }
+        let notify = match lock.get(&key) {
+            Some(IdempotencyEntry::InFlight {
+                owner_token,
+                notify,
+                ..
+            }) if owner_token == &lease.owner_token => notify.clone(),
+            _ => return Err(IdempotencyStoreError::BackendUnavailable),
+        };
+        lock.insert(key, IdempotencyEntry::Completed(record));
+        drop(lock);
+        notify.notify_waiters();
         Ok(())
     }
 
     async fn release_inflight(
         &self,
         key: &IdempotencyScopeKey,
-        _lease: &IdempotencyLease,
+        lease: &IdempotencyLease,
     ) -> Result<(), IdempotencyStoreError> {
         let mut lock = self.inner.lock().await;
-        if let Some(IdempotencyEntry::InFlight { notify, .. }) = lock.remove(key) {
-            notify.notify_waiters();
-        }
+        let notify = match lock.get(key) {
+            Some(IdempotencyEntry::InFlight {
+                owner_token,
+                notify,
+                ..
+            }) if owner_token == &lease.owner_token => notify.clone(),
+            _ => return Err(IdempotencyStoreError::BackendUnavailable),
+        };
+        lock.remove(key);
+        drop(lock);
+        notify.notify_waiters();
         Ok(())
     }
 
@@ -417,7 +432,104 @@ impl RedisIdempotencyStore {
         alive
     }
 
-    async fn register_waiter(&self, channel: String) -> Arc<Notify> {
+    fn spawn_channel_listener(
+        subscriptions: Arc<Mutex<HashMap<String, ChannelSubscriptionState>>>,
+        client: redis::Client,
+        channel: String,
+    ) {
+        tokio::spawn(async move {
+            let mut pubsub = match client.get_async_pubsub().await {
+                Ok(p) => p,
+                Err(e) => {
+                    error!("Redis pubsub create error: {}", e);
+                    let mut lock = subscriptions.lock().await;
+                    if let Some(state) = lock.get_mut(&channel) {
+                        Self::notify_waiters_and_prune(&mut state.waiters);
+                        state.running = false;
+                    }
+                    return;
+                }
+            };
+
+            if let Err(e) = pubsub.subscribe(&channel).await {
+                error!("Redis pubsub subscribe error: {}", e);
+                let mut lock = subscriptions.lock().await;
+                if let Some(state) = lock.get_mut(&channel) {
+                    Self::notify_waiters_and_prune(&mut state.waiters);
+                    state.running = false;
+                }
+                return;
+            }
+
+            let mut stream = pubsub.on_message();
+            let mut poll_waiters_every = tokio::time::interval(Duration::from_secs(5));
+            poll_waiters_every.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+            loop {
+                tokio::select! {
+                    _ = poll_waiters_every.tick() => {
+                        let has_waiters = {
+                            let mut lock = subscriptions.lock().await;
+                            if let Some(state) = lock.get_mut(&channel) {
+                                Self::prune_waiters(&mut state.waiters) > 0
+                            } else {
+                                false
+                            }
+                        };
+                        if !has_waiters {
+                            break;
+                        }
+                    }
+                    msg = futures_util::StreamExt::next(&mut stream) => {
+                        if msg.is_none() {
+                            break;
+                        }
+                        let has_waiters = {
+                            let mut lock = subscriptions.lock().await;
+                            if let Some(state) = lock.get_mut(&channel) {
+                                Self::notify_waiters_and_prune(&mut state.waiters) > 0
+                            } else {
+                                false
+                            }
+                        };
+                        if !has_waiters {
+                            break;
+                        }
+                    }
+                }
+            }
+
+            drop(stream);
+            if let Err(e) = pubsub.unsubscribe(&channel).await {
+                warn!("Redis pubsub unsubscribe error: {}", e);
+            }
+
+            let mut should_respawn = false;
+            {
+                let mut lock = subscriptions.lock().await;
+                let mut remove = false;
+                if let Some(state) = lock.get_mut(&channel) {
+                    state.running = false;
+                    let alive = Self::prune_waiters(&mut state.waiters);
+                    if alive == 0 {
+                        remove = true;
+                    } else {
+                        state.running = true;
+                        should_respawn = true;
+                    }
+                }
+                if remove {
+                    lock.remove(&channel);
+                }
+            }
+
+            if should_respawn {
+                Self::spawn_channel_listener(Arc::clone(&subscriptions), client.clone(), channel);
+            }
+        });
+    }
+
+    async fn register_waiter(&self, redis_key: String, channel: String) -> Arc<Notify> {
         let notify = Arc::new(Notify::new());
 
         let mut should_spawn = false;
@@ -437,87 +549,33 @@ impl RedisIdempotencyStore {
             }
         }
 
+        let mut should_notify = false;
+        let mut conn = self.manager.clone();
+        match conn.get::<_, Option<String>>(&redis_key).await {
+            Ok(Some(s)) => {
+                if serde_json::from_str::<RedisIdempotencyRecordDto>(&s).is_ok() {
+                    should_notify = true;
+                }
+            }
+            Ok(None) => {}
+            Err(e) => {
+                warn!("Redis get error while registering waiter: {}", e);
+            }
+        }
+
+        if should_notify {
+            let mut subscriptions = self.subscriptions.lock().await;
+            if let Some(state) = subscriptions.get_mut(&channel) {
+                Self::notify_waiters_and_prune(&mut state.waiters);
+            }
+        }
+
         if should_spawn {
-            let subscriptions = Arc::clone(&self.subscriptions);
-            let client = self.client.clone();
-            tokio::spawn(async move {
-                let mut pubsub = match client.get_async_pubsub().await {
-                    Ok(p) => p,
-                    Err(e) => {
-                        error!("Redis pubsub create error: {}", e);
-                        let mut lock = subscriptions.lock().await;
-                        if let Some(state) = lock.get_mut(&channel) {
-                            Self::notify_waiters_and_prune(&mut state.waiters);
-                            state.running = false;
-                        }
-                        return;
-                    }
-                };
-
-                if let Err(e) = pubsub.subscribe(&channel).await {
-                    error!("Redis pubsub subscribe error: {}", e);
-                    let mut lock = subscriptions.lock().await;
-                    if let Some(state) = lock.get_mut(&channel) {
-                        Self::notify_waiters_and_prune(&mut state.waiters);
-                        state.running = false;
-                    }
-                    return;
-                }
-
-                let mut stream = pubsub.on_message();
-                let mut poll_waiters_every = tokio::time::interval(Duration::from_secs(5));
-                poll_waiters_every.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-
-                loop {
-                    tokio::select! {
-                        _ = poll_waiters_every.tick() => {
-                            let has_waiters = {
-                                let mut lock = subscriptions.lock().await;
-                                if let Some(state) = lock.get_mut(&channel) {
-                                    Self::prune_waiters(&mut state.waiters) > 0
-                                } else {
-                                    false
-                                }
-                            };
-                            if !has_waiters {
-                                break;
-                            }
-                        }
-                        msg = futures_util::StreamExt::next(&mut stream) => {
-                            if msg.is_none() {
-                                break;
-                            }
-                            let has_waiters = {
-                                let mut lock = subscriptions.lock().await;
-                                if let Some(state) = lock.get_mut(&channel) {
-                                    Self::notify_waiters_and_prune(&mut state.waiters) > 0
-                                } else {
-                                    false
-                                }
-                            };
-                            if !has_waiters {
-                                break;
-                            }
-                        }
-                    }
-                }
-
-                drop(stream);
-                if let Err(e) = pubsub.unsubscribe(&channel).await {
-                    warn!("Redis pubsub unsubscribe error: {}", e);
-                }
-
-                let mut lock = subscriptions.lock().await;
-                let remove = if let Some(state) = lock.get_mut(&channel) {
-                    state.running = false;
-                    Self::prune_waiters(&mut state.waiters) == 0
-                } else {
-                    false
-                };
-                if remove {
-                    lock.remove(&channel);
-                }
-            });
+            Self::spawn_channel_listener(
+                Arc::clone(&self.subscriptions),
+                self.client.clone(),
+                channel,
+            );
         }
 
         notify
@@ -553,44 +611,45 @@ impl IdempotencyStore for RedisIdempotencyStore {
         };
 
         match val {
-            Some(s) if Self::parse_inflight_value(&s).is_some() => {
-                let (_, body_hash, _) = Self::parse_inflight_value(&s).expect("checked");
-                let channel = Self::channel_name(&redis_key);
-                let notify = self.register_waiter(channel).await;
-
-                Ok(Some(IdempotencyEntry::InFlight {
-                    body_hash,
-                    notify,
-                    expires_at: Instant::now() + Duration::from_secs(60),
-                }))
-            }
             Some(s) => {
-                if let Ok(dto) = serde_json::from_str::<RedisIdempotencyRecordDto>(&s) {
-                    let body_bytes = match BASE64_STANDARD.decode(&dto.body) {
-                        Ok(bytes) => bytes,
-                        Err(_) => {
-                            warn!("Invalid Redis idempotency payload for key {}", redis_key);
-                            return Ok(None);
-                        }
-                    };
-                    let status = match StatusCode::from_u16(dto.status) {
-                        Ok(status) => status,
-                        Err(_) => {
-                            warn!("Invalid Redis idempotency payload for key {}", redis_key);
-                            return Ok(None);
-                        }
-                    };
-                    Ok(Some(IdempotencyEntry::Completed(IdempotencyRecord {
-                        body_hash: dto.body_hash,
-                        action_id: dto.action_id,
-                        status,
-                        headers: dto.headers,
-                        body: body_bytes,
-                        expires_at: Instant::now() + Duration::from_secs(3600),
-                    })))
+                if let Some((owner_token, body_hash, _)) = Self::parse_inflight_value(&s) {
+                    let channel = Self::channel_name(&redis_key);
+                    let notify = self.register_waiter(redis_key.clone(), channel).await;
+
+                    Ok(Some(IdempotencyEntry::InFlight {
+                        owner_token,
+                        body_hash,
+                        notify,
+                        expires_at: Instant::now() + Duration::from_secs(60),
+                    }))
                 } else {
-                    warn!("Invalid Redis idempotency payload for key {}", redis_key);
-                    Ok(None)
+                    if let Ok(dto) = serde_json::from_str::<RedisIdempotencyRecordDto>(&s) {
+                        let body_bytes = match BASE64_STANDARD.decode(&dto.body) {
+                            Ok(bytes) => bytes,
+                            Err(_) => {
+                                warn!("Invalid Redis idempotency payload for key {}", redis_key);
+                                return Ok(None);
+                            }
+                        };
+                        let status = match StatusCode::from_u16(dto.status) {
+                            Ok(status) => status,
+                            Err(_) => {
+                                warn!("Invalid Redis idempotency payload for key {}", redis_key);
+                                return Ok(None);
+                            }
+                        };
+                        Ok(Some(IdempotencyEntry::Completed(IdempotencyRecord {
+                            body_hash: dto.body_hash,
+                            action_id: dto.action_id,
+                            status,
+                            headers: dto.headers,
+                            body: body_bytes,
+                            expires_at: Instant::now() + Duration::from_secs(3600),
+                        })))
+                    } else {
+                        warn!("Invalid Redis idempotency payload for key {}", redis_key);
+                        Ok(None)
+                    }
                 }
             }
             None => Ok(None),
@@ -859,7 +918,9 @@ impl RedisActionStore {
     }
 
     fn format_key(tenant_id: &str, action_id: &str) -> String {
-        format!("action:{}:{}", tenant_id, action_id)
+        let tenant_hash = sha256_hex(tenant_id.as_bytes());
+        let action_hash = sha256_hex(action_id.as_bytes());
+        format!("action:{}:{}", tenant_hash, action_hash)
     }
 }
 
@@ -884,7 +945,7 @@ impl ActionStore for RedisActionStore {
 
         let expires_at_ts = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
+            .unwrap_or_default()
             .as_secs()
             + ttl_secs;
 
@@ -919,7 +980,7 @@ impl ActionStore for RedisActionStore {
             if let Ok(dto) = serde_json::from_str::<RedisActionRecordDto>(&s) {
                 let now_ts = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
+                    .unwrap_or_default()
                     .as_secs();
                 let remaining = if dto.expires_at_ts > now_ts {
                     dto.expires_at_ts - now_ts
@@ -1079,6 +1140,10 @@ impl RedisQuotaStore {
         }
     }
 
+    /// All quota keys intentionally use the `{global}` Redis Cluster hash tag so
+    /// `SystemHardLimit`, `TenantBudget`, and `ApiRateLimit` keys land in one slot and
+    /// can be updated atomically by the multi-key Lua script. This creates a hot slot;
+    /// do not change hash tags without redesigning the atomicity strategy.
     fn layer_config(
         &self,
         tenant_id: &kernel_core::auth::TenantId,
@@ -1091,7 +1156,12 @@ impl RedisQuotaStore {
                 let q = tenant_override
                     .and_then(|o| o.system_hard_limit)
                     .unwrap_or(self.quota.system_hard_limit);
-                Some(("quota:{global}:system".to_string(), q.rate, q.capacity, q.cost))
+                Some((
+                    "quota:{global}:system".to_string(),
+                    q.rate,
+                    q.capacity,
+                    q.cost,
+                ))
             }
             QuotaLayer::TenantBudget => {
                 let q = tenant_override
@@ -1133,7 +1203,7 @@ impl QuotaStore for RedisQuotaStore {
 
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
+            .unwrap_or_default()
             .as_secs_f64();
 
         let mut conn = self.manager.clone();
@@ -1189,7 +1259,7 @@ impl QuotaStore for RedisQuotaStore {
         let mut conn = self.manager.clone();
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
+            .unwrap_or_default()
             .as_secs_f64();
 
         let mut inv = self.script_multi.prepare_invoke();
@@ -1352,7 +1422,10 @@ impl MiddlewareState {
 
 fn redact_redis_url(redis_url: &str) -> String {
     if let Some((scheme, remainder)) = redis_url.split_once("://") {
-        let after_auth = remainder.rsplit_once('@').map(|(_, host)| host).unwrap_or(remainder);
+        let after_auth = remainder
+            .rsplit_once('@')
+            .map(|(_, host)| host)
+            .unwrap_or(remainder);
         let host_port = after_auth.split('/').next().unwrap_or(after_auth);
         if !host_port.is_empty() {
             return format!("{scheme}://{host_port}");
@@ -1364,8 +1437,6 @@ fn redact_redis_url(redis_url: &str) -> String {
 fn sanitize_redis_error(error_text: &str, redis_url: &str) -> String {
     error_text.replace(redis_url, &redact_redis_url(redis_url))
 }
-
-// ... rest of the file (record_action, get_action, middlewares) ...
 
 pub async fn record_action(
     state: &MiddlewareState,
@@ -1392,7 +1463,6 @@ pub async fn idempotency_middleware(
     req: Request<Body>,
     next: Next,
 ) -> Result<Response, StatusCode> {
-    // ... same as before
     let (parts, body) = req.into_parts();
     let method = parts.method.clone();
 
