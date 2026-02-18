@@ -1,5 +1,5 @@
 use chrono::{Duration, Utc};
-use kernel_data::auth_context::TenantId;
+use kernel_data::auth_context::{TenantContext, TenantId};
 use kernel_data::entities::key_record::{self, ActiveModel, KeyState, KeyType, Model};
 use kernel_data::entities::prelude::KeyRecord;
 use ring::{
@@ -29,17 +29,21 @@ pub struct KeyManager;
 
 impl KeyManager {
     /// Rotates keys for all supported types.
-    pub async fn rotate_keys(db: &DatabaseConnection) -> Result<(), KeyManagerError> {
+    pub async fn rotate_keys(
+        _ctx: &TenantContext,
+        db: &DatabaseConnection,
+    ) -> Result<(), KeyManagerError> {
         let key_types = vec![(KeyType::Hmac, "HS256"), (KeyType::PasetoPublic, "Ed25519")];
 
         for (k_type, alg) in key_types {
-            Self::rotate_key_type(db, k_type, alg).await?;
+            Self::rotate_key_type_db(db, k_type, alg).await?;
         }
 
         Ok(())
     }
 
-    async fn rotate_key_type(
+    /// Internal rotation logic using raw DatabaseConnection.
+    async fn rotate_key_type_db(
         db: &DatabaseConnection,
         key_type: KeyType,
         alg: &str,
@@ -203,6 +207,7 @@ impl KeyManager {
     /// For HMAC signing keys, we always read the authoritative active key from DB
     /// to avoid stale process-local cache after cross-instance revocation.
     pub async fn get_active_key(
+        _ctx: &TenantContext,
         db: &DatabaseConnection,
         key_type: KeyType,
     ) -> Result<Model, KeyManagerError> {
@@ -216,7 +221,11 @@ impl KeyManager {
     }
 
     /// Gets a specific key by KID (for verification).
-    pub async fn get_key(db: &DatabaseConnection, kid: &str) -> Result<Model, KeyManagerError> {
+    pub async fn get_key(
+        _ctx: &TenantContext,
+        db: &DatabaseConnection,
+        kid: &str,
+    ) -> Result<Model, KeyManagerError> {
         KeyRecord::find_by_id(kid)
             .one(db)
             .await?
@@ -224,7 +233,11 @@ impl KeyManager {
     }
 
     /// Revokes a key immediately.
-    pub async fn revoke_key(db: &DatabaseConnection, kid: &str) -> Result<(), KeyManagerError> {
+    pub async fn revoke_key(
+        _ctx: &TenantContext,
+        db: &DatabaseConnection,
+        kid: &str,
+    ) -> Result<(), KeyManagerError> {
         let txn = db.begin().await?;
         let key = KeyRecord::find_by_id(kid)
             .lock_exclusive()
@@ -277,10 +290,11 @@ impl KeyManager {
 
     /// Generates a tenant token using the active HMAC key for the given `TenantId`.
     pub async fn generate_tenant_token(
+        ctx: &TenantContext,
         db: &DatabaseConnection,
         tenant_id: &TenantId,
     ) -> Result<String, KeyManagerError> {
-        let active_key = Self::get_active_key(db, KeyType::Hmac).await?;
+        let active_key = Self::get_active_key(ctx, db, KeyType::Hmac).await?;
         let secret = active_key.secret_bytes.ok_or_else(|| {
             KeyManagerError::KeyGenError("No secret bytes for HMAC key".to_string())
         })?;

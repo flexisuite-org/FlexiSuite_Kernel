@@ -5,6 +5,13 @@ use ring::rand::{SecureRandom, SystemRandom};
 use sea_orm::{ActiveModelTrait, DatabaseConnection, EntityTrait, Set};
 use uuid::Uuid;
 
+/// Test helpers for authentication.
+///
+/// NOTE: These helpers perform system-scoped DB reads/writes without using `TenantContext`.
+/// They are strictly test-only and must NOT be used in production code.
+///
+/// This is an explicit exception to the rule that all DB access must go through
+/// `TenantContext` and `TenantId`.
 pub struct TestAuth;
 
 impl TestAuth {
@@ -47,11 +54,12 @@ impl TestAuth {
         db: &DatabaseConnection,
         tenant_id: &TenantId,
     ) -> Result<String, Box<dyn std::error::Error>> {
-        use sea_orm::{ColumnTrait, QueryFilter};
+        use sea_orm::{ColumnTrait, QueryFilter, QueryOrder};
 
         let key_record = key_record::Entity::find()
             .filter(key_record::Column::KeyType.eq(KeyType::Hmac))
             .filter(key_record::Column::State.eq(KeyState::Active))
+            .order_by_desc(key_record::Column::ActivatedAt)
             .one(db)
             .await?
             .ok_or("No active HMAC key found")?;

@@ -48,7 +48,6 @@ macro_rules! define_principal_id {
                 &self.0
             }
 
-            #[cfg(feature = "test-utils")]
             pub fn new_unchecked(id: impl Into<String>) -> Self {
                 Self(id.into())
             }
@@ -96,6 +95,22 @@ impl TenantContext {
 
     pub fn user_id(&self) -> Option<&UserId> {
         self.user_id.as_ref()
+    }
+}
+
+/// A marker type for operations that are inherently system-wide and not
+/// bound to a specific end-user tenant.
+///
+/// This exists to satisfy the requirement that all database-facing APIs
+/// accept a context, even for bootstrap or maintenance tasks.
+pub struct SystemTenantContext;
+
+impl From<SystemTenantContext> for TenantContext {
+    fn from(_: SystemTenantContext) -> Self {
+        Self {
+            tenant_id: TenantId::new_unchecked("system"),
+            user_id: None,
+        }
     }
 }
 

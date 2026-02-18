@@ -39,7 +39,8 @@ async fn main() {
         std::process::exit(1);
     });
 
-    KeyManager::rotate_keys(&db).await.unwrap_or_else(|e| {
+    use kernel_data::auth_context::SystemTenantContext;
+    KeyManager::rotate_keys(&SystemTenantContext.into(), &db).await.unwrap_or_else(|e| {
         eprintln!("Failed to initialize key rotation state: {e}");
         std::process::exit(1);
     });

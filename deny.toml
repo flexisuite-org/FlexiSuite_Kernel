@@ -43,7 +43,7 @@ confidence-threshold = 0.8
 # ---------------------------------------------------------------------------
 [bans]
 # Deny multiple versions of the same crate by default (keeps the dep tree lean)
-multiple-versions = "warn"
+multiple-versions = "deny"
 wildcards = "deny"
 
 # ---------------------------------------------------------------------------

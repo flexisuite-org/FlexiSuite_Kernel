@@ -80,35 +80,78 @@ fn main() -> Result<()> {
                         }
                     }
 
+                    let re_func_parts = Regex::new(r"(?si)CREATE\s+(?:OR\s+REPLACE\s+)?FUNCTION\s+([\w.]+)\s*\((.*?)\)").unwrap();
+
                     for cap in re_security_definer.find_iter(&content) {
                         let start = cap.start();
                         let line = get_line_number(&content, start);
 
-                        // Check search_path in the vicinity (bidirectional 500 chars)
-                        let mut start_search = if start > 500 { start - 500 } else { 0 };
-                        while !content.is_char_boundary(start_search) {
-                            start_search = start_search.saturating_sub(1);
+                        // Check search_path and REVOKE in the vicinity (bidirectional 1000 chars total)
+                        let mut start_lookback = if start > 500 { start - 500 } else { 0 };
+                        while !content.is_char_boundary(start_lookback) {
+                            start_lookback = start_lookback.saturating_sub(1);
                         }
 
-                        let mut end_search = std::cmp::min(content.len(), start + 500);
-                        // Ensure we slice at a valid char boundary
-                        while !content.is_char_boundary(end_search) {
-                            end_search = end_search.saturating_sub(1);
+                        let mut end_lookahead = std::cmp::min(content.len(), start + 1000);
+                        while !content.is_char_boundary(end_lookahead) {
+                            end_lookahead = end_lookahead.saturating_sub(1);
                         }
-                        let window = &content[start_search..end_search];
+                        let window = &content[start_lookback..end_lookahead];
 
                         if !re_search_path.is_match(window) {
                             eprintln!("{}:{}: SECURITY DEFINER found without a valid search_path reset nearby. Accepted forms: SET [SESSION|LOCAL] search_path {{=|TO}} flexi, pg_catalog, pg_temp", path.display(), line);
                             errors = true;
                         }
 
-                        if !re_revoke.is_match(window) {
-                            eprintln!(
-                                "{}:{}: SECURITY DEFINER found without nearby 'REVOKE ... FROM PUBLIC'",
-                                path.display(),
-                                line
-                            );
-                            errors = true;
+                        // Targeted REVOKE check
+                        if let Some(_func_cap) = re_func_parts.captures(&content[..start]) {
+                            // Find the *last* CREATE FUNCTION before the SECURITY DEFINER
+                            let last_func = re_func_parts.find_iter(&content[..start]).last();
+                            if let Some(func_match) = last_func {
+                                let func_cap = re_func_parts.captures(func_match.as_str()).unwrap();
+                                let func_name = func_cap.get(1).unwrap().as_str();
+                                let args_list = func_cap.get(2).unwrap().as_str();
+
+                                // Extract just the types from args_list (e.g. "token_val text, other int" -> "text, int")
+                                let arg_types: Vec<String> = args_list
+                                    .split(',')
+                                    .map(|s| s.trim().split_whitespace().last().unwrap_or("").to_string())
+                                    .filter(|s| !s.is_empty())
+                                    .collect();
+                                let arg_signature = arg_types.join(r"\s*,\s*");
+
+                                // Escape dots in func_name for regex
+                                let func_name_regex = func_name.replace('.', r"\.");
+
+                                let revoke_pattern = format!(
+                                    r"(?si)REVOKE\s+.*?\s+ON\s+FUNCTION\s+{}\s*\(\s*{}\s*\)\s+FROM\s+PUBLIC",
+                                    func_name_regex, arg_signature
+                                );
+
+                                let re_targeted_revoke = Regex::new(&revoke_pattern).unwrap();
+                                if !re_targeted_revoke.is_match(window) {
+                                    eprintln!(
+                                        "{}:{}: SECURITY DEFINER found for function '{}' without nearby 'REVOKE ... ON FUNCTION {}({}) FROM PUBLIC'",
+                                        path.display(),
+                                        line,
+                                        func_name,
+                                        func_name,
+                                        arg_types.join(", ")
+                                    );
+                                    errors = true;
+                                }
+                            } else {
+                                // Fallback to broad check if for some reason we can't find the function name
+                                if !re_revoke.is_match(window) {
+                                    eprintln!("{}:{}: SECURITY DEFINER found without nearby 'REVOKE ... FROM PUBLIC'", path.display(), line);
+                                    errors = true;
+                                }
+                            }
+                        } else {
+                            if !re_revoke.is_match(window) {
+                                eprintln!("{}:{}: SECURITY DEFINER found without nearby 'REVOKE ... FROM PUBLIC'", path.display(), line);
+                                errors = true;
+                            }
                         }
                     }
                 }

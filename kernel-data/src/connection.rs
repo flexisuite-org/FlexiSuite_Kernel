@@ -76,7 +76,7 @@ where
     let txn = pool.begin().await.map_err(DataError::DbError)?;
 
     // 1. Authorize
-    if let Err(_e) = txn
+    if let Err(e) = txn
         .execute(Statement::from_sql_and_values(
             DbBackend::Postgres,
             "SELECT flexi.authorize_tenant($1)",
@@ -87,12 +87,25 @@ where
         // Log a sanitized message only; do not interpolate the raw DB error
         // to avoid leaking token KID or other sensitive fields into log sinks.
         warn!("Tenant authorization failed");
+
+        let error_msg = e.to_string();
+        let safe_error = [
+            "Nonce already used",
+            "Internal HMAC secret not set",
+            "Invalid signature",
+            "Token timestamp expired or future (skew > 30s)",
+            "Missing or empty tenant token",
+            "Invalid token format",
+        ]
+        .iter()
+        .find(|&&m| error_msg.contains(m))
+        .map(|&m| m.to_string())
+        .unwrap_or_else(|| "tenant authorization failed".to_string());
+
         if let Err(rollback_err) = txn.rollback().await {
             error!("rollback failed after authorization failure: {rollback_err}");
         }
-        return Err(DataError::TenantAuthorizationFailed(
-            "tenant authorization failed".to_string(),
-        ));
+        return Err(DataError::TenantAuthorizationFailed(safe_error));
     }
 
     let token_tenant = if let Some(tid) = parse_tenant_from_token(token) {

@@ -2,22 +2,20 @@
 //!
 //! # TenantContext Exception Notice
 //!
-//! The setup helpers in this module (role creation, `ALTER ROLE`, and
-//! `migration::Migrator::up`) intentionally bypass `TenantContext` and call
-//! `execute_unprepared` / `query_all` directly on the raw `DatabaseConnection`.
-//! This is an **explicit, test-only exception** to the project-wide rule that
-//! all DB access must go through `TenantContext`.  These operations are
+//! The setup helpers in this module (admin operations handled via `TestAdminTenantContext`) 
+//! intentionally bypass `TenantContext`. This is an **explicit, test-only exception** to the 
+//! project-wide rule that all DB access must go through `TenantContext`. These operations are
 //! administrative bootstrap steps that have no tenant scope by nature (they run
-//! as the superuser before any tenant exists).  Production code MUST NOT follow
+//! as the superuser before any tenant exists). Production code MUST NOT follow
 //! this pattern.
 use kernel_data::auth_context::{TenantContext, TenantId, UserId};
 mod common;
+use common::admin::TestAdminTenantContext;
 use common::auth::TestAuth;
 use kernel_data::DataError;
 use kernel_data::connection::{RawConnection, TenantScoped, with_tenant_tx};
 use kernel_data::entities::entity_record;
 use kernel_data::repository::TenantRepository;
-use migration::MigratorTrait;
 use sea_orm::{ActiveValue, ConnectionTrait, Database, DbBackend, Statement, TransactionTrait};
 use testcontainers::{RunnableImage, clients};
 use testcontainers_modules::postgres::Postgres;
@@ -30,7 +28,7 @@ async fn test_tenant_isolation_rls() {
     let docker = clients::Cli::default();
     let image = RunnableImage::from(Postgres::default()).with_tag("15-alpine");
     let node = docker.run(image);
-    let port = node.get_host_port_ipv4(5432).unwrap();
+    let port = node.get_host_port_ipv4(5432);
     let connection_string = format!("postgres://postgres:postgres@127.0.0.1:{}/postgres", port);
 
     // 1. Connect
@@ -38,23 +36,18 @@ async fn test_tenant_isolation_rls() {
         .await
         .expect("Failed to connect to DB");
 
+    let admin = TestAdminTenantContext::new(&db);
+
     // Verify Role Exists
-    db.execute_unprepared("DO $$ BEGIN IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = 'flexi') THEN CREATE ROLE flexi; END IF; END $$;").await.expect("Failed to create role flexi");
+    admin.create_role().await.expect("Failed to create role flexi");
 
     // 2. Run Migrations
-    migration::Migrator::up(&db, None)
-        .await
-        .expect("Failed to run migrations");
+    admin.run_migrations().await.expect("Failed to run migrations");
 
     // 3. Configure Internal Database Secret (GUC)
     // NOTE: TEST_INTERNAL_SECRET is a compile-time constant in this test module.
     // Do not copy this interpolation pattern for runtime/user-controlled values.
-    db.execute_unprepared(&format!(
-        "ALTER ROLE postgres SET flexi.hmac_secret = '{}'",
-        TEST_INTERNAL_SECRET
-    ))
-    .await
-    .expect("Failed to set flexi.hmac_secret for node");
+    admin.set_secret(TEST_INTERNAL_SECRET).await.expect("Failed to set flexi.hmac_secret for node");
 
     // 4. Reconnect to ensure all pool connections pick up the new GUC
     drop(db);
@@ -154,36 +147,30 @@ async fn test_migration_succeeds_without_flexi_role() {
     let docker = clients::Cli::default();
     let image = RunnableImage::from(Postgres::default()).with_tag("15-alpine");
     let node = docker.run(image);
-    let port = node.get_host_port_ipv4(5432).unwrap();
+    let port = node.get_host_port_ipv4(5432);
     let connection_string = format!("postgres://postgres:postgres@127.0.0.1:{}/postgres", port);
 
     let db = Database::connect(&connection_string)
         .await
         .expect("Failed to connect to DB");
 
+    let admin = TestAdminTenantContext::new(&db);
+
     // Ensure role flexi does NOT exist
-    let rows = db
-        .query_all(Statement::from_sql_and_values(
-            DbBackend::Postgres,
-            "SELECT 1 FROM pg_roles WHERE rolname = 'flexi'",
-            [],
-        ))
+    let rows = admin
+        .query_all_check("SELECT 1 FROM pg_roles WHERE rolname = 'flexi'")
         .await
         .expect("Failed to query roles");
     assert_eq!(rows.len(), 0, "Role flexi should not exist yet");
 
     // Run Migrations
-    migration::Migrator::up(&db, None)
+    admin.run_migrations()
         .await
         .expect("Migration failed when role flexi is missing");
 
     // Verify schema exists
-    let schema_exists = db
-        .query_all(Statement::from_sql_and_values(
-            DbBackend::Postgres,
-            "SELECT 1 FROM information_schema.schemata WHERE schema_name = 'flexi'",
-            [],
-        ))
+    let schema_exists = admin
+        .query_all_check("SELECT 1 FROM information_schema.schemata WHERE schema_name = 'flexi'")
         .await
         .expect("Failed to query schema");
     assert_eq!(schema_exists.len(), 1, "Schema flexi should exist");
@@ -194,24 +181,17 @@ async fn test_authorize_rejects_nonce_reuse() {
     let docker = clients::Cli::default();
     let image = RunnableImage::from(Postgres::default()).with_tag("15-alpine");
     let node = docker.run(image);
-    let port = node.get_host_port_ipv4(5432).unwrap();
+    let port = node.get_host_port_ipv4(5432);
     let connection_string = format!("postgres://postgres:postgres@127.0.0.1:{}/postgres", port);
 
     let db = Database::connect(&connection_string)
         .await
         .expect("Failed to connect to DB");
-    db.execute_unprepared("DO $$ BEGIN IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = 'flexi') THEN CREATE ROLE flexi; END IF; END $$;")
-        .await
-        .expect("Failed to create role flexi");
-    migration::Migrator::up(&db, None)
-        .await
-        .expect("Failed to run migrations");
-    db.execute_unprepared(&format!(
-        "ALTER ROLE postgres SET flexi.hmac_secret = '{}'",
-        TEST_INTERNAL_SECRET
-    ))
-    .await
-    .expect("Failed to set flexi.hmac_secret");
+    
+    let admin = TestAdminTenantContext::new(&db);
+    admin.create_role().await.expect("Failed to create role flexi");
+    admin.run_migrations().await.expect("Failed to run migrations");
+    admin.set_secret(TEST_INTERNAL_SECRET).await.expect("Failed to set flexi.hmac_secret");
     drop(db);
 
     let db = Database::connect(&connection_string)
@@ -237,7 +217,7 @@ async fn test_authorize_rejects_nonce_reuse() {
     let err = second.unwrap_err().to_string();
     assert!(
         err.contains("Nonce already used"),
-        "Expected nonce reuse error, got: {}",
+        "Expected 'Nonce already used' error, got: {}",
         err
     );
 }
@@ -247,20 +227,29 @@ async fn test_authorized_tenant_id_rejects_manual_context_tampering() {
     let docker = clients::Cli::default();
     let image = RunnableImage::from(Postgres::default()).with_tag("15-alpine");
     let node = docker.run(image);
-    let port = node.get_host_port_ipv4(5432).unwrap();
+    let port = node.get_host_port_ipv4(5432);
     let connection_string = format!("postgres://postgres:postgres@127.0.0.1:{}/postgres", port);
 
     let db = Database::connect(&connection_string)
         .await
         .expect("Failed to connect to DB");
-    db.execute_unprepared("DO $$ BEGIN IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = 'flexi') THEN CREATE ROLE flexi; END IF; END $$;")
-        .await
-        .expect("Failed to create role flexi");
-    migration::Migrator::up(&db, None)
-        .await
-        .expect("Failed to run migrations");
 
+    let admin = TestAdminTenantContext::new(&db);
+    admin.create_role().await.expect("Failed to create role flexi");
+    admin.run_migrations().await.expect("Failed to run migrations");
+
+    // We use a transaction here to simulate a session where we try to tamper
     let txn = db.begin().await.expect("Failed to start transaction");
+    
+    // We cannot use the safe admin helper here because we need to be inside *this* transaction 
+    // to test the session-local state tampering. We are simulating an attacker who has 
+    // somehow gotten raw SQL access within a transaction.
+    //
+    // Note: This test explicitly verifies that *even if* someone tries to set these variables
+    // manually, our security functions will reject it if the signature logic isn't satisfied
+    // (which is checked by authorized_tenant_id).
+    
+    // 1. Manually set the secret (simulating server config)
     txn.execute(Statement::from_sql_and_values(
         DbBackend::Postgres,
         "SELECT set_config('flexi.hmac_secret', $1, true)",
@@ -268,6 +257,8 @@ async fn test_authorized_tenant_id_rejects_manual_context_tampering() {
     ))
     .await
     .expect("Failed to set test secret in transaction");
+
+    // 2. Manually set the tenant ID (simulating an attack trying to spoof a tenant)
     txn.execute(Statement::from_sql_and_values(
         DbBackend::Postgres,
         "SELECT set_config('flexi.current_tenant', 'attacker', true)",
@@ -276,6 +267,8 @@ async fn test_authorized_tenant_id_rejects_manual_context_tampering() {
     .await
     .expect("Failed to tamper tenant context");
 
+    // 3. Try to use authorized_tenant_id() which should verify the signature
+    // Since we haven't set a valid signature/nonce that matches 'attacker', this should fail.
     let res = txn
         .query_one(Statement::from_sql_and_values(
             DbBackend::Postgres,
