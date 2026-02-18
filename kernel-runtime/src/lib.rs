@@ -44,9 +44,10 @@ impl Default for RuntimeOptions {
 
 #[derive(Debug, Clone, Default)]
 pub struct Permissions {
-    // URL prefixes or domains.
-    // Current runtimes reject execution when non-empty because allowlist enforcement
-    // is not implemented yet.
+    /// URL prefixes or domains for network access.
+    ///
+    /// [IMPORTANT] Enforcement is not yet implemented. Both DenoSandbox and
+    /// WasmSandbox will return Error::PermissionDenied if this vector is non-empty.
     pub network_allowlist: Vec<String>,
 }
 
