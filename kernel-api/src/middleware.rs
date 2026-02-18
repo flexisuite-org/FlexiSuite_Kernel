@@ -380,11 +380,12 @@ impl RedisIdempotencyStore {
     }
 
     fn format_key(key: &IdempotencyScopeKey) -> String {
+        let tenant_hash = sha256_hex(key.tenant_id.as_str().as_bytes());
         let canonical_target_hash = sha256_hex(key.canonical_target.as_bytes());
         let idempotency_key_hash = sha256_hex(key.idempotency_key.as_bytes());
         format!(
-            "idemp:v2:{}:{}:{}:{}",
-            key.tenant_id, key.method, canonical_target_hash, idempotency_key_hash
+            "idemp:v3:{}:{}:{}:{}",
+            tenant_hash, key.method, canonical_target_hash, idempotency_key_hash
         )
     }
 
@@ -575,10 +576,9 @@ impl RedisIdempotencyStore {
         }
 
         if should_notify {
-            let mut subscriptions = self.subscriptions.lock().await;
-            if let Some(state) = subscriptions.get_mut(&channel) {
-                Self::notify_waiters_and_prune(&mut state.waiters);
-            }
+            // Use notify_one so a permit is stored for the subsequent notified().await
+            // in the middleware, ensuring it wakes immediately even if not yet polled.
+            notify.notify_one();
         }
 
         if should_spawn {
@@ -1702,6 +1702,9 @@ pub async fn idempotency_middleware(
             .await
             .is_err()
         {
+            // Release the IN_FLIGHT key immediately so concurrent waiters fail fast
+            // rather than waiting for TTL expiry.
+            let _ = store.release_inflight(&scope_key, &lease).await;
             error!("Failed to complete idempotency record");
         }
         return Ok(Response::from_parts(parts, Body::from(body_bytes)));
