@@ -35,3 +35,6 @@ opentelemetry_sdk = { version = "0.31", features = ["metrics"] }
 opentelemetry-prometheus = { version = "0.31", default-features = false }
 prometheus = "0.14"
 sysinfo = "0.30"
+
+[features]
+test-utils = []

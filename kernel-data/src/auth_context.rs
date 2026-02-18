@@ -48,6 +48,12 @@ macro_rules! define_principal_id {
                 &self.0
             }
 
+            #[cfg(feature = "test-utils")]
+            pub fn new_unchecked(id: impl Into<String>) -> Self {
+                Self(id.into())
+            }
+
+            #[cfg(not(feature = "test-utils"))]
             pub(crate) fn new_unchecked(id: impl Into<String>) -> Self {
                 Self(id.into())
             }
