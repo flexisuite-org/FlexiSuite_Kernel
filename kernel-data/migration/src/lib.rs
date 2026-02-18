@@ -15,7 +15,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20240216_000001_init_rls::Migration),
             Box::new(m20240216_000002_create_entity_records::Migration),
             Box::new(m20240216_000003_create_audit_tables::Migration),
-Box::new(m20240520_000001_create_event_system::Migration),
+            Box::new(m20240520_000001_create_event_system::Migration),
             Box::new(m20250627_000004_create_diagnostics::Migration),
         ]
     }

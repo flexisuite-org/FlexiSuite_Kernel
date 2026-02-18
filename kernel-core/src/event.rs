@@ -1,10 +1,10 @@
+use crate::auth::TenantId;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
 use uuid::Uuid;
-use crate::auth::TenantId;
 
 #[derive(Debug, Error)]
 pub enum EventError {
@@ -94,7 +94,11 @@ pub fn validate_stream_key(stream_key: &str, tenant_id: &TenantId) -> Result<(),
 
 #[async_trait]
 pub trait ReliableProducer: Send + Sync {
-    async fn publish(&self, stream_base: &str, event: EventEnvelope) -> Result<PublishAck, EventError>;
+    async fn publish(
+        &self,
+        stream_base: &str,
+        event: EventEnvelope,
+    ) -> Result<PublishAck, EventError>;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -184,7 +188,7 @@ mod tests {
     #[test]
     fn test_validate_stream_key() {
         let tenant_id = TenantId::new("tenant_a").expect("Valid tenant ID");
-        
+
         // Valid case
         assert!(validate_stream_key("tenant_a:orders:0", &tenant_id).is_ok());
 
@@ -194,7 +198,7 @@ mod tests {
         assert!(validate_stream_key("tenant_a_suffix:orders:0", &tenant_id).is_err());
 
         // Boundary cases: empty tenant prefix
-        // Since validate_stream_key constructs prefix as "{tenant_id}:", 
+        // Since validate_stream_key constructs prefix as "{tenant_id}:",
         // if tenant_id is "tenant_a", prefix is "tenant_a:".
         // ":orders:0" effectively has empty tenant part which won't match "tenant_a:"
         assert!(validate_stream_key(":orders:0", &tenant_id).is_err());
@@ -211,11 +215,11 @@ mod tests {
         // Let's assume typical restrictions. If TenantId allows everything, this might fail,
         // so we'll just check if it fails to create or if it works, validate_stream_key handles it.
         if let Ok(weird_tenant) = TenantId::new("tenant/a") {
-             // If "tenant/a" is valid, then "tenant/a:..." should work
-             assert!(validate_stream_key("tenant/a:stream:0", &weird_tenant).is_ok());
+            // If "tenant/a" is valid, then "tenant/a:..." should work
+            assert!(validate_stream_key("tenant/a:stream:0", &weird_tenant).is_ok());
         } else {
-             // If it failed to create, that's also a passed "boundary test" for TenantId
-             // but validate_stream_key test can't run on it.
+            // If it failed to create, that's also a passed "boundary test" for TenantId
+            // but validate_stream_key test can't run on it.
         }
     }
 }

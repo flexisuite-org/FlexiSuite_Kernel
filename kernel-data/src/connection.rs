@@ -93,8 +93,6 @@ impl TenantScoped<RawConnection> {
     }
 }
 
-
-
 // Implement Sealed trait for TenantScoped
 impl super::repository::private::Sealed for TenantScoped<RawConnection> {}
 
