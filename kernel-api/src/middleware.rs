@@ -1329,14 +1329,23 @@ impl QuotaStore for RedisQuotaStore {
             Ok((1, _, _)) => Ok(()),
             Ok((0, idx, retry_after)) => {
                 let layer_idx = (idx.saturating_sub(1)) as usize;
-                let (layer, _, _, _, _) = checks
-                    .get(layer_idx)
-                    .expect("Lua script returned invalid index for failed quota layer");
                 let retry_after_s = retry_after.ceil() as u64;
-                Err(QuotaViolation {
-                    layer: *layer,
-                    retry_after_s,
-                })
+                if let Some((layer, _, _, _, _)) = checks.get(layer_idx) {
+                    Err(QuotaViolation {
+                        layer: *layer,
+                        retry_after_s,
+                    })
+                } else {
+                    error!(
+                        "Lua script returned invalid index for failed quota layer: {} (checks={})",
+                        idx,
+                        checks.len()
+                    );
+                    Err(QuotaViolation {
+                        layer: QuotaLayer::SystemHardLimit,
+                        retry_after_s,
+                    })
+                }
             }
             Ok(other) => {
                 error!("Unexpected quota multi script response: {:?}", other);
@@ -1911,7 +1920,11 @@ pub fn violation_to_status(v: &QuotaViolation) -> StatusCode {
 
 pub fn violation_to_response(v: &QuotaViolation) -> Response {
     let status = violation_to_status(v);
-    let mut res = (status, format!("Quota Violation: {:?}", v)).into_response();
+    let message = match status {
+        StatusCode::TOO_MANY_REQUESTS => "Rate limit exceeded",
+        _ => "Quota limit exceeded",
+    };
+    let mut res = (status, message).into_response();
 
     // Inject headers from violation
     let headers = res.headers_mut();
