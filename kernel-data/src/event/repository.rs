@@ -2,7 +2,7 @@ use crate::connection::{RawConnection, TenantScoped};
 use crate::event::entities_causality_seq;
 use crate::event::entities_entity_seq;
 use crate::event::entities_outbox;
-use kernel_core::event::{EventEnvelope, EventError, OrderMode};
+use crate::event::{EventEnvelope, EventError, OrderMode};
 use sea_orm::sea_query::{Expr, OnConflict};
 use sea_orm::{ActiveModelTrait, DbErr, EntityTrait, Set};
 use std::convert::TryFrom;

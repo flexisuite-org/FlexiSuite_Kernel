@@ -76,7 +76,7 @@ impl MigrationTrait for Migration {
             DECLARE
                 parts text[];
                 ver text;
-                kid text;
+                kid_val text;
                 ts_str text;
                 nonce_val text;
                 tenant_id_val text;
@@ -98,7 +98,7 @@ impl MigrationTrait for Migration {
                 END IF;
 
                 ver := parts[1];
-                kid := parts[2];
+                kid_val := parts[2];
                 ts_str := parts[3];
                 nonce_val := parts[4];
                 tenant_id_val := parts[5];
@@ -117,21 +117,16 @@ impl MigrationTrait for Migration {
 
                 -- 4. Verify Signature (HMAC-SHA256)
                 secret := current_setting('flexi.hmac_secret', true);
-                
-                -- CRITICAL: Fail closed if secret is not set
                 IF secret IS NULL OR secret = '' THEN
                     RAISE EXCEPTION 'HMAC secret not set';
                 END IF;
-                
-                -- GATE: Check for dev_mode GUC or specific mock allowed
-                IF current_setting('flexi.dev_mode', true) = 'on' AND sig = 'mock_sig' THEN
-                    -- Allow mock in dev mode
-                ELSE
-                    -- Real HMAC verification (fail-closed if not dev and not verified)
-                    computed_sig := encode(hmac(ver || ':' || kid || ':' || ts_str || ':' || nonce_val || ':' || tenant_id_val, secret, 'sha256'), 'hex');
-                    IF sig IS DISTINCT FROM computed_sig THEN
-                         RAISE EXCEPTION 'Invalid signature';
-                    END IF;
+
+                computed_sig := encode(
+                    hmac(ver || ':' || kid_val || ':' || ts_str || ':' || nonce_val || ':' || tenant_id_val, secret, 'sha256'),
+                    'hex'
+                );
+                IF sig IS DISTINCT FROM computed_sig THEN
+                    RAISE EXCEPTION 'Invalid signature';
                 END IF;
 
                 -- 5. Check Nonce (Consumption)
@@ -221,8 +216,20 @@ impl MigrationTrait for Migration {
 
     async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
         let db = manager.get_connection();
-        db.execute_unprepared("DROP SCHEMA IF EXISTS flexi CASCADE")
-            .await?;
+        db.execute_unprepared(
+            r#"
+            DROP TRIGGER IF EXISTS nonce_uniqueness_trigger ON flexi.flexi_nonce;
+            DROP FUNCTION IF EXISTS flexi.check_nonce_uniqueness();
+            DROP FUNCTION IF EXISTS flexi.authorize_tenant(text);
+            DROP FUNCTION IF EXISTS flexi.authorized_tenant_id();
+            DROP TABLE IF EXISTS flexi.flexi_nonce_default;
+            DROP TABLE IF EXISTS flexi.flexi_nonce;
+            DROP TABLE IF EXISTS flexi.nonce_uniqueness;
+            DROP EXTENSION IF EXISTS pgcrypto;
+            DROP SCHEMA IF EXISTS flexi CASCADE;
+            "#,
+        )
+        .await?;
         Ok(())
     }
 }
