@@ -167,6 +167,105 @@ async fn insert_record(
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn test_delete_entity_contract() {
+    let docker = clients::Cli::default();
+    let image = RunnableImage::from(Postgres::default()).with_tag("15-alpine");
+    let node = docker.run(image);
+    let port = node.get_host_port_ipv4(5432);
+    let connection_string = format!("postgres://postgres:postgres@127.0.0.1:{}/postgres", port);
+
+    let db = Database::connect(&connection_string)
+        .await
+        .expect("Failed to connect to DB");
+
+    if let Err(e) = kernel_data::init_hmac_secret_for_test(TEST_HMAC_SECRET) {
+        assert!(
+            e.contains("already initialized"),
+            "Unexpected error from init_hmac_secret: {}",
+            e
+        );
+    }
+
+    db.execute_unprepared("DO $$ BEGIN IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = 'flexi') THEN CREATE ROLE flexi; END IF; END $$;").await.expect("Failed to create role flexi");
+    migration::Migrator::up(&db, None)
+        .await
+        .expect("Failed to run migrations");
+    db.execute_unprepared(&format!(
+        "ALTER ROLE postgres SET flexi.hmac_secret = '{}'",
+        TEST_HMAC_SECRET
+    ))
+    .await
+    .expect("Failed to set flexi.hmac_secret for role");
+
+    drop(db);
+    let db = Database::connect(&connection_string)
+        .await
+        .expect("Failed to reconnect to DB");
+
+    use kernel_core::auth::{TenantId, UserId};
+    let tenant_a = TenantContext::new(
+        TenantId::new("tenant-delete-a").unwrap(),
+        Some(UserId::new("user-1").unwrap()),
+    );
+    let tenant_b = TenantContext::new(
+        TenantId::new("tenant-delete-b").unwrap(),
+        Some(UserId::new("user-2").unwrap()),
+    );
+
+    let record_id = Uuid::now_v7().to_string();
+    let record_id_for_insert = record_id.clone();
+    with_tenant_tx(&db, &tenant_a, |repo| {
+        Box::pin(async move { insert_record(repo, record_id_for_insert, "before-delete").await })
+    })
+    .await
+    .expect("Tenant A insert failed");
+
+    let record_id_for_cross_delete = record_id.clone();
+    let cross_delete_result = with_tenant_tx(&db, &tenant_b, |repo| {
+        Box::pin(async move { repo.delete_entity(&record_id_for_cross_delete).await })
+    })
+    .await;
+    assert!(
+        matches!(
+            cross_delete_result,
+            Err(kernel::KernelError::ValidationError(ref msg)) if msg == "Entity not found"
+        ),
+        "Cross-tenant delete must be treated as not found"
+    );
+
+    let record_id_for_delete = record_id.clone();
+    with_tenant_tx(&db, &tenant_a, |repo| {
+        Box::pin(async move { repo.delete_entity(&record_id_for_delete).await })
+    })
+    .await
+    .expect("Tenant A delete failed");
+
+    let record_id_for_get = record_id.clone();
+    with_tenant_tx(&db, &tenant_a, |repo| {
+        Box::pin(async move {
+            let entity = repo.get_entity(&record_id_for_get).await?;
+            assert!(entity.is_none(), "Deleted entity should not exist");
+            Ok(())
+        })
+    })
+    .await
+    .expect("Tenant A get after delete failed");
+
+    let missing_id = Uuid::now_v7().to_string();
+    let missing_delete_result = with_tenant_tx(&db, &tenant_a, |repo| {
+        Box::pin(async move { repo.delete_entity(&missing_id).await })
+    })
+    .await;
+    assert!(
+        matches!(
+            missing_delete_result,
+            Err(kernel::KernelError::ValidationError(ref msg)) if msg == "Entity not found"
+        ),
+        "Deleting missing entity must return validation not found"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn test_migration_succeeds_without_flexi_role() {
     let docker = clients::Cli::default();
     let image = RunnableImage::from(Postgres::default()).with_tag("15-alpine");
