@@ -45,11 +45,7 @@ mod tests {
             let headers = violation.headers();
             let retry_after = headers.iter().find(|(k, _)| k == "Retry-After");
             assert!(retry_after.is_some(), "Retry-After header must be present");
-            assert_eq!(
-                retry_after.unwrap().1,
-                "10",
-                "Retry-After value must match"
-            );
+            assert_eq!(retry_after.unwrap().1, "10", "Retry-After value must match");
         }
     }
 

@@ -25,3 +25,4 @@ tracing-subscriber = "0.3.22"
 rusty_paseto = "0.7.2"
 hex = "0.4.3"
 chrono = "0.4.43"
+sea-orm = { version = "1.1.19", features = ["mock", "runtime-tokio-rustls"] }
