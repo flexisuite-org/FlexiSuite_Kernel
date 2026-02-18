@@ -295,7 +295,9 @@ impl IdempotencyStore for InMemoryIdempotencyStore {
         if let Some(entry) = lock.get(&key) {
             let now = Instant::now();
             match entry {
-                IdempotencyEntry::InFlight { expires_at, notify, .. } => {
+                IdempotencyEntry::InFlight {
+                    expires_at, notify, ..
+                } => {
                     if *expires_at <= now {
                         // 期限切れ InFlight: 待機中のwaitersに通知してから削除
                         let notify = notify.clone();
@@ -435,9 +437,7 @@ impl RedisIdempotencyStore {
     fn inflight_value(lease: &IdempotencyLease, body_hash: &str) -> String {
         format!(
             "IN_FLIGHT|{}|{}|{}",
-            lease.owner_token,
-            body_hash,
-            lease.version
+            lease.owner_token, body_hash, lease.version
         )
     }
 

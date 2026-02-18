@@ -1,0 +1,80 @@
+# cargo-deny configuration for FlexiSuite_Kernel
+# https://embarkstudios.github.io/cargo-deny/
+#
+# Run: cargo deny check
+# CI:  cargo deny --workspace check
+
+[graph]
+# Analyze all feature-gated dependencies so cargo-deny covers the same
+# dependency surface as a production build (including optional features).
+all-features = true
+
+# ---------------------------------------------------------------------------
+# [advisories] — RUSTSEC advisory database
+# ---------------------------------------------------------------------------
+[advisories]
+# Warn on unmaintained crates; fail on vulnerabilities
+version = 2
+db-urls = ["https://github.com/rustsec/advisory-db"]
+yanked = "deny"
+
+# ---------------------------------------------------------------------------
+# [licenses] — License policy
+# ---------------------------------------------------------------------------
+[licenses]
+version = 2
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-DFS-2016",
+    "Zlib",
+    "CC0-1.0",
+    "OpenSSL",
+]
+# Confidence threshold for license detection
+confidence-threshold = 0.8
+
+# ---------------------------------------------------------------------------
+# [bans] — Banned / pinned crate policy
+# ---------------------------------------------------------------------------
+[bans]
+# Deny multiple versions of the same crate by default (keeps the dep tree lean)
+multiple-versions = "deny"
+wildcards = "deny"
+
+# ---------------------------------------------------------------------------
+# Exact-version pins requiring periodic upstream verification
+#
+# Each entry MUST reference the internal tracking issue and upstream issue so
+# the pin can be re-evaluated during dependency maintenance reviews.
+#
+# tracing =0.1.43
+#   Reason : 0.1.44 introduced a ~10 MB binary size regression because
+#            test-macros were accidentally included in the release artifact.
+#   Upstream: https://github.com/tokio-rs/tracing/issues/3455
+#   Internal: https://github.com/flexisuite-org/FlexiSuite_Kernel/issues/25
+#   Action  : This is an indefinite workaround. Remove this skip entry only
+#             after an upstream fix is released and verified in this workspace;
+#             monitor tokio-rs/tracing#3455 periodically.
+# ---------------------------------------------------------------------------
+[[bans.skip]]
+name    = "tracing"
+version = "=0.1.43"
+reason  = "Pinned to avoid 0.1.44 binary-size regression; tracked in GH#25 / upstream tokio-rs/tracing#3455"
+
+[[bans.deny]]
+name    = "tracing"
+version = ">=0.1.44"
+reason  = "Explicitly deny tracing releases newer than the pinned 0.1.43 until tokio-rs/tracing#3455 is resolved and GH#25 is closed"
+
+# ---------------------------------------------------------------------------
+# [sources] — Allowed crate sources
+# ---------------------------------------------------------------------------
+[sources]
+unknown-registry = "deny"
+unknown-git      = "deny"
+allow-registry   = ["https://github.com/rust-lang/crates.io-index"]

@@ -46,7 +46,7 @@ async fn setup_app_with_config(
 
     let db = MockDatabase::new(DatabaseBackend::Postgres).into_connection();
 
-    let (app, _cleanup) = kernel_api::build_app_with_state(state, db);
+    let (app, _cleanup) = kernel_api::build_app_with_state(state, db.into());
     app
 }
 

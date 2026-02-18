@@ -1,5 +1,6 @@
 use axum::{
     body::Body,
+    extract::State,
     http::{Request, StatusCode},
     middleware::Next,
     response::Response,
@@ -7,7 +8,9 @@ use axum::{
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::DateTime;
 use rusty_paseto::prelude::*;
+use sea_orm::DatabaseConnection;
 use serde::Deserialize;
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub use kernel_core::auth::{TenantContext, TenantId, UserId};
@@ -27,7 +30,11 @@ struct PasetoClaims {
 }
 
 /// REQ-AUTH-SOURCE: Extract TenantContext from token or dev-headers (if debug)
-pub async fn auth_middleware(mut req: Request<Body>, next: Next) -> Result<Response, StatusCode> {
+pub async fn auth_middleware(
+    State(db): State<Arc<DatabaseConnection>>,
+    mut req: Request<Body>,
+    next: Next,
+) -> Result<Response, StatusCode> {
     let context = if let Some(header) = req.headers().get("Authorization") {
         let value = header.to_str().map_err(|_| {
             tracing::warn!("Invalid Authorization header encoding");
@@ -86,7 +93,7 @@ pub async fn auth_middleware(mut req: Request<Body>, next: Next) -> Result<Respo
         }
     };
 
-    req.extensions_mut().insert(context);
+    req.extensions_mut().insert(context.with_db(db));
     Ok(next.run(req).await)
 }
 
