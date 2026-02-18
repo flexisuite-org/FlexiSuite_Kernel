@@ -1,3 +1,4 @@
+use async_trait::async_trait;
 #[cfg(debug_assertions)]
 use axum::body::to_bytes;
 #[cfg(debug_assertions)]
@@ -6,26 +7,46 @@ use axum::{
     body::Body,
     http::{Request, StatusCode},
 };
-use kernel_api::middleware::{MiddlewareConfig, MiddlewareState, IdempotencyStore, IdempotencyEntry, IdempotencyScopeKey, IdempotencyRecord};
+use kernel_api::middleware::{
+    IdempotencyAcquireResult, IdempotencyEntry, IdempotencyLease, IdempotencyRecord,
+    IdempotencyScopeKey, IdempotencyStore, IdempotencyStoreError, InMemoryActionStore,
+    InMemoryQuotaStore, MiddlewareConfig, MiddlewareState,
+};
 use std::sync::Arc;
 use tokio::sync::Notify;
-use async_trait::async_trait;
+
+use sea_orm::{DatabaseBackend, MockDatabase};
 
 #[cfg(debug_assertions)]
 use serde_json::Value;
 use tower::ServiceExt;
 
-fn setup_app() -> axum::Router {
-    setup_app_with_config(MiddlewareConfig::default(), None)
+async fn setup_app() -> axum::Router {
+    setup_app_with_config(MiddlewareConfig::default(), None).await
 }
 
-fn setup_app_with_config(config: MiddlewareConfig, store: Option<Arc<dyn IdempotencyStore>>) -> axum::Router {
+async fn setup_app_with_config(
+    mut config: MiddlewareConfig,
+    store: Option<Arc<dyn IdempotencyStore>>,
+) -> axum::Router {
+    config.require_redis = false;
+
     let state = if let Some(s) = store {
-        MiddlewareState::with_store(config, s)
+        MiddlewareState::with_store(
+            config,
+            s,
+            Arc::new(InMemoryActionStore::new()),
+            Arc::new(InMemoryQuotaStore::new()),
+        )
     } else {
         MiddlewareState::new(config)
+            .await
+            .expect("middleware state")
     };
-    let (app, _cleanup) = kernel_api::build_app_with_state(state);
+
+    let db = MockDatabase::new(DatabaseBackend::Postgres).into_connection();
+
+    let (app, _cleanup) = kernel_api::build_app_with_state(state, db);
     app
 }
 
@@ -38,21 +59,38 @@ struct NotifyingStore {
 #[cfg(debug_assertions)]
 #[async_trait]
 impl IdempotencyStore for NotifyingStore {
-    async fn get(&self, key: &IdempotencyScopeKey) -> Option<IdempotencyEntry> {
+    async fn get(
+        &self,
+        key: &IdempotencyScopeKey,
+    ) -> Result<Option<IdempotencyEntry>, IdempotencyStoreError> {
         self.inner.get(key).await
     }
-    async fn try_acquire(&self, key: IdempotencyScopeKey, hash: String, ttl: std::time::Duration) -> Option<IdempotencyEntry> {
+    async fn try_acquire(
+        &self,
+        key: IdempotencyScopeKey,
+        hash: String,
+        ttl: std::time::Duration,
+    ) -> Result<IdempotencyAcquireResult, IdempotencyStoreError> {
         let res = self.inner.try_acquire(key, hash, ttl).await;
-        if res.is_none() {
+        if matches!(res, Ok(IdempotencyAcquireResult::Acquired(_))) {
             self.notify.notify_one();
         }
         res
     }
-    async fn complete(&self, key: IdempotencyScopeKey, record: IdempotencyRecord) {
-        self.inner.complete(key, record).await
+    async fn complete(
+        &self,
+        key: IdempotencyScopeKey,
+        lease: &IdempotencyLease,
+        record: IdempotencyRecord,
+    ) -> Result<(), IdempotencyStoreError> {
+        self.inner.complete(key, lease, record).await
     }
-    async fn release_inflight(&self, key: &IdempotencyScopeKey) {
-        self.inner.release_inflight(key).await
+    async fn release_inflight(
+        &self,
+        key: &IdempotencyScopeKey,
+        lease: &IdempotencyLease,
+    ) -> Result<(), IdempotencyStoreError> {
+        self.inner.release_inflight(key, lease).await
     }
     async fn cleanup(&self) {
         self.inner.cleanup().await
@@ -80,7 +118,7 @@ fn build_idempotent_post(key: &str, body: &str) -> Request<Body> {
 
 #[tokio::test]
 async fn test_health_is_public() {
-    let app = setup_app();
+    let app = setup_app().await;
 
     let req = Request::builder()
         .uri("/health")
@@ -92,7 +130,7 @@ async fn test_health_is_public() {
 
 #[tokio::test]
 async fn test_auth_logic_401_403() {
-    let app = setup_app();
+    let app = setup_app().await;
 
     // 1. Missing auth context on protected endpoint -> 401
     let req = Request::builder()
@@ -144,7 +182,7 @@ async fn test_auth_logic_401_403() {
 #[tokio::test]
 #[cfg(debug_assertions)]
 async fn test_idempotency_conflict_scope_and_action_lookup() {
-    let app = setup_app();
+    let app = setup_app().await;
 
     // 1. Success first call
     let req = build_idempotent_post("key-1", "payload-a");
@@ -200,7 +238,7 @@ async fn test_idempotency_conflict_scope_and_action_lookup() {
 #[tokio::test]
 #[cfg(not(debug_assertions))]
 async fn test_idempotency_conflict_scope_and_action_lookup() {
-    let app = setup_app();
+    let app = setup_app().await;
     let req = build_idempotent_post("key-1", "payload-a");
     let res = app.clone().oneshot(req).await.unwrap();
     assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
@@ -208,7 +246,7 @@ async fn test_idempotency_conflict_scope_and_action_lookup() {
 
 #[tokio::test]
 async fn test_idempotency_key_validation() {
-    let app = setup_app();
+    let app = setup_app().await;
 
     let too_long = "k".repeat(129);
     let req = build_idempotent_post(&too_long, "payload");
@@ -227,7 +265,7 @@ async fn test_idempotency_key_validation() {
 
 #[tokio::test]
 async fn test_quota_evaluation_priority_and_clipping() {
-    let app = setup_app();
+    let app = setup_app().await;
 
     let mut builder = Request::builder().uri("/test").method("POST");
     #[cfg(debug_assertions)]
@@ -268,7 +306,7 @@ async fn test_idempotency_inflight_concurrency() {
         inner: Arc::new(kernel_api::middleware::InMemoryIdempotencyStore::new()),
         notify: notify.clone(),
     });
-    let app = setup_app_with_config(MiddlewareConfig::default(), Some(store));
+    let app = setup_app_with_config(MiddlewareConfig::default(), Some(store)).await;
 
     let t1 = tokio::spawn({
         let app = app.clone();
