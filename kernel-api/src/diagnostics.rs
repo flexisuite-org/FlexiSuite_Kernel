@@ -187,11 +187,15 @@ async fn query_diagnostic(
 
 /// Stub health check endpoint. Does not perform real service checks.
 async fn get_health() -> impl IntoResponse {
-    Json(serde_json::json!({
-        "status": "healthy",
-        "score": 100,
-        "stub": true
-    }))
+    (
+        StatusCode::NOT_IMPLEMENTED,
+        Json(serde_json::json!({
+            "status": "not_implemented",
+            "message": "Health dependency checks are not implemented yet. Implement real probes before using this endpoint for availability decisions.",
+            "stub": true
+        })),
+    )
+        .into_response()
 }
 
 async fn get_policy(
@@ -218,50 +222,10 @@ async fn get_policy(
 }
 
 async fn update_policy(
-    Extension(db): Extension<Arc<DatabaseConnection>>,
-    Extension(ctx): Extension<TenantContext>,
-    Json(payload): Json<UpdatePolicyRequest>,
+    Extension(_db): Extension<Arc<DatabaseConnection>>,
+    Extension(_ctx): Extension<TenantContext>,
+    Json(_payload): Json<UpdatePolicyRequest>,
 ) -> impl IntoResponse {
-    let user_id = match ctx.user_id() {
-        Some(uid) => uid.to_string(),
-        None => return StatusCode::FORBIDDEN.into_response(),
-    };
-
-    let enabled = payload.enabled;
-    let result = with_tenant_tx(&db, &ctx, move |repo| {
-        Box::pin(async move {
-            let model = diagnostic_policy::ActiveModel {
-                tenant_id: ActiveValue::NotSet,
-                enabled: ActiveValue::Set(enabled),
-                updated_at: ActiveValue::Set(Utc::now().into()),
-                updated_by: ActiveValue::Set(Some(user_id.clone())),
-            };
-            let policy = repo.upsert_diagnostic_policy(model).await?;
-
-            // Record audit entry for policy change
-            // Note: actor identity is tracked via the pseudonymized actor_id
-            // in the audit_log row itself; we intentionally omit raw user_id
-            // from the details payload to prevent PII leakage.
-            repo.log_audit(
-                "update_policy".to_string(),
-                "diagnostic_policy".to_string(),
-                serde_json::json!({
-                    "field": "enabled",
-                    "new_value": enabled,
-                }),
-            )
-            .await?;
-
-            Ok(policy)
-        })
-    })
-    .await;
-
-    match result {
-        Ok(policy) => Json(policy).into_response(),
-        Err(e) => {
-            tracing::error!("Failed to update policy: {}", e);
-            StatusCode::INTERNAL_SERVER_ERROR.into_response()
-        }
-    }
+    // TODO: enforce tenant-admin via RBAC once available.
+    StatusCode::FORBIDDEN.into_response()
 }
