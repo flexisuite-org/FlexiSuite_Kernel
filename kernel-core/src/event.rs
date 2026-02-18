@@ -71,11 +71,26 @@ pub struct PublishAck {
 #[derive(Debug, Clone)]
 pub struct Delivery {
     pub delivery_id: String, // Redis ID
-    pub stream_key: String,  // The actual shard key this message came from
+    /// The actual shard key this message came from.
+    /// MUST be tenant-scoped (e.g., `{tenant_id}:{stream_base}:{shard}`).
+    pub stream_key: String,
     pub event: EventEnvelope,
 }
 
 pub const SHARD_COUNT: u64 = 64;
+
+/// Validates that a stream_key matches the given tenant_id.
+/// Returns Ok(()) if the key starts with "{tenant_id}:", Err(EventError) otherwise.
+pub fn validate_stream_key(stream_key: &str, tenant_id: &TenantId) -> Result<(), EventError> {
+    let prefix = format!("{}:", tenant_id);
+    if !stream_key.starts_with(&prefix) {
+        return Err(EventError::Consumer(format!(
+            "stream_key '{}' does not match tenant_id '{}'",
+            stream_key, tenant_id
+        )));
+    }
+    Ok(())
+}
 
 #[async_trait]
 pub trait ReliableProducer: Send + Sync {
@@ -107,9 +122,8 @@ pub trait ReliableConsumer: Send + Sync {
     /// Acknowledges a message.
     ///
     /// `stream_key` should be the specific shard key from `Delivery::stream_key`.
-    /// `stream_key` is expected to be tenant-less logical shard identifier unless
-    /// the backend contract documents otherwise; implementations MUST use `tenant_id`
-    /// to enforce tenant isolation.
+    /// `stream_key` MUST be tenant-scoped (e.g. starting with `tenant_id:`).
+    /// Implementations MUST validate that `stream_key` matches `tenant_id` to enforce isolation.
     async fn ack(
         &self,
         tenant_id: &TenantId,
@@ -129,9 +143,8 @@ pub trait ReliableConsumer: Send + Sync {
     ///   be impacted during retries depending on the implementation.
     ///
     /// `stream_key` should be the specific shard key from `Delivery::stream_key`.
-    /// `stream_key` is expected to be tenant-less logical shard identifier unless
-    /// the backend contract documents otherwise; implementations MUST use `tenant_id`
-    /// to enforce tenant isolation.
+    /// `stream_key` MUST be tenant-scoped (e.g. starting with `tenant_id:`).
+    /// Implementations MUST validate that `stream_key` matches `tenant_id` to enforce isolation.
     async fn nack(
         &self,
         tenant_id: &TenantId,
@@ -162,4 +175,22 @@ pub trait ReliableConsumer: Send + Sync {
         min_idle_ms: u64,
         max_count: usize,
     ) -> Result<Vec<Delivery>, EventError>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_validate_stream_key() {
+        let tenant_id = TenantId::new("tenant_a").expect("Valid tenant ID");
+        
+        // Valid case
+        assert!(validate_stream_key("tenant_a:orders:0", &tenant_id).is_ok());
+
+        // Invalid cases
+        assert!(validate_stream_key("tenant_b:orders:0", &tenant_id).is_err());
+        assert!(validate_stream_key("orders:0", &tenant_id).is_err());
+        assert!(validate_stream_key("tenant_a_suffix:orders:0", &tenant_id).is_err());
+    }
 }
