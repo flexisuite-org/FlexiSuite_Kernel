@@ -20,7 +20,8 @@ uuid = { version = "1", features = ["v7", "serde"] }
 async-trait = "0.1"
 kernel-core = { path = "../kernel-core" }
 kernel-data = { path = "../kernel-data" }
-tracing = "0.1.44"
+# TODO(security): Revisit once upstream tracing fix is published and validated.
+tracing = "=0.1.43"
 rusty_paseto = "0.7.1"
 chrono = { version = "0.4", features = ["serde"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
