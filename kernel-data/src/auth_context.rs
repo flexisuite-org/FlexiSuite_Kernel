@@ -4,7 +4,7 @@ use std::fmt;
 use std::str::FromStr;
 
 macro_rules! define_principal_id {
-    ($type_name:ident, $label:literal) => {
+    ($type_name:ident, $label:literal, $reserve_system:expr) => {
         #[derive(Clone, Debug, Serialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
         pub struct $type_name(String);
 
@@ -37,7 +37,7 @@ macro_rules! define_principal_id {
         impl $type_name {
             pub fn new(id: impl Into<String>) -> Result<Self, String> {
                 let s = id.into();
-                if is_valid_principal(&s) {
+                if is_valid_principal(&s) && !($reserve_system && s == "system") {
                     Ok(Self(s))
                 } else {
                     Err(format!("Invalid {} format", $label))
@@ -75,8 +75,8 @@ macro_rules! define_principal_id {
     };
 }
 
-define_principal_id!(TenantId, "tenant_id");
-define_principal_id!(UserId, "user_id");
+define_principal_id!(TenantId, "tenant_id", true);
+define_principal_id!(UserId, "user_id", false);
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TenantContext {
@@ -143,4 +143,26 @@ pub fn is_valid_principal(value: &str) -> bool {
         && bytes
             .iter()
             .all(|b| matches!(*b, b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'-' | b'_' | b'.'))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tenant_id_rejects_reserved_system() {
+        assert!(TenantId::new("system").is_err());
+    }
+
+    #[test]
+    fn system_context_still_uses_reserved_id() {
+        let ctx = TenantContext::from(SystemTenantContext);
+        assert!(ctx.is_system());
+        assert_eq!(ctx.tenant_id().as_str(), "system");
+    }
+
+    #[test]
+    fn user_id_allows_system_literal() {
+        assert!(UserId::new("system").is_ok());
+    }
 }
