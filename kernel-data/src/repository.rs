@@ -163,6 +163,7 @@ impl TenantRepository for TenantScoped<RawConnection> {
         &self,
         mut active_model: diagnostic_report::ActiveModel,
     ) -> kernel::Result<diagnostic_report::Model> {
+        required_active_value(&active_model.trace_id, "DiagnosticReport ID")?;
         active_model.tenant_id = sea_orm::ActiveValue::Set(self.tenant_id.to_string());
         let result = active_model
             .insert(&self.inner.txn)
@@ -210,6 +211,7 @@ impl TenantRepository for TenantScoped<RawConnection> {
         active_model.id = ActiveValue::Unchanged(id.to_string());
 
         let existing = EntityRecord::find_by_id((id.to_string(), self.tenant_id.to_string()))
+            .lock_exclusive()
             .one(&self.inner.txn)
             .await
             .map_err(KernelError::db_error)?
@@ -229,7 +231,9 @@ impl TenantRepository for TenantScoped<RawConnection> {
             }
         }
 
-        let next_version = existing.version + 1;
+        let next_version = existing.version.checked_add(1).ok_or_else(|| {
+            KernelError::ValidationError("version overflow: cannot increment entity version".into())
+        })?;
         active_model.version = ActiveValue::Set(next_version);
         active_model.updated_at = ActiveValue::Set(chrono::Utc::now().into());
 
