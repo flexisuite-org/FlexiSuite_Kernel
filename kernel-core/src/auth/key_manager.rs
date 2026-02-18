@@ -142,11 +142,12 @@ impl KeyManager {
         alg: &str,
         state: KeyState,
     ) -> Result<Model, KeyManagerError> {
+        let now = Utc::now();
         let prefix = match key_type {
             KeyType::Hmac => "hmac",
             KeyType::PasetoPublic => "paseto_public",
         };
-        let kid = format!("{}-{}-{}", prefix, Utc::now().timestamp(), Uuid::now_v7());
+        let kid = format!("{}-{}-{}", prefix, now.timestamp(), Uuid::now_v7());
         // Token format uses ':' as a delimiter; kid must never contain ':'.
         if kid.contains(':') {
             return Err(KeyManagerError::KeyGenError(
@@ -183,9 +184,9 @@ impl KeyManager {
             secret_bytes: Set(secret),
             public_bytes: Set(public),
             state: Set(state.clone()),
-            created_at: Set(Utc::now().into()),
+            created_at: Set(now.into()),
             activated_at: Set(if state == KeyState::Active {
-                Some(Utc::now().into())
+                Some(now.into())
             } else {
                 None
             }),

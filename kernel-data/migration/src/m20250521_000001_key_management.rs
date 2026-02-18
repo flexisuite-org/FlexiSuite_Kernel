@@ -79,6 +79,10 @@ impl MigrationTrait for Migration {
                 END IF;
 
                 -- 3. Validate Timestamp (±30s)
+                -- NOTE: This check requires that the application clock (Utc::now().timestamp())
+                -- and the database clock (extract(epoch from now())) are NTP-synchronized.
+                -- Maximum allowed skew is 30 seconds. If tokens are being rejected unexpectedly,
+                -- verify that both the app server and DB server clocks are synchronized.
                 ts := ts_str::bigint;
                 now_ts := extract(epoch from now())::bigint;
                 IF ts < (now_ts - 30) OR ts > (now_ts + 30) THEN
