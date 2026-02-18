@@ -27,7 +27,7 @@ fn main() -> Result<()> {
     let re_security_definer = Regex::new(r"(?i)SECURITY\s+DEFINER").unwrap();
     // Allow variations in spacing and newlines
     let re_search_path =
-        Regex::new(r"(?i)SET\s+search_path\s*=\s*flexi\s*,\s*pg_catalog\s*,\s*pg_temp").unwrap();
+        Regex::new(r"(?i)SET\s+((SESSION|LOCAL)\s+)?search_path\s*(=|TO)\s*flexi\s*,\s*pg_catalog\s*,\s*pg_temp").unwrap();
     // Use (?s) to allow '.' to match newlines for multi-line REVOKE statements
     let re_revoke = Regex::new(r"(?si)REVOKE\s+.*?FROM\s+PUBLIC").unwrap();
     let re_kernel_mode = Regex::new(r"flexi\.kernel_mode").unwrap();
@@ -59,7 +59,7 @@ fn main() -> Result<()> {
                     let content = match fs::read_to_string(path) {
                         Ok(c) => c,
                         Err(e) => {
-                            eprintln!("Warning: Failed to read file {}: {}", path.display(), e);
+                            eprintln!("Error: Failed to read file {}: {}", path.display(), e);
                             errors = true;
                             continue;
                         }

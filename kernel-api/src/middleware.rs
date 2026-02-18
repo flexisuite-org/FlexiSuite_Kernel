@@ -121,7 +121,14 @@ impl Default for MiddlewareConfig {
         fn get_env_f64(key: &str, default_val: f64) -> f64 {
             match std::env::var(key) {
                 Ok(v) => match v.parse::<f64>() {
-                    Ok(s) => s,
+                    Ok(s) => {
+                        if s > 0.0 {
+                            s
+                        } else {
+                            tracing::warn!(key = %key, value = %s, "Non-positive env var for quota (rate/capacity), using default");
+                            default_val
+                        }
+                    }
                     Err(_) => {
                         tracing::warn!(key = %key, value = %v, "Invalid f64 env var, using default");
                         default_val
@@ -386,11 +393,10 @@ impl RedisIdempotencyStore {
 
     fn inflight_value(lease: &IdempotencyLease, body_hash: &str) -> String {
         format!(
-            "IN_FLIGHT|{}|{}|{}|{}",
+            "IN_FLIGHT|{}|{}|{}",
             lease.owner_token,
             body_hash,
-            lease.version,
-            current_unix_timestamp_ms()
+            lease.version
         )
     }
 
@@ -1167,8 +1173,9 @@ impl RedisQuotaStore {
                 let q = tenant_override
                     .and_then(|o| o.tenant_budget)
                     .unwrap_or(self.quota.tenant_budget);
+                let tenant_hash = sha256_hex(tenant_id_str.as_bytes());
                 Some((
-                    format!("quota:{{global}}:tenant:{}:cpu", tenant_id),
+                    format!("quota:{{global}}:tenant:{}:cpu", tenant_hash),
                     q.rate,
                     q.capacity,
                     q.cost,
@@ -1178,8 +1185,9 @@ impl RedisQuotaStore {
                 let q = tenant_override
                     .and_then(|o| o.api_rate_limit)
                     .unwrap_or(self.quota.api_rate_limit);
+                let tenant_hash = sha256_hex(tenant_id_str.as_bytes());
                 Some((
-                    format!("quota:{{global}}:tenant:{}:api", tenant_id),
+                    format!("quota:{{global}}:tenant:{}:api", tenant_hash),
                     q.rate,
                     q.capacity,
                     q.cost,
