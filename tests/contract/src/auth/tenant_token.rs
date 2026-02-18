@@ -1,21 +1,21 @@
-use axum::http::StatusCode;
-use tower::ServiceExt; // for oneshot
+use crate::api::middleware_integration::setup_app;
+use crate::auth::helpers::{generate_token, generate_token_with_kid, setup};
 use axum::body::Body;
 use axum::http::Request;
-use crate::api::middleware_integration::setup_app;
-use crate::auth::helpers::{setup, generate_token};
+use axum::http::StatusCode;
+use tower::ServiceExt; // for oneshot
 
 #[tokio::test]
-async fn test_tenant_token_v2_accepts_valid_token_without_kid_for_now() {
+async fn test_tenant_token_v2_accepts_valid_token_with_kid() {
     setup();
     let app = setup_app().await;
 
-    let token_no_kid = generate_token(true);
+    let token = generate_token(true);
     let req = Request::builder()
         .uri("/test")
         .method("POST")
-        .header("Authorization", format!("Bearer {}", token_no_kid))
-        .header("Idempotency-Key", "tenant-token-v2-current")
+        .header("Authorization", format!("Bearer {}", token))
+        .header("Idempotency-Key", "tenant-token-v2-with-kid")
         .body(Body::empty())
         .unwrap();
 
@@ -23,16 +23,15 @@ async fn test_tenant_token_v2_accepts_valid_token_without_kid_for_now() {
     assert_eq!(
         res.status(),
         StatusCode::CREATED,
-        "Current middleware behavior accepts token without KID"
+        "Token with KID must be accepted"
     );
 }
 
 #[tokio::test]
-#[ignore = "KID/footer validation is not implemented in kernel-api parser yet"]
 async fn test_tenant_token_v2_kid_required_contract() {
     setup();
     let app = setup_app().await;
-    let token_no_kid = generate_token(true);
+    let token_no_kid = generate_token_with_kid(true, None);
     let req = Request::builder()
         .uri("/test")
         .method("POST")

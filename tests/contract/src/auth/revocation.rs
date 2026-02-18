@@ -1,9 +1,9 @@
-use axum::http::StatusCode;
-use tower::ServiceExt; // for oneshot
+use crate::api::middleware_integration::setup_app;
+use crate::auth::helpers::{generate_token, generate_token_with_kid, setup};
 use axum::body::Body;
 use axum::http::Request;
-use crate::api::middleware_integration::setup_app;
-use crate::auth::helpers::{setup, generate_token};
+use axum::http::StatusCode;
+use tower::ServiceExt; // for oneshot
 
 #[tokio::test]
 async fn test_key_revocation_slo() {
@@ -26,17 +26,14 @@ async fn test_key_revocation_slo() {
 
     // Loud assertion for active key
     assert_eq!(
-        res.status(), 
-        StatusCode::CREATED, 
-        "Valid Active Key token rejected: status {}", 
+        res.status(),
+        StatusCode::CREATED,
+        "Valid Active Key token rejected: status {}",
         res.status()
     );
 
     // Case 2: Revoked Key -> FAIL
-    // TODO: Wire mock revocation store once revocation support is implemented in the middleware.
-    // Tracking Issue: [REF-AUTH-REVOCATION]
-    /*
-    let token_revoked = generate_token(true);
+    let token_revoked = generate_token_with_kid(true, Some("revoked"));
     let req = Request::builder()
         .uri("/test")
         .method("POST")
@@ -49,13 +46,7 @@ async fn test_key_revocation_slo() {
     // Strict assertion for contract suite
     assert!(
         res.status() == StatusCode::UNAUTHORIZED || res.status() == StatusCode::FORBIDDEN,
-        "Revoked key must be rejected (got {})", res.status()
+        "Revoked key must be rejected (got {})",
+        res.status()
     );
-    */
-}
-
-#[tokio::test]
-#[ignore = "Revocation support not yet implemented in middleware. TODO: [REF-AUTH-REVOCATION]"]
-async fn test_key_revocation_failure_is_enforced() {
-    // This exists to explicitly track the requirement even while ignored
 }

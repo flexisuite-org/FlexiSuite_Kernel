@@ -1,10 +1,11 @@
+use crate::auth::TenantId;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::cmp::Ordering;
 use thiserror::Error;
 use uuid::Uuid;
-use crate::auth::TenantId;
 
 #[derive(Debug, Error)]
 pub enum EventError {
@@ -79,6 +80,14 @@ pub struct Delivery {
 
 pub const SHARD_COUNT: u64 = 64;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GapRecoveryState {
+    Normal,
+    GapDetected,
+    Recovering,
+    RebuildRequired,
+}
+
 /// Validates that a stream_key matches the given tenant_id.
 /// Returns Ok(()) if the key starts with "{tenant_id}:", Err(EventError) otherwise.
 pub fn validate_stream_key(stream_key: &str, tenant_id: &TenantId) -> Result<(), EventError> {
@@ -92,9 +101,75 @@ pub fn validate_stream_key(stream_key: &str, tenant_id: &TenantId) -> Result<(),
     Ok(())
 }
 
+pub fn validate_order_mode_transition(
+    existing: Option<&OrderMode>,
+    next: &OrderMode,
+) -> Result<(), EventError> {
+    if let Some(existing_mode) = existing {
+        let existing_kind = match existing_mode {
+            OrderMode::Entity { .. } => "entity",
+            OrderMode::Causality { .. } => "causality",
+        };
+        let next_kind = match next {
+            OrderMode::Entity { .. } => "entity",
+            OrderMode::Causality { .. } => "causality",
+        };
+        if existing_kind != next_kind {
+            return Err(EventError::Producer(
+                "mixed order_mode forbidden for same logical key".to_string(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+pub fn compare_event_order(a: &EventEnvelope, b: &EventEnvelope) -> Ordering {
+    match (&a.order_mode, &b.order_mode) {
+        (
+            OrderMode::Entity {
+                entity_id: aid,
+                seq: aseq,
+            },
+            OrderMode::Entity {
+                entity_id: bid,
+                seq: bseq,
+            },
+        ) if aid == bid => aseq.cmp(bseq),
+        (
+            OrderMode::Causality {
+                key: akey,
+                seq: aseq,
+            },
+            OrderMode::Causality {
+                key: bkey,
+                seq: bseq,
+            },
+        ) if akey == bkey => aseq.cmp(bseq),
+        _ => Ordering::Equal,
+    }
+}
+
+pub fn progress_gap_recovery(
+    state: GapRecoveryState,
+    outbox_has_missing_seq: bool,
+) -> GapRecoveryState {
+    match (state, outbox_has_missing_seq) {
+        (GapRecoveryState::Normal, true) => GapRecoveryState::Recovering,
+        (GapRecoveryState::Normal, false) => GapRecoveryState::RebuildRequired,
+        (GapRecoveryState::GapDetected, true) => GapRecoveryState::Recovering,
+        (GapRecoveryState::GapDetected, false) => GapRecoveryState::RebuildRequired,
+        (GapRecoveryState::Recovering, _) => GapRecoveryState::Normal,
+        (GapRecoveryState::RebuildRequired, _) => GapRecoveryState::RebuildRequired,
+    }
+}
+
 #[async_trait]
 pub trait ReliableProducer: Send + Sync {
-    async fn publish(&self, stream_base: &str, event: EventEnvelope) -> Result<PublishAck, EventError>;
+    async fn publish(
+        &self,
+        stream_base: &str,
+        event: EventEnvelope,
+    ) -> Result<PublishAck, EventError>;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -184,7 +259,7 @@ mod tests {
     #[test]
     fn test_validate_stream_key() {
         let tenant_id = TenantId::new("tenant_a").expect("Valid tenant ID");
-        
+
         // Valid case
         assert!(validate_stream_key("tenant_a:orders:0", &tenant_id).is_ok());
 
@@ -194,7 +269,7 @@ mod tests {
         assert!(validate_stream_key("tenant_a_suffix:orders:0", &tenant_id).is_err());
 
         // Boundary cases: empty tenant prefix
-        // Since validate_stream_key constructs prefix as "{tenant_id}:", 
+        // Since validate_stream_key constructs prefix as "{tenant_id}:",
         // if tenant_id is "tenant_a", prefix is "tenant_a:".
         // ":orders:0" effectively has empty tenant part which won't match "tenant_a:"
         assert!(validate_stream_key(":orders:0", &tenant_id).is_err());
@@ -211,11 +286,33 @@ mod tests {
         // Let's assume typical restrictions. If TenantId allows everything, this might fail,
         // so we'll just check if it fails to create or if it works, validate_stream_key handles it.
         if let Ok(weird_tenant) = TenantId::new("tenant/a") {
-             // If "tenant/a" is valid, then "tenant/a:..." should work
-             assert!(validate_stream_key("tenant/a:stream:0", &weird_tenant).is_ok());
+            // If "tenant/a" is valid, then "tenant/a:..." should work
+            assert!(validate_stream_key("tenant/a:stream:0", &weird_tenant).is_ok());
         } else {
-             // If it failed to create, that's also a passed "boundary test" for TenantId
-             // but validate_stream_key test can't run on it.
+            // If it failed to create, that's also a passed "boundary test" for TenantId
+            // but validate_stream_key test can't run on it.
         }
+    }
+
+    #[test]
+    fn test_validate_order_mode_transition_rejects_mix() {
+        let entity_id = Uuid::now_v7();
+        let existing = OrderMode::Entity {
+            entity_id,
+            seq: Some(1),
+        };
+        let next = OrderMode::Causality {
+            key: entity_id.to_string(),
+            seq: Some(2),
+        };
+        assert!(validate_order_mode_transition(Some(&existing), &next).is_err());
+    }
+
+    #[test]
+    fn test_progress_gap_recovery_flow() {
+        let state = progress_gap_recovery(GapRecoveryState::GapDetected, true);
+        assert_eq!(state, GapRecoveryState::Recovering);
+        let state = progress_gap_recovery(state, true);
+        assert_eq!(state, GapRecoveryState::Normal);
     }
 }
