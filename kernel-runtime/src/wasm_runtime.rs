@@ -7,6 +7,7 @@ use std::time::Duration;
 use wasmtime::{Config, Engine, Linker, Module, Store, StoreLimits, StoreLimitsBuilder, Trap};
 use wasmtime_wasi::WasiCtxBuilder;
 use wasmtime_wasi::p1::WasiP1Ctx;
+use wasmtime_wasi::p2::pipe::MemoryOutputPipe;
 
 pub struct WasmSandbox {
     engine: Engine,
@@ -29,6 +30,7 @@ impl WasmSandbox {
 struct Ctx {
     wasi: WasiP1Ctx,
     limits: StoreLimits,
+    stdout: MemoryOutputPipe,
 }
 
 fn map_wasm_error(error: anyhow::Error) -> SandboxError {
@@ -67,13 +69,24 @@ impl SandboxRuntime for WasmSandbox {
         wasmtime_wasi::p1::add_to_linker_async(&mut linker, |ctx: &mut Ctx| &mut ctx.wasi)
             .map_err(|e| SandboxError::InitError(e.to_string()))?;
 
-        let wasi = WasiCtxBuilder::new().build_p1();
+        const MAX_STDOUT_SIZE: usize = 1 << 20;
+        let stdout = MemoryOutputPipe::new(MAX_STDOUT_SIZE);
+        let mut wasi_builder = WasiCtxBuilder::new();
+        wasi_builder.stdout(stdout.clone());
+        let wasi = wasi_builder.build_p1();
 
         let limits = StoreLimitsBuilder::new()
             .memory_size(self.options.memory_limit)
             .build();
 
-        let mut store = Store::new(&self.engine, Ctx { wasi, limits });
+        let mut store = Store::new(
+            &self.engine,
+            Ctx {
+                wasi,
+                limits,
+                stdout,
+            },
+        );
         store.limiter(|state| &mut state.limits);
 
         let fuel = self.options.cpu_time_limit.as_millis() as u64 * 10_000;
@@ -136,8 +149,8 @@ impl SandboxRuntime for WasmSandbox {
 
         cancel_watchdog.store(true, Ordering::SeqCst);
 
-        // Stdout capture is not wired yet in this sandbox, so execution currently
-        // returns Null even on wasmtime-wasi 41.0.3.
-        Ok(serde_json::Value::Null)
+        let stdout = store.data().stdout.contents();
+        let output = String::from_utf8_lossy(&stdout).into_owned();
+        Ok(serde_json::Value::String(output))
     }
 }
