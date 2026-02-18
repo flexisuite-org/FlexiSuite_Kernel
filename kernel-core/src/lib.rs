@@ -1,5 +1,6 @@
 pub mod auth;
 pub mod diagnostics;
+pub mod event;
 pub mod idempotency;
 pub mod kernel;
 pub mod quota;

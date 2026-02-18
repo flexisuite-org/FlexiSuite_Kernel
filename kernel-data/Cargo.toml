@@ -21,6 +21,8 @@ uuid = { version = "1.21.0", features = ["v7", "serde"] }
 futures = "0.3.32"
 ring = "0.17.14"
 hex = "0.4"
+redis = { version = "1.0.3", features = ["tokio-comp", "connection-manager"] }
+twox-hash = "2.1.2"
 
 [dev-dependencies]
 migration = { path = "./migration" }
