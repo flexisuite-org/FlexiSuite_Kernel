@@ -5,8 +5,9 @@
 # CI:  cargo deny --workspace check
 
 [graph]
-# Analyze the entire workspace
-all-features = false
+# Analyze all feature-gated dependencies so cargo-deny covers the same
+# dependency surface as a production build (including optional features).
+all-features = true
 
 # ---------------------------------------------------------------------------
 # [advisories] — RUSTSEC advisory database

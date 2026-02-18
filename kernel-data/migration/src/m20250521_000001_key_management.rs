@@ -184,6 +184,10 @@ impl MigrationTrait for Migration {
                 IF array_length(parts, 1) != 6 THEN RAISE EXCEPTION 'Invalid token'; END IF;
                 ver := parts[1]; kid := parts[2]; ts_str := parts[3]; nonce_val := parts[4]; tenant_id_val := parts[5]; sig := parts[6];
 
+                IF ver != 'v2' THEN
+                    RAISE EXCEPTION 'Unsupported token version: %', ver;
+                END IF;
+
                 ts := ts_str::bigint;
                 now_ts := extract(epoch from now())::bigint;
                 IF ts < (now_ts - 30) OR ts > (now_ts + 30) THEN RAISE EXCEPTION 'Expired'; END IF;
