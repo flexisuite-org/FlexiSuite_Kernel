@@ -16,22 +16,31 @@ use kernel_data::DataError;
 use kernel_data::connection::{RawConnection, TenantScoped, with_tenant_tx};
 use kernel_data::entities::entity_record;
 use kernel_data::repository::TenantRepository;
-use sea_orm::{ActiveValue, ConnectionTrait, Database, DbBackend, Statement, TransactionTrait};
+use sea_orm::{
+    ActiveValue, ConnectionTrait, Database, DatabaseConnection, DbBackend, Statement,
+    TransactionTrait,
+};
+use std::sync::OnceLock;
 use testcontainers::{RunnableImage, clients};
 use testcontainers_modules::postgres::Postgres;
 use uuid::Uuid;
 
 const TEST_INTERNAL_SECRET: &str = "test_internal_secret_123";
 
-#[tokio::test(flavor = "multi_thread")]
-async fn test_tenant_isolation_rls() {
-    let docker = clients::Cli::default();
+type PostgresNode = testcontainers::Container<'static, Postgres>;
+
+fn get_docker_client() -> &'static clients::Cli {
+    static DOCKER: OnceLock<&'static clients::Cli> = OnceLock::new();
+    DOCKER.get_or_init(|| Box::leak(Box::new(clients::Cli::default())))
+}
+
+async fn setup_test_db() -> (DatabaseConnection, PostgresNode) {
+    let docker = get_docker_client();
     let image = RunnableImage::from(Postgres::default()).with_tag("15-alpine");
     let node = docker.run(image);
     let port = node.get_host_port_ipv4(5432);
     let connection_string = format!("postgres://postgres:postgres@127.0.0.1:{}/postgres", port);
 
-    // 1. Connect
     let db = Database::connect(&connection_string)
         .await
         .expect("Failed to connect to DB");
@@ -51,8 +60,6 @@ async fn test_tenant_isolation_rls() {
         .expect("Failed to run migrations");
 
     // 3. Configure Internal Database Secret (GUC)
-    // NOTE: TEST_INTERNAL_SECRET is a compile-time constant in this test module.
-    // Do not copy this interpolation pattern for runtime/user-controlled values.
     admin
         .set_secret(TEST_INTERNAL_SECRET)
         .await
@@ -63,6 +70,13 @@ async fn test_tenant_isolation_rls() {
     let db = Database::connect(&connection_string)
         .await
         .expect("Failed to reconnect to DB");
+    (db, node)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore] // Requires Docker
+async fn test_tenant_isolation_rls() {
+    let (db, _node) = setup_test_db().await;
 
     // 5. Initialize Keys (HMAC)
     TestAuth::init_keys(&db)
@@ -152,6 +166,90 @@ async fn insert_record(
 }
 
 #[tokio::test(flavor = "multi_thread")]
+#[ignore] // Requires Docker
+async fn test_delete_entity_contract() {
+    let (db, _node) = setup_test_db().await;
+    TestAuth::init_keys(&db).await.expect("Failed to init keys");
+
+    let tenant_a = TenantContext::new(
+        TenantId::new("tenant-delete-a").unwrap(),
+        Some(UserId::new("user-1").unwrap()),
+    );
+    let tenant_b = TenantContext::new(
+        TenantId::new("tenant-delete-b").unwrap(),
+        Some(UserId::new("user-2").unwrap()),
+    );
+
+    let record_id = Uuid::now_v7().to_string();
+    let record_id_for_insert = record_id.clone();
+    let token_a = TestAuth::generate_tenant_token(&db, tenant_a.tenant_id())
+        .await
+        .expect("gen token A");
+    with_tenant_tx(&db, &tenant_a, &token_a, |repo| {
+        Box::pin(async move { insert_record(repo, record_id_for_insert, "before-delete").await })
+    })
+    .await
+    .expect("Tenant A insert failed");
+
+    let record_id_for_cross_delete = record_id.clone();
+    let token_b = TestAuth::generate_tenant_token(&db, tenant_b.tenant_id())
+        .await
+        .expect("gen token B");
+    let cross_delete_result = with_tenant_tx(&db, &tenant_b, &token_b, |repo| {
+        Box::pin(async move { repo.delete_entity(&record_id_for_cross_delete).await })
+    })
+    .await;
+    assert!(
+        matches!(
+            cross_delete_result,
+            Err(DataError::ValidationError(ref msg)) if msg == "Entity not found"
+        ),
+        "Cross-tenant delete must be treated as not found"
+    );
+
+    let record_id_for_delete = record_id.clone();
+    let token_a_2 = TestAuth::generate_tenant_token(&db, tenant_a.tenant_id())
+        .await
+        .expect("gen token A2");
+    with_tenant_tx(&db, &tenant_a, &token_a_2, |repo| {
+        Box::pin(async move { repo.delete_entity(&record_id_for_delete).await })
+    })
+    .await
+    .expect("Tenant A delete failed");
+
+    let record_id_for_get = record_id.clone();
+    let token_a_3 = TestAuth::generate_tenant_token(&db, tenant_a.tenant_id())
+        .await
+        .expect("gen token A3");
+    with_tenant_tx(&db, &tenant_a, &token_a_3, |repo| {
+        Box::pin(async move {
+            let entity = repo.get_entity(&record_id_for_get).await?;
+            assert!(entity.is_none(), "Deleted entity should not exist");
+            Ok(())
+        })
+    })
+    .await
+    .expect("Tenant A get after delete failed");
+
+    let missing_id = Uuid::now_v7().to_string();
+    let token_a_4 = TestAuth::generate_tenant_token(&db, tenant_a.tenant_id())
+        .await
+        .expect("gen token A4");
+    let missing_delete_result = with_tenant_tx(&db, &tenant_a, &token_a_4, |repo| {
+        Box::pin(async move { repo.delete_entity(&missing_id).await })
+    })
+    .await;
+    assert!(
+        matches!(
+            missing_delete_result,
+            Err(DataError::ValidationError(ref msg)) if msg == "Entity not found"
+        ),
+        "Deleting missing entity must return validation not found"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore] // Requires Docker
 async fn test_migration_succeeds_without_flexi_role() {
     let docker = clients::Cli::default();
     let image = RunnableImage::from(Postgres::default()).with_tag("15-alpine");
@@ -187,35 +285,9 @@ async fn test_migration_succeeds_without_flexi_role() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+#[ignore] // Requires Docker
 async fn test_authorize_rejects_nonce_reuse() {
-    let docker = clients::Cli::default();
-    let image = RunnableImage::from(Postgres::default()).with_tag("15-alpine");
-    let node = docker.run(image);
-    let port = node.get_host_port_ipv4(5432);
-    let connection_string = format!("postgres://postgres:postgres@127.0.0.1:{}/postgres", port);
-
-    let db = Database::connect(&connection_string)
-        .await
-        .expect("Failed to connect to DB");
-
-    let admin = TestAdminTenantContext::new(&db);
-    admin
-        .create_role()
-        .await
-        .expect("Failed to create role flexi");
-    admin
-        .run_migrations()
-        .await
-        .expect("Failed to run migrations");
-    admin
-        .set_secret(TEST_INTERNAL_SECRET)
-        .await
-        .expect("Failed to set flexi.hmac_secret");
-    drop(db);
-
-    let db = Database::connect(&connection_string)
-        .await
-        .expect("Failed to reconnect to DB");
+    let (db, _node) = setup_test_db().await;
     TestAuth::init_keys(&db).await.expect("Failed to init keys");
 
     let tenant_id = TenantId::new("nonce-tenant").unwrap();
@@ -242,6 +314,7 @@ async fn test_authorize_rejects_nonce_reuse() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+#[ignore] // Requires Docker
 async fn test_authorized_tenant_id_rejects_manual_context_tampering() {
     let docker = clients::Cli::default();
     let image = RunnableImage::from(Postgres::default()).with_tag("15-alpine");
@@ -266,14 +339,6 @@ async fn test_authorized_tenant_id_rejects_manual_context_tampering() {
     // We use a transaction here to simulate a session where we try to tamper
     let txn = db.begin().await.expect("Failed to start transaction");
 
-    // We cannot use the safe admin helper here because we need to be inside *this* transaction
-    // to test the session-local state tampering. We are simulating an attacker who has
-    // somehow gotten raw SQL access within a transaction.
-    //
-    // Note: This test explicitly verifies that *even if* someone tries to set these variables
-    // manually, our security functions will reject it if the signature logic isn't satisfied
-    // (which is checked by authorized_tenant_id).
-
     // 1. Manually set the secret (simulating server config)
     txn.execute(Statement::from_sql_and_values(
         DbBackend::Postgres,
@@ -293,7 +358,6 @@ async fn test_authorized_tenant_id_rejects_manual_context_tampering() {
     .expect("Failed to tamper tenant context");
 
     // 3. Try to use authorized_tenant_id() which should verify the signature
-    // Since we haven't set a valid signature/nonce that matches 'attacker', this should fail.
     let res = txn
         .query_one(Statement::from_sql_and_values(
             DbBackend::Postgres,
@@ -307,6 +371,34 @@ async fn test_authorized_tenant_id_rejects_manual_context_tampering() {
     assert!(
         err.contains("Tenant context integrity check failed"),
         "Expected integrity error, got: {}",
+        err
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore] // Requires Docker
+async fn test_connection_rejects_colon_injection() {
+    let (db, _node) = setup_test_db().await;
+    TestAuth::init_keys(&db).await.expect("Failed to init keys");
+
+    // Safety: Use test-only method to bypass validation instead of unsafe transmute
+    let invalid = TenantId::new_unchecked("invalid:id");
+
+    // We also need a TenantContext
+    let ctx = TenantContext::new(invalid, None);
+
+    let token = TestAuth::generate_tenant_token(&db, ctx.tenant_id())
+        .await
+        .expect("Failed to generate token");
+
+    // Now call with_tenant_tx
+    let res = with_tenant_tx(&db, &ctx, &token, |_| Box::pin(async { Ok(()) })).await;
+
+    assert!(res.is_err());
+    let err = res.unwrap_err().to_string();
+    assert!(
+        err.contains("tenant_id must not contain ':'"),
+        "Should match our new error check: {}",
         err
     );
 }
