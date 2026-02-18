@@ -296,22 +296,19 @@ async fn run_archive_cycle(db: &DatabaseConnection, s3: &Client, config: &AppCon
         )
         .await;
 
-        let (entity_history_ids, audit_log_ids) = match (entity_histories_result, audit_logs_result) {
-            (Ok(h_ids), Ok(l_ids)) => (h_ids, l_ids),
-            (res_h, res_l) => {
-                if let Err(e) = res_h {
-                    error!(
-                        "Tenant {} failed to archive entity history: {}",
-                        tenant_id, e
-                    );
-                }
-                if let Err(e) = res_l {
-                    error!(
-                        "Tenant {} failed to archive audit logs: {}",
-                        tenant_id, e
-                    );
-                }
-                continue;
+        let entity_history_ids = match entity_histories_result {
+            Ok(ids) => ids,
+            Err(e) => {
+                error!("Tenant {} failed to archive entity history: {}", tenant_id, e);
+                Vec::new()
+            }
+        };
+
+        let audit_log_ids = match audit_logs_result {
+            Ok(ids) => ids,
+            Err(e) => {
+                error!("Tenant {} failed to archive audit logs: {}", tenant_id, e);
+                Vec::new()
             }
         };
 
