@@ -8,7 +8,7 @@ use serde::Serialize;
 use sha2::{Digest, Sha384};
 use std::collections::BTreeMap;
 use std::sync::Arc;
-use tracing::{info, warn, error, instrument};
+use tracing::{error, info, instrument, warn};
 
 pub struct RegistryStorage {
     store: Arc<dyn ObjectStore>,
@@ -122,7 +122,7 @@ impl RegistryStorage {
         let payload_value = serde_json::to_value(&payload)?;
         let normalized = Self::normalize_value(payload_value);
         let payload_bytes = serde_json::to_vec(&normalized)?;
-        
+
         let mut hasher = Sha384::new();
         hasher.update(payload_bytes);
         Ok(hex::encode(hasher.finalize()))
@@ -131,12 +131,12 @@ impl RegistryStorage {
     fn normalize_value(v: serde_json::Value) -> serde_json::Value {
         use serde_json::Value;
         match v {
-            Value::Object(map) => {
-                Value::Object(map.into_iter().map(|(k, v)| (k, Self::normalize_value(v))).collect())
-            }
-            Value::Array(vec) => {
-                Value::Array(vec.into_iter().map(Self::normalize_value).collect())
-            }
+            Value::Object(map) => Value::Object(
+                map.into_iter()
+                    .map(|(k, v)| (k, Self::normalize_value(v)))
+                    .collect(),
+            ),
+            Value::Array(vec) => Value::Array(vec.into_iter().map(Self::normalize_value).collect()),
             Value::Number(n) => {
                 if let Some(i) = n.as_i64() {
                     return Value::from(i);
@@ -147,20 +147,20 @@ impl RegistryStorage {
                 if let Some(f) = n.as_f64() {
                     // Check if the float is effectively an integer
                     if f.fract() == 0.0 {
-                         // Prefer integer representation if it fits in i64/u64
-                         // Perform lossless round-trip check to avoid silent saturation
-                         if f >= (i64::MIN as f64) && f < (i64::MAX as f64) {
-                             let i = f as i64;
-                             if (i as f64) == f {
-                                 return Value::from(i);
-                             }
-                         }
-                         if f >= 0.0 && f < (u64::MAX as f64) {
-                             let u = f as u64;
-                             if (u as f64) == f {
-                                 return Value::from(u);
-                             }
-                         }
+                        // Prefer integer representation if it fits in i64/u64
+                        // Perform lossless round-trip check to avoid silent saturation
+                        if f >= (i64::MIN as f64) && f < (i64::MAX as f64) {
+                            let i = f as i64;
+                            if (i as f64) == f {
+                                return Value::from(i);
+                            }
+                        }
+                        if f >= 0.0 && f < (u64::MAX as f64) {
+                            let u = f as u64;
+                            if (u as f64) == f {
+                                return Value::from(u);
+                            }
+                        }
                     }
                 }
                 Value::Number(n)
@@ -179,8 +179,8 @@ impl RegistryStorage {
 
         let path = self.artifact_path(key);
         if let Err(e) = self.store.put(&path, data.into()).await {
-             error!("Failed to save artifact: {}", e);
-             return Err(RegistryError::ObjectStore(e));
+            error!("Failed to save artifact: {}", e);
+            return Err(RegistryError::ObjectStore(e));
         }
 
         info!(digest = %digest, "Artifact saved successfully");
@@ -242,13 +242,13 @@ impl RegistryStorage {
             ));
         }
         if manifest.security.manifest_signature_kid.trim().is_empty() {
-             warn!("Manifest rejected: empty signature kid");
+            warn!("Manifest rejected: empty signature kid");
             return Err(RegistryError::InvalidManifest(
                 "security.manifest_signature_kid must not be empty".to_string(),
             ));
         }
         if manifest.security.trust_root_version.trim().is_empty() {
-             warn!("Manifest rejected: empty trust root version");
+            warn!("Manifest rejected: empty trust root version");
             return Err(RegistryError::InvalidManifest(
                 "security.trust_root_version must not be empty".to_string(),
             ));
@@ -262,12 +262,12 @@ impl RegistryStorage {
 
         let path = self.manifest_path(&manifest.id, &manifest.version);
         let data = serde_json::to_vec(&persisted)?;
-        
+
         if let Err(e) = self.store.put(&path, data.into()).await {
             error!("Failed to save manifest: {}", e);
             return Err(RegistryError::ObjectStore(e));
         }
-        
+
         info!(digest = %computed_digest, "Manifest saved successfully");
         Ok((computed_digest, persisted))
     }

@@ -15,6 +15,7 @@ use redis::AsyncCommands;
 use ring::digest::{SHA256, digest};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::fmt;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, Notify};
@@ -22,7 +23,7 @@ use tracing::{error, info, instrument, warn};
 
 use crate::auth::TenantContext;
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct MiddlewareConfig {
     pub idempotency_ttl: Duration,
     pub action_ttl: Duration,
@@ -30,6 +31,21 @@ pub struct MiddlewareConfig {
     pub max_replay_body_size: usize,
     pub inflight_wait_timeout: Duration,
     pub redis_url: String,
+    pub require_redis: bool,
+}
+
+impl fmt::Debug for MiddlewareConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("MiddlewareConfig")
+            .field("idempotency_ttl", &self.idempotency_ttl)
+            .field("action_ttl", &self.action_ttl)
+            .field("max_body_size", &self.max_body_size)
+            .field("max_replay_body_size", &self.max_replay_body_size)
+            .field("inflight_wait_timeout", &self.inflight_wait_timeout)
+            .field("redis_url", &"<redacted>")
+            .field("require_redis", &self.require_redis)
+            .finish()
+    }
 }
 
 impl Default for MiddlewareConfig {
@@ -64,6 +80,20 @@ impl Default for MiddlewareConfig {
             std::env::var(key).unwrap_or_else(|_| default_val.to_string())
         }
 
+        fn get_env_bool(key: &str, default_val: bool) -> bool {
+            match std::env::var(key) {
+                Ok(v) => match v.to_ascii_lowercase().as_str() {
+                    "1" | "true" | "yes" | "on" => true,
+                    "0" | "false" | "no" | "off" => false,
+                    _ => {
+                        tracing::warn!(key = %key, value = %v, "Invalid bool env var, using default");
+                        default_val
+                    }
+                },
+                Err(_) => default_val,
+            }
+        }
+
         Self {
             idempotency_ttl: get_env_duration("IDEMPOTENCY_TTL_SECS", 24 * 60 * 60),
             action_ttl: get_env_duration("ACTION_TTL_SECS", 24 * 60 * 60),
@@ -71,6 +101,7 @@ impl Default for MiddlewareConfig {
             max_replay_body_size: get_env_usize("MAX_REPLAY_BODY_SIZE_BYTES", 10 * 1024 * 1024),
             inflight_wait_timeout: get_env_duration("INFLIGHT_WAIT_TIMEOUT_SECS", 5),
             redis_url: get_env_string("REDIS_URL", "redis://127.0.0.1:6379"),
+            require_redis: get_env_bool("REQUIRE_REDIS", true),
         }
     }
 }
@@ -95,6 +126,23 @@ pub enum IdempotencyEntry {
     Completed(IdempotencyRecord),
 }
 
+#[derive(Clone, Debug)]
+pub struct IdempotencyLease {
+    pub owner_token: String,
+    pub version: u64,
+}
+
+#[derive(Clone, Debug)]
+pub enum IdempotencyAcquireResult {
+    Acquired(IdempotencyLease),
+    Existing(IdempotencyEntry),
+}
+
+#[derive(Clone, Debug)]
+pub enum IdempotencyStoreError {
+    BackendUnavailable,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub struct IdempotencyScopeKey {
     pub tenant_id: kernel_core::auth::TenantId,
@@ -106,16 +154,27 @@ pub struct IdempotencyScopeKey {
 /// Abstract Store Trait to allow switching to Redis (REQ: Production Readiness)
 #[async_trait]
 pub trait IdempotencyStore: Send + Sync {
-    async fn get(&self, key: &IdempotencyScopeKey) -> Option<IdempotencyEntry>;
-    /// Returns None if acquired successfully. Returns Some(entry) if already exists.
+    async fn get(
+        &self,
+        key: &IdempotencyScopeKey,
+    ) -> Result<Option<IdempotencyEntry>, IdempotencyStoreError>;
     async fn try_acquire(
         &self,
         key: IdempotencyScopeKey,
         body_hash: String,
         ttl: Duration,
-    ) -> Option<IdempotencyEntry>;
-    async fn complete(&self, key: IdempotencyScopeKey, record: IdempotencyRecord);
-    async fn release_inflight(&self, key: &IdempotencyScopeKey);
+    ) -> Result<IdempotencyAcquireResult, IdempotencyStoreError>;
+    async fn complete(
+        &self,
+        key: IdempotencyScopeKey,
+        lease: &IdempotencyLease,
+        record: IdempotencyRecord,
+    ) -> Result<(), IdempotencyStoreError>;
+    async fn release_inflight(
+        &self,
+        key: &IdempotencyScopeKey,
+        lease: &IdempotencyLease,
+    ) -> Result<(), IdempotencyStoreError>;
     async fn cleanup(&self);
 }
 
@@ -139,8 +198,11 @@ impl InMemoryIdempotencyStore {
 
 #[async_trait]
 impl IdempotencyStore for InMemoryIdempotencyStore {
-    async fn get(&self, key: &IdempotencyScopeKey) -> Option<IdempotencyEntry> {
-        self.inner.lock().await.get(key).cloned()
+    async fn get(
+        &self,
+        key: &IdempotencyScopeKey,
+    ) -> Result<Option<IdempotencyEntry>, IdempotencyStoreError> {
+        Ok(self.inner.lock().await.get(key).cloned())
     }
 
     async fn try_acquire(
@@ -148,12 +210,16 @@ impl IdempotencyStore for InMemoryIdempotencyStore {
         key: IdempotencyScopeKey,
         body_hash: String,
         ttl: Duration,
-    ) -> Option<IdempotencyEntry> {
+    ) -> Result<IdempotencyAcquireResult, IdempotencyStoreError> {
         let mut lock = self.inner.lock().await;
         if let Some(entry) = lock.get(&key) {
-            return Some(entry.clone());
+            return Ok(IdempotencyAcquireResult::Existing(entry.clone()));
         }
 
+        let lease = IdempotencyLease {
+            owner_token: uuid::Uuid::now_v7().to_string(),
+            version: current_unix_timestamp_ms(),
+        };
         lock.insert(
             key,
             IdempotencyEntry::InFlight {
@@ -162,10 +228,15 @@ impl IdempotencyStore for InMemoryIdempotencyStore {
                 expires_at: Instant::now() + ttl,
             },
         );
-        None
+        Ok(IdempotencyAcquireResult::Acquired(lease))
     }
 
-    async fn complete(&self, key: IdempotencyScopeKey, record: IdempotencyRecord) {
+    async fn complete(
+        &self,
+        key: IdempotencyScopeKey,
+        _lease: &IdempotencyLease,
+        record: IdempotencyRecord,
+    ) -> Result<(), IdempotencyStoreError> {
         let mut lock = self.inner.lock().await;
         if let Some(IdempotencyEntry::InFlight { notify, .. }) = lock.remove(&key) {
             lock.insert(key, IdempotencyEntry::Completed(record));
@@ -173,13 +244,19 @@ impl IdempotencyStore for InMemoryIdempotencyStore {
         } else {
             lock.insert(key, IdempotencyEntry::Completed(record));
         }
+        Ok(())
     }
 
-    async fn release_inflight(&self, key: &IdempotencyScopeKey) {
+    async fn release_inflight(
+        &self,
+        key: &IdempotencyScopeKey,
+        _lease: &IdempotencyLease,
+    ) -> Result<(), IdempotencyStoreError> {
         let mut lock = self.inner.lock().await;
         if let Some(IdempotencyEntry::InFlight { notify, .. }) = lock.remove(key) {
             notify.notify_waiters();
         }
+        Ok(())
     }
 
     async fn cleanup(&self) {
@@ -205,16 +282,48 @@ impl IdempotencyStore for InMemoryIdempotencyStore {
 }
 
 pub struct RedisIdempotencyStore {
+    client: redis::Client,
     manager: redis::aio::ConnectionManager,
 }
 
 impl RedisIdempotencyStore {
-    pub fn new(manager: redis::aio::ConnectionManager) -> Self {
-        Self { manager }
+    pub fn new(client: redis::Client, manager: redis::aio::ConnectionManager) -> Self {
+        Self { client, manager }
     }
 
     fn format_key(key: &IdempotencyScopeKey) -> String {
-        format!("idemp:{}:{}:{}:{}", key.tenant_id, key.method, key.canonical_target, key.idempotency_key)
+        let canonical_target_hash = sha256_hex(key.canonical_target.as_bytes());
+        let idempotency_key_hash = sha256_hex(key.idempotency_key.as_bytes());
+        format!(
+            "idemp:v2:{}:{}:{}:{}",
+            key.tenant_id, key.method, canonical_target_hash, idempotency_key_hash
+        )
+    }
+
+    fn channel_name(redis_key: &str) -> String {
+        format!("idemp:ch:{redis_key}")
+    }
+
+    fn inflight_value(lease: &IdempotencyLease, body_hash: &str) -> String {
+        format!(
+            "IN_FLIGHT|{}|{}|{}|{}",
+            lease.owner_token,
+            body_hash,
+            lease.version,
+            current_unix_timestamp_ms()
+        )
+    }
+
+    fn parse_inflight_value(val: &str) -> Option<(String, String, u64)> {
+        let mut parts = val.split('|');
+        let state = parts.next()?;
+        if state != "IN_FLIGHT" {
+            return None;
+        }
+        let owner_token = parts.next()?.to_string();
+        let body_hash = parts.next()?.to_string();
+        let version = parts.next()?.parse::<u64>().ok()?;
+        Some((owner_token, body_hash, version))
     }
 }
 
@@ -225,53 +334,80 @@ struct RedisIdempotencyRecordDto {
     status: u16,
     headers: Vec<(String, String)>,
     body: String, // Base64 encoded
+    owner_token: String,
+    version: u64,
+    completed_at_unix_ms: u64,
 }
 
 #[async_trait]
 impl IdempotencyStore for RedisIdempotencyStore {
-    async fn get(&self, key: &IdempotencyScopeKey) -> Option<IdempotencyEntry> {
+    async fn get(
+        &self,
+        key: &IdempotencyScopeKey,
+    ) -> Result<Option<IdempotencyEntry>, IdempotencyStoreError> {
         let mut conn = self.manager.clone();
         let redis_key = Self::format_key(key);
         let val: Option<String> = match conn.get(&redis_key).await {
             Ok(v) => v,
             Err(e) => {
                 error!("Redis get error: {}", e);
-                return None;
+                return Err(IdempotencyStoreError::BackendUnavailable);
             }
         };
 
         match val {
-            Some(s) if s.starts_with("IN_FLIGHT:") => {
-                 let hash = s.trim_start_matches("IN_FLIGHT:").to_string();
-                 let notify = Arc::new(Notify::new());
-                 let n = notify.clone();
-                 // Polling simulation
-                 tokio::spawn(async move {
-                     tokio::time::sleep(Duration::from_millis(200)).await;
-                     n.notify_one();
-                 });
-                 Some(IdempotencyEntry::InFlight {
-                     body_hash: hash,
-                     notify,
-                     expires_at: Instant::now() + Duration::from_secs(60),
-                 })
-            },
+            Some(s) if Self::parse_inflight_value(&s).is_some() => {
+                let (_, body_hash, _) = Self::parse_inflight_value(&s).expect("checked");
+                let notify = Arc::new(Notify::new());
+                let notify_clone = notify.clone();
+                let channel = Self::channel_name(&redis_key);
+                let timeout = Duration::from_secs(30);
+                let client = self.client.clone();
+                tokio::spawn(async move {
+                    let mut pubsub = match client.get_async_pubsub().await {
+                        Ok(p) => p,
+                        Err(e) => {
+                            error!("Redis pubsub create error: {}", e);
+                            notify_clone.notify_waiters();
+                            return;
+                        }
+                    };
+                    if let Err(e) = pubsub.subscribe(&channel).await {
+                        error!("Redis pubsub subscribe error: {}", e);
+                        notify_clone.notify_waiters();
+                        return;
+                    }
+
+                    let mut stream = pubsub.on_message();
+                    let _ =
+                        tokio::time::timeout(timeout, futures_util::StreamExt::next(&mut stream))
+                            .await;
+                    notify_clone.notify_waiters();
+                });
+
+                Ok(Some(IdempotencyEntry::InFlight {
+                    body_hash,
+                    notify,
+                    expires_at: Instant::now() + Duration::from_secs(60),
+                }))
+            }
             Some(s) => {
                 if let Ok(dto) = serde_json::from_str::<RedisIdempotencyRecordDto>(&s) {
                     let body_bytes = BASE64_STANDARD.decode(&dto.body).unwrap_or_default();
-                    Some(IdempotencyEntry::Completed(IdempotencyRecord {
+                    Ok(Some(IdempotencyEntry::Completed(IdempotencyRecord {
                         body_hash: dto.body_hash,
                         action_id: dto.action_id,
                         status: StatusCode::from_u16(dto.status).unwrap_or(StatusCode::OK),
                         headers: dto.headers,
                         body: body_bytes,
                         expires_at: Instant::now() + Duration::from_secs(3600),
-                    }))
+                    })))
                 } else {
-                    None
+                    warn!("Invalid Redis idempotency payload for key {}", redis_key);
+                    Ok(None)
                 }
-            },
-            None => None,
+            }
+            None => Ok(None),
         }
     }
 
@@ -280,57 +416,153 @@ impl IdempotencyStore for RedisIdempotencyStore {
         key: IdempotencyScopeKey,
         body_hash: String,
         ttl: Duration,
-    ) -> Option<IdempotencyEntry> {
+    ) -> Result<IdempotencyAcquireResult, IdempotencyStoreError> {
         let mut conn = self.manager.clone();
         let redis_key = Self::format_key(&key);
-        let val = format!("IN_FLIGHT:{}", body_hash);
-        let opts = redis::SetOptions::default().conditional_set(redis::ExistenceCheck::NX).with_expiration(redis::SetExpiry::EX(ttl.as_secs()));
+        let lease = IdempotencyLease {
+            owner_token: uuid::Uuid::now_v7().to_string(),
+            version: current_unix_timestamp_ms(),
+        };
+        let val = Self::inflight_value(&lease, &body_hash);
+        let ttl_secs = ttl.as_secs().max(1);
+        let opts = redis::SetOptions::default()
+            .conditional_set(redis::ExistenceCheck::NX)
+            .with_expiration(redis::SetExpiry::EX(ttl_secs));
 
         let res: Result<bool, _> = conn.set_options(&redis_key, val, opts).await;
 
         match res {
-            Ok(true) => None, // Acquired
+            Ok(true) => Ok(IdempotencyAcquireResult::Acquired(lease)),
             Ok(false) => {
-                self.get(&key).await
-            },
+                let existing = self.get(&key).await?;
+                if let Some(entry) = existing {
+                    Ok(IdempotencyAcquireResult::Existing(entry))
+                } else {
+                    Err(IdempotencyStoreError::BackendUnavailable)
+                }
+            }
             Err(e) => {
                 error!("Redis set error: {}", e);
-                None
+                Err(IdempotencyStoreError::BackendUnavailable)
             }
         }
     }
 
-    async fn complete(&self, key: IdempotencyScopeKey, record: IdempotencyRecord) {
+    async fn complete(
+        &self,
+        key: IdempotencyScopeKey,
+        lease: &IdempotencyLease,
+        record: IdempotencyRecord,
+    ) -> Result<(), IdempotencyStoreError> {
         let mut conn = self.manager.clone();
         let redis_key = Self::format_key(&key);
+        let channel = Self::channel_name(&redis_key);
         let dto = RedisIdempotencyRecordDto {
             body_hash: record.body_hash,
             action_id: record.action_id,
             status: record.status.as_u16(),
             headers: record.headers,
             body: BASE64_STANDARD.encode(&record.body),
+            owner_token: lease.owner_token.clone(),
+            version: lease.version,
+            completed_at_unix_ms: current_unix_timestamp_ms(),
         };
 
-        if let Ok(json) = serde_json::to_string(&dto) {
-            let now = Instant::now();
-            let ttl_secs = if record.expires_at > now {
-                record.expires_at.duration_since(now).as_secs()
-            } else {
-                1
-            };
+        let json = match serde_json::to_string(&dto) {
+            Ok(v) => v,
+            Err(_) => return Err(IdempotencyStoreError::BackendUnavailable),
+        };
+        let now = Instant::now();
+        let ttl_secs = if record.expires_at > now {
+            record.expires_at.duration_since(now).as_secs().max(1)
+        } else {
+            1
+        };
 
-            let _: Result<(), _> = conn.set_ex(&redis_key, json, ttl_secs).await;
+        let script = redis::Script::new(
+            r#"
+            local key = KEYS[1]
+            local channel = KEYS[2]
+            local expected_owner = ARGV[1]
+            local payload = ARGV[2]
+            local ttl = tonumber(ARGV[3])
+
+            local current = redis.call("GET", key)
+            if not current then
+                return 0
+            end
+
+            local owner = string.match(current, "^IN_FLIGHT|([^|]+)|")
+            if not owner or owner ~= expected_owner then
+                return -1
+            end
+
+            redis.call("SET", key, payload, "EX", ttl)
+            redis.call("PUBLISH", channel, "completed")
+            return 1
+            "#,
+        );
+        let res: Result<i32, _> = script
+            .key(&redis_key)
+            .key(&channel)
+            .arg(&lease.owner_token)
+            .arg(json)
+            .arg(ttl_secs)
+            .invoke_async(&mut conn)
+            .await;
+        match res {
+            Ok(1) => Ok(()),
+            Ok(_) => Err(IdempotencyStoreError::BackendUnavailable),
+            Err(e) => {
+                error!("Redis idempotency complete CAS error: {}", e);
+                Err(IdempotencyStoreError::BackendUnavailable)
+            }
         }
     }
 
-    async fn release_inflight(&self, key: &IdempotencyScopeKey) {
+    async fn release_inflight(
+        &self,
+        key: &IdempotencyScopeKey,
+        lease: &IdempotencyLease,
+    ) -> Result<(), IdempotencyStoreError> {
         let mut conn = self.manager.clone();
         let redis_key = Self::format_key(key);
-        let _: Result<(), _> = conn.del(&redis_key).await;
+        let channel = Self::channel_name(&redis_key);
+        let script = redis::Script::new(
+            r#"
+            local key = KEYS[1]
+            local channel = KEYS[2]
+            local expected_owner = ARGV[1]
+
+            local current = redis.call("GET", key)
+            if not current then
+                return 0
+            end
+            local owner = string.match(current, "^IN_FLIGHT|([^|]+)|")
+            if owner and owner == expected_owner then
+                redis.call("DEL", key)
+                redis.call("PUBLISH", channel, "released")
+                return 1
+            end
+            return 0
+            "#,
+        );
+        let res: Result<i32, _> = script
+            .key(&redis_key)
+            .key(&channel)
+            .arg(&lease.owner_token)
+            .invoke_async(&mut conn)
+            .await;
+        match res {
+            Ok(_) => Ok(()),
+            Err(e) => {
+                error!("Redis idempotency release CAS error: {}", e);
+                Err(IdempotencyStoreError::BackendUnavailable)
+            }
+        }
     }
 
-    async fn cleanup(&self) {
-    }
+    async fn cleanup(&self) {}
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
@@ -355,8 +587,18 @@ pub struct ActionRecord {
 
 #[async_trait]
 pub trait ActionStore: Send + Sync {
-    async fn record(&self, tenant_id: kernel_core::auth::TenantId, action_id: &str, status: ActionStatus, ttl: Duration);
-    async fn get(&self, tenant_id: kernel_core::auth::TenantId, action_id: &str) -> Option<ActionRecord>;
+    async fn record(
+        &self,
+        tenant_id: kernel_core::auth::TenantId,
+        action_id: &str,
+        status: ActionStatus,
+        ttl: Duration,
+    );
+    async fn get(
+        &self,
+        tenant_id: kernel_core::auth::TenantId,
+        action_id: &str,
+    ) -> Option<ActionRecord>;
     async fn cleanup(&self);
 }
 
@@ -380,7 +622,13 @@ impl InMemoryActionStore {
 
 #[async_trait]
 impl ActionStore for InMemoryActionStore {
-    async fn record(&self, tenant_id: kernel_core::auth::TenantId, action_id: &str, status: ActionStatus, ttl: Duration) {
+    async fn record(
+        &self,
+        tenant_id: kernel_core::auth::TenantId,
+        action_id: &str,
+        status: ActionStatus,
+        ttl: Duration,
+    ) {
         let mut lock = self.inner.lock().await;
         lock.insert(
             ActionScopeKey {
@@ -394,7 +642,11 @@ impl ActionStore for InMemoryActionStore {
         );
     }
 
-    async fn get(&self, tenant_id: kernel_core::auth::TenantId, action_id: &str) -> Option<ActionRecord> {
+    async fn get(
+        &self,
+        tenant_id: kernel_core::auth::TenantId,
+        action_id: &str,
+    ) -> Option<ActionRecord> {
         let lock = self.inner.lock().await;
         lock.get(&ActionScopeKey {
             tenant_id,
@@ -433,11 +685,22 @@ struct RedisActionRecordDto {
 
 #[async_trait]
 impl ActionStore for RedisActionStore {
-    async fn record(&self, tenant_id: kernel_core::auth::TenantId, action_id: &str, status: ActionStatus, ttl: Duration) {
+    async fn record(
+        &self,
+        tenant_id: kernel_core::auth::TenantId,
+        action_id: &str,
+        status: ActionStatus,
+        ttl: Duration,
+    ) {
         let mut conn = self.manager.clone();
         let key = Self::format_key(tenant_id.as_str(), action_id);
+        let ttl_secs = ttl.as_secs().max(1);
 
-        let expires_at_ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() + ttl.as_secs();
+        let expires_at_ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            + ttl_secs;
 
         let dto = RedisActionRecordDto {
             status,
@@ -445,31 +708,47 @@ impl ActionStore for RedisActionStore {
         };
 
         if let Ok(json) = serde_json::to_string(&dto) {
-            let _: Result<(), _> = conn.set_ex(&key, json, ttl.as_secs()).await;
+            if let Err(e) = conn.set_ex::<_, _, ()>(&key, json, ttl_secs).await {
+                error!("Failed to store action record in Redis: {}", e);
+            }
         }
     }
 
-    async fn get(&self, tenant_id: kernel_core::auth::TenantId, action_id: &str) -> Option<ActionRecord> {
+    async fn get(
+        &self,
+        tenant_id: kernel_core::auth::TenantId,
+        action_id: &str,
+    ) -> Option<ActionRecord> {
         let mut conn = self.manager.clone();
         let key = Self::format_key(tenant_id.as_str(), action_id);
         let val: Option<String> = match conn.get(&key).await {
             Ok(v) => v,
-            Err(_) => return None,
+            Err(e) => {
+                error!("Failed to read action record from Redis: {}", e);
+                return None;
+            }
         };
 
         if let Some(s) = val {
             if let Ok(dto) = serde_json::from_str::<RedisActionRecordDto>(&s) {
-                 let now_ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
-                 let remaining = if dto.expires_at_ts > now_ts {
-                     dto.expires_at_ts - now_ts
-                 } else {
-                     0
-                 };
-                 Some(ActionRecord {
-                     status: dto.status,
-                     expires_at: Instant::now() + Duration::from_secs(remaining),
-                 })
+                let now_ts = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs();
+                let remaining = if dto.expires_at_ts > now_ts {
+                    dto.expires_at_ts - now_ts
+                } else {
+                    0
+                };
+                if remaining == 0 {
+                    return None;
+                }
+                Some(ActionRecord {
+                    status: dto.status,
+                    expires_at: Instant::now() + Duration::from_secs(remaining),
+                })
             } else {
+                error!("Failed to deserialize action record from Redis");
                 None
             }
         } else {
@@ -477,13 +756,26 @@ impl ActionStore for RedisActionStore {
         }
     }
 
-    async fn cleanup(&self) {
-    }
+    async fn cleanup(&self) {}
 }
 
 #[async_trait]
 pub trait QuotaStore: Send + Sync {
-    async fn check_and_update(&self, tenant_id: &kernel_core::auth::TenantId, layer: QuotaLayer) -> Result<(), QuotaViolation>;
+    async fn check_and_update(
+        &self,
+        tenant_id: &kernel_core::auth::TenantId,
+        layer: QuotaLayer,
+    ) -> Result<(), QuotaViolation>;
+    async fn check_and_update_multi(
+        &self,
+        tenant_id: &kernel_core::auth::TenantId,
+        layers: &[QuotaLayer],
+    ) -> Result<(), QuotaViolation> {
+        for layer in layers {
+            self.check_and_update(tenant_id, *layer).await?;
+        }
+        Ok(())
+    }
 }
 
 pub struct InMemoryQuotaStore;
@@ -502,7 +794,11 @@ impl InMemoryQuotaStore {
 
 #[async_trait]
 impl QuotaStore for InMemoryQuotaStore {
-    async fn check_and_update(&self, _tenant_id: &kernel_core::auth::TenantId, _layer: QuotaLayer) -> Result<(), QuotaViolation> {
+    async fn check_and_update(
+        &self,
+        _tenant_id: &kernel_core::auth::TenantId,
+        _layer: QuotaLayer,
+    ) -> Result<(), QuotaViolation> {
         Ok(())
     }
 }
@@ -510,11 +806,13 @@ impl QuotaStore for InMemoryQuotaStore {
 pub struct RedisQuotaStore {
     manager: redis::aio::ConnectionManager,
     script: redis::Script,
+    script_multi: redis::Script,
 }
 
 impl RedisQuotaStore {
     pub fn new(manager: redis::aio::ConnectionManager) -> Self {
-        let script = redis::Script::new(r#"
+        let script = redis::Script::new(
+            r#"
             local key = KEYS[1]
             local rate = tonumber(ARGV[1])
             local capacity = tonumber(ARGV[2])
@@ -542,45 +840,106 @@ impl RedisQuotaStore {
                 local retry_after = required / rate
                 return {0, retry_after}
             end
-        "#);
-        Self { manager, script }
+        "#,
+        );
+        let script_multi = redis::Script::new(
+            r#"
+            local now = tonumber(ARGV[1])
+            local n = tonumber(ARGV[2])
+            local idx = 3
+            local keys = {}
+            local new_tokens = {}
+
+            for i = 1, n do
+                local key = ARGV[idx]
+                local rate = tonumber(ARGV[idx + 1])
+                local capacity = tonumber(ARGV[idx + 2])
+                local cost = tonumber(ARGV[idx + 3])
+
+                local tokens = tonumber(redis.call("HGET", key, "tokens"))
+                local last_refill = tonumber(redis.call("HGET", key, "last_refill"))
+                if tokens == nil then
+                    tokens = capacity
+                    last_refill = now
+                end
+
+                local delta = math.max(0, now - last_refill)
+                local filled = math.min(capacity, tokens + (delta * rate))
+                if filled < cost then
+                    local retry_after = (cost - filled) / rate
+                    return {0, i, retry_after}
+                end
+
+                keys[i] = key
+                new_tokens[i] = filled - cost
+                idx = idx + 4
+            end
+
+            for i = 1, n do
+                redis.call("HSET", keys[i], "tokens", new_tokens[i], "last_refill", now)
+                redis.call("PEXPIRE", keys[i], 60000)
+            end
+
+            return {1, 0, 0}
+        "#,
+        );
+        Self {
+            manager,
+            script,
+            script_multi,
+        }
+    }
+
+    fn layer_config(
+        tenant_id: &kernel_core::auth::TenantId,
+        layer: QuotaLayer,
+    ) -> Option<(String, f64, f64, f64)> {
+        match layer {
+            QuotaLayer::SystemHardLimit => Some(("quota:system".to_string(), 1000.0, 1000.0, 1.0)),
+            QuotaLayer::TenantBudget => Some((
+                format!("quota:tenant:{}:cpu", tenant_id),
+                1000.0,
+                3000.0,
+                5.0,
+            )),
+            QuotaLayer::ApiRateLimit => Some((
+                format!("quota:tenant:{}:api", tenant_id),
+                16.666,
+                100.0,
+                1.0,
+            )),
+            QuotaLayer::CircuitBreaker => None,
+        }
     }
 }
 
 #[async_trait]
 impl QuotaStore for RedisQuotaStore {
-    async fn check_and_update(&self, tenant_id: &kernel_core::auth::TenantId, layer: QuotaLayer) -> Result<(), QuotaViolation> {
-        let (key, rate, capacity, cost) = match layer {
-            QuotaLayer::SystemHardLimit => (
-                "quota:system".to_string(),
-                1000.0, // 1000 req/s
-                1000.0,
-                1.0,
-            ),
-            QuotaLayer::TenantBudget => (
-                format!("quota:tenant:{}:cpu", tenant_id),
-                1000.0, // 1000ms/s
-                3000.0, // 3000ms burst
-                5.0,    // 5ms cost estimate
-            ),
-            QuotaLayer::ApiRateLimit => (
-                format!("quota:tenant:{}:api", tenant_id),
-                16.666, // ~1000 req/min
-                100.0,  // burst
-                1.0,
-            ),
-            QuotaLayer::CircuitBreaker => {
-                return Ok(());
-            }
+    async fn check_and_update(
+        &self,
+        tenant_id: &kernel_core::auth::TenantId,
+        layer: QuotaLayer,
+    ) -> Result<(), QuotaViolation> {
+        let Some((key, rate, capacity, cost)) = Self::layer_config(tenant_id, layer) else {
+            return Ok(());
         };
 
-        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs_f64();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs_f64();
 
         let mut conn = self.manager.clone();
 
-        let res: Result<(i32, f64), _> = self.script.key(&key)
-            .arg(rate).arg(capacity).arg(cost).arg(now)
-            .invoke_async(&mut conn).await;
+        let res: Result<(i32, f64), _> = self
+            .script
+            .key(&key)
+            .arg(rate)
+            .arg(capacity)
+            .arg(cost)
+            .arg(now)
+            .invoke_async(&mut conn)
+            .await;
 
         match res {
             Ok((allowed, val)) => {
@@ -592,10 +951,72 @@ impl QuotaStore for RedisQuotaStore {
                         retry_after_s: val.ceil() as u64,
                     })
                 }
-            },
+            }
             Err(e) => {
                 error!("Redis script error: {}", e);
-                Ok(())
+                Err(QuotaViolation {
+                    layer,
+                    retry_after_s: 1,
+                })
+            }
+        }
+    }
+
+    async fn check_and_update_multi(
+        &self,
+        tenant_id: &kernel_core::auth::TenantId,
+        layers: &[QuotaLayer],
+    ) -> Result<(), QuotaViolation> {
+        let checks: Vec<(QuotaLayer, String, f64, f64, f64)> = layers
+            .iter()
+            .filter_map(|layer| {
+                Self::layer_config(tenant_id, *layer).map(|(k, r, c, cost)| (*layer, k, r, c, cost))
+            })
+            .collect();
+
+        if checks.is_empty() {
+            return Ok(());
+        }
+
+        let mut conn = self.manager.clone();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs_f64();
+
+        let mut inv = self.script_multi.prepare_invoke();
+        inv.arg(now).arg(checks.len() as i64);
+        for (_, key, rate, capacity, cost) in &checks {
+            inv.arg(key).arg(rate).arg(capacity).arg(cost);
+        }
+
+        let res: Result<(i32, i64, f64), _> = inv.invoke_async(&mut conn).await;
+        match res {
+            Ok((1, _, _)) => Ok(()),
+            Ok((0, idx, retry_after)) => {
+                let layer_idx = (idx.saturating_sub(1)) as usize;
+                let layer = checks
+                    .get(layer_idx)
+                    .map(|(layer, _, _, _, _)| *layer)
+                    .unwrap_or(QuotaLayer::SystemHardLimit);
+                Err(QuotaViolation {
+                    layer,
+                    retry_after_s: retry_after.ceil() as u64,
+                })
+            }
+            Ok(other) => {
+                error!("Unexpected quota multi script response: {:?}", other);
+                Err(QuotaViolation {
+                    layer: QuotaLayer::SystemHardLimit,
+                    retry_after_s: 1,
+                })
+            }
+            Err(e) => {
+                error!("Redis multi quota script error: {}", e);
+                Err(QuotaViolation {
+                    layer: QuotaLayer::SystemHardLimit,
+                    retry_after_s: 1,
+                })
             }
         }
     }
@@ -610,42 +1031,63 @@ pub struct MiddlewareState {
 }
 
 impl MiddlewareState {
-    pub async fn new(config: MiddlewareConfig) -> Self {
+    pub async fn new(config: MiddlewareConfig) -> Result<Self, String> {
         Self::new_with_redis(config).await
     }
 
-    pub async fn new_with_redis(config: MiddlewareConfig) -> Self {
+    pub async fn new_with_redis(config: MiddlewareConfig) -> Result<Self, String> {
+        if !config.redis_url.starts_with("redis://") && !config.redis_url.starts_with("rediss://") {
+            let msg = format!(
+                "REDIS_URL must use redis:// or rediss:// scheme, got: {}",
+                config.redis_url
+            );
+            if config.require_redis {
+                return Err(msg);
+            }
+            warn!("{}", msg);
+            return Ok(Self::with_store(
+                config,
+                Arc::new(InMemoryIdempotencyStore::new()),
+                Arc::new(InMemoryActionStore::new()),
+                Arc::new(InMemoryQuotaStore::new()),
+            ));
+        }
+
         let client = redis::Client::open(config.redis_url.clone());
         match client {
-            Ok(c) => {
-                match c.get_connection_manager().await {
-                    Ok(manager) => {
-                         Self::with_store(
-                            config,
-                            Arc::new(RedisIdempotencyStore::new(manager.clone())),
-                            Arc::new(RedisActionStore::new(manager.clone())),
-                            Arc::new(RedisQuotaStore::new(manager.clone())),
-                        )
-                    },
-                    Err(e) => {
-                        error!("Failed to create Redis connection manager: {}", e);
-                         Self::with_store(
-                            config,
-                            Arc::new(InMemoryIdempotencyStore::new()),
-                            Arc::new(InMemoryActionStore::new()),
-                            Arc::new(InMemoryQuotaStore::new()),
-                        )
+            Ok(c) => match c.get_connection_manager().await {
+                Ok(manager) => Ok(Self::with_store(
+                    config,
+                    Arc::new(RedisIdempotencyStore::new(c, manager.clone())),
+                    Arc::new(RedisActionStore::new(manager.clone())),
+                    Arc::new(RedisQuotaStore::new(manager.clone())),
+                )),
+                Err(e) => {
+                    let msg = format!("Failed to create Redis connection manager: {e}");
+                    if config.require_redis {
+                        return Err(msg);
                     }
+                    error!("{msg}");
+                    Ok(Self::with_store(
+                        config,
+                        Arc::new(InMemoryIdempotencyStore::new()),
+                        Arc::new(InMemoryActionStore::new()),
+                        Arc::new(InMemoryQuotaStore::new()),
+                    ))
                 }
             },
             Err(e) => {
-                error!("Invalid Redis URL: {}", e);
-                Self::with_store(
+                let msg = format!("Invalid Redis URL: {e}");
+                if config.require_redis {
+                    return Err(msg);
+                }
+                error!("{msg}");
+                Ok(Self::with_store(
                     config,
                     Arc::new(InMemoryIdempotencyStore::new()),
                     Arc::new(InMemoryActionStore::new()),
                     Arc::new(InMemoryQuotaStore::new()),
-                )
+                ))
             }
         }
     }
@@ -687,7 +1129,10 @@ pub async fn record_action(
     action_id: &str,
     status: ActionStatus,
 ) {
-    state.action_store.record(tenant_id, action_id, status, state.config.action_ttl).await;
+    state
+        .action_store
+        .record(tenant_id, action_id, status, state.config.action_ttl)
+        .await;
 }
 
 pub async fn get_action(
@@ -783,8 +1228,7 @@ pub async fn idempotency_middleware(
     let store = &state.idempotency_store;
     let mut attempts = 0;
     const MAX_ATTEMPTS: usize = 3;
-
-    loop {
+    let lease = loop {
         attempts += 1;
         if attempts > MAX_ATTEMPTS {
             warn!(
@@ -814,70 +1258,66 @@ pub async fn idempotency_middleware(
             )
             .await
         {
-            None => {
-                break;
-            }
-            Some(entry) => {
-                match entry {
-                    IdempotencyEntry::Completed(record) => {
-                        if body_hash != record.body_hash {
-                            warn!(
-                                key = %idempotency_key,
-                                "Idempotency conflict detected (Completed)"
-                            );
-                            return Err(StatusCode::CONFLICT);
-                        }
-                        info!(key = %idempotency_key, "Replaying idempotent response");
-                        return Ok(build_replay_response(&record));
+            Ok(IdempotencyAcquireResult::Acquired(lease)) => break lease,
+            Ok(IdempotencyAcquireResult::Existing(entry)) => match entry {
+                IdempotencyEntry::Completed(record) => {
+                    if body_hash != record.body_hash {
+                        warn!(
+                            key = %idempotency_key,
+                            "Idempotency conflict detected (Completed)"
+                        );
+                        return Err(StatusCode::CONFLICT);
                     }
-                    IdempotencyEntry::InFlight {
-                        body_hash: existing_hash,
-                        notify,
-                        ..
-                    } => {
-                        if body_hash != existing_hash {
-                            warn!(
-                                key = %idempotency_key,
-                                "Idempotency conflict detected (InFlight)"
-                            );
-                            return Err(StatusCode::CONFLICT);
-                        }
+                    info!(key = %idempotency_key, "Replaying idempotent response");
+                    return Ok(build_replay_response(&record));
+                }
+                IdempotencyEntry::InFlight {
+                    body_hash: existing_hash,
+                    notify,
+                    ..
+                } => {
+                    if body_hash != existing_hash {
+                        warn!(
+                            key = %idempotency_key,
+                            "Idempotency conflict detected (InFlight)"
+                        );
+                        return Err(StatusCode::CONFLICT);
+                    }
 
-                        // Wait for the in-flight request to complete
-                        // Use enable() pattern to avoid missed wakeups if notify_waiters() fires
-                        // between try_acquire returning and awaiting notified()
-                        let notified = notify.notified();
-                        tokio::pin!(notified);
-                        notified.as_mut().enable();
+                    let notified = notify.notified();
+                    tokio::pin!(notified);
+                    notified.as_mut().enable();
 
-                        if tokio::time::timeout(state.config.inflight_wait_timeout, notified)
-                            .await
-                            .is_err()
-                        {
-                            warn!(
-                                key = %idempotency_key,
-                                timeout_ms = state.config.inflight_wait_timeout.as_millis() as u64,
-                                "Timed out waiting for in-flight idempotent request"
-                            );
-                            let mut res = StatusCode::SERVICE_UNAVAILABLE.into_response();
-                            let retry_after = state
-                                .config
-                                .inflight_wait_timeout
-                                .as_secs()
-                                .max(1)
-                                .to_string();
-                            if let Ok(val) = HeaderValue::from_str(&retry_after) {
-                                res.headers_mut()
-                                    .insert(axum::http::header::RETRY_AFTER, val);
-                            }
-                            return Ok(res);
+                    if tokio::time::timeout(state.config.inflight_wait_timeout, notified)
+                        .await
+                        .is_err()
+                    {
+                        warn!(
+                            key = %idempotency_key,
+                            timeout_ms = state.config.inflight_wait_timeout.as_millis() as u64,
+                            "Timed out waiting for in-flight idempotent request"
+                        );
+                        let mut res = StatusCode::SERVICE_UNAVAILABLE.into_response();
+                        let retry_after = state
+                            .config
+                            .inflight_wait_timeout
+                            .as_secs()
+                            .max(1)
+                            .to_string();
+                        if let Ok(val) = HeaderValue::from_str(&retry_after) {
+                            res.headers_mut()
+                                .insert(axum::http::header::RETRY_AFTER, val);
                         }
-                        continue;
+                        return Ok(res);
                     }
                 }
+            },
+            Err(IdempotencyStoreError::BackendUnavailable) => {
+                error!("Idempotency store unavailable during acquire");
+                return Err(StatusCode::SERVICE_UNAVAILABLE);
             }
         }
-    }
+    };
 
     let response = next.run(req).await;
 
@@ -888,7 +1328,7 @@ pub async fn idempotency_middleware(
                 "Skipping idempotency replay cache due to Content-Length > {}",
                 state.config.max_replay_body_size
             );
-            store.release_inflight(&scope_key).await;
+            let _ = store.release_inflight(&scope_key, &lease).await;
             return Ok(Response::from_parts(parts, body));
         }
 
@@ -898,7 +1338,7 @@ pub async fn idempotency_middleware(
                 error!(
                     "Response body could not be buffered for idempotency cache due to body read error"
                 );
-                store.release_inflight(&scope_key).await;
+                let _ = store.release_inflight(&scope_key, &lease).await;
                 let mut res = Response::from_parts(parts, Body::empty());
                 let val = HeaderValue::from_static("cache-buffer-error");
                 res.headers_mut().insert("X-Idempotency-Cache-Error", val);
@@ -910,7 +1350,7 @@ pub async fn idempotency_middleware(
                 "Skipping idempotency replay cache due to response body > {} bytes",
                 state.config.max_replay_body_size
             );
-            store.release_inflight(&scope_key).await;
+            let _ = store.release_inflight(&scope_key, &lease).await;
             return Ok(Response::from_parts(parts, Body::from(body_bytes)));
         }
         let action_id = parts
@@ -927,23 +1367,40 @@ pub async fn idempotency_middleware(
             body: body_bytes.to_vec(),
             expires_at: Instant::now() + state.config.idempotency_ttl,
         };
-        store.complete(scope_key.clone(), stored).await;
+        if store
+            .complete(scope_key.clone(), &lease, stored)
+            .await
+            .is_err()
+        {
+            error!("Failed to complete idempotency record");
+        }
         return Ok(Response::from_parts(parts, Body::from(body_bytes)));
     }
 
-    store.release_inflight(&scope_key).await;
+    let _ = store.release_inflight(&scope_key, &lease).await;
     Ok(response)
 }
 
 fn compute_body_hash(body: &[u8]) -> String {
+    sha256_hex(body)
+}
+
+fn sha256_hex(input: &[u8]) -> String {
     use std::fmt::Write;
-    let result = digest(&SHA256, body);
+    let result = digest(&SHA256, input);
     let bytes = result.as_ref();
     let mut hex = String::with_capacity(bytes.len() * 2);
     for &b in bytes {
         let _ = write!(hex, "{b:02x}");
     }
     hex
+}
+
+fn current_unix_timestamp_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
 }
 
 fn validate_idempotency_key(key: &str) -> Result<(), StatusCode> {
@@ -1014,8 +1471,8 @@ pub async fn quota_middleware(req: Request<Body>, next: Next) -> Result<Response
     let tenant_ctx = match parts.extensions.get::<TenantContext>() {
         Some(ctx) => ctx,
         None => {
-             warn!("Quota middleware missing TenantContext");
-             return Ok(next.run(Request::from_parts(parts, body)).await);
+            warn!("Quota middleware missing TenantContext");
+            return Ok(StatusCode::UNAUTHORIZED.into_response());
         }
     };
 
@@ -1023,7 +1480,7 @@ pub async fn quota_middleware(req: Request<Body>, next: Next) -> Result<Response
         Some(s) => s,
         None => {
             error!("MiddlewareState missing");
-            return Ok(next.run(Request::from_parts(parts, body)).await);
+            return Ok(StatusCode::INTERNAL_SERVER_ERROR.into_response());
         }
     };
 
@@ -1057,16 +1514,19 @@ pub async fn quota_middleware(req: Request<Body>, next: Next) -> Result<Response
         }
     }
 
-    if let Err(v) = state.quota_store.check_and_update(tenant_ctx.tenant_id(), QuotaLayer::SystemHardLimit).await {
-         return Err(violation_to_response(&v));
-    }
-
-    if let Err(v) = state.quota_store.check_and_update(tenant_ctx.tenant_id(), QuotaLayer::TenantBudget).await {
-         return Err(violation_to_response(&v));
-    }
-
-    if let Err(v) = state.quota_store.check_and_update(tenant_ctx.tenant_id(), QuotaLayer::ApiRateLimit).await {
-         return Err(violation_to_response(&v));
+    if let Err(v) = state
+        .quota_store
+        .check_and_update_multi(
+            tenant_ctx.tenant_id(),
+            &[
+                QuotaLayer::SystemHardLimit,
+                QuotaLayer::TenantBudget,
+                QuotaLayer::ApiRateLimit,
+            ],
+        )
+        .await
+    {
+        return Err(violation_to_response(&v));
     }
 
     Ok(next.run(Request::from_parts(parts, body)).await)
