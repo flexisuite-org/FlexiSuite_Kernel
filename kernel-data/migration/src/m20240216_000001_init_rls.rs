@@ -225,8 +225,11 @@ impl MigrationTrait for Migration {
             DROP TABLE IF EXISTS flexi.flexi_nonce_default;
             DROP TABLE IF EXISTS flexi.flexi_nonce;
             DROP TABLE IF EXISTS flexi.nonce_uniqueness;
-            "#
-        ).await?;
+            DROP EXTENSION IF EXISTS pgcrypto;
+            DROP SCHEMA IF EXISTS flexi CASCADE;
+            "#,
+        )
+        .await?;
         Ok(())
     }
 }

@@ -15,7 +15,6 @@ pub enum KernelError {
 
     #[error("Commit failed: {0}")]
     CommitUnknown(String),
-
     // Other errors...
 }
 

@@ -1,11 +1,11 @@
+use anyhow::{Context, Result};
+use clap::Parser;
+use regex::Regex;
+use std::collections::HashSet;
+use std::ffi::OsStr;
 use std::fs;
 use std::path::Path;
-use std::ffi::OsStr;
-use std::collections::HashSet;
 use walkdir::WalkDir;
-use regex::Regex;
-use anyhow::{Result, Context};
-use clap::Parser;
 
 const EXTENSIONLESS_TEXT_MAX_BYTES: u64 = 256 * 1024;
 
@@ -17,7 +17,8 @@ struct Args {
 }
 
 fn extract_reqs(content: &str, regex: &Regex) -> HashSet<String> {
-    regex.find_iter(content)
+    regex
+        .find_iter(content)
         .map(|m| m.as_str().to_string())
         .collect()
 }
@@ -34,7 +35,8 @@ fn main() -> Result<()> {
     if !matrix_path.exists() {
         anyhow::bail!("Error: docs/verification_matrix.md not found");
     }
-    let matrix_content = fs::read_to_string(&matrix_path).context("Failed to read verification_matrix.md")?;
+    let matrix_content =
+        fs::read_to_string(&matrix_path).context("Failed to read verification_matrix.md")?;
     let matrix_reqs = extract_reqs(&matrix_content, &re_req);
 
     // 2. Load Implementation Plan REQs
@@ -54,13 +56,17 @@ fn main() -> Result<()> {
     // However, if implementation_plan doesn't exist, we might skip or warn.
     // Assuming strict equality if impl exists.
     if impl_loaded {
-        let mut missing_in_matrix: Vec<String> = impl_reqs.difference(&matrix_reqs).cloned().collect();
+        let mut missing_in_matrix: Vec<String> =
+            impl_reqs.difference(&matrix_reqs).cloned().collect();
         missing_in_matrix.sort();
-        let mut missing_in_impl: Vec<String> = matrix_reqs.difference(&impl_reqs).cloned().collect();
+        let mut missing_in_impl: Vec<String> =
+            matrix_reqs.difference(&impl_reqs).cloned().collect();
         missing_in_impl.sort();
 
         if !missing_in_matrix.is_empty() {
-            eprintln!("Error: REQs found in implementation_plan but missing in verification_matrix:");
+            eprintln!(
+                "Error: REQs found in implementation_plan but missing in verification_matrix:"
+            );
             for req in missing_in_matrix {
                 eprintln!("  - {}", req);
             }
@@ -68,7 +74,9 @@ fn main() -> Result<()> {
         }
 
         if !missing_in_impl.is_empty() {
-            eprintln!("Error: REQs found in verification_matrix but missing in implementation_plan:");
+            eprintln!(
+                "Error: REQs found in verification_matrix but missing in implementation_plan:"
+            );
             for req in missing_in_impl {
                 eprintln!("  - {}", req);
             }
@@ -110,7 +118,12 @@ fn main() -> Result<()> {
             Err(err) => {
                 let is_benign = err
                     .io_error()
-                    .map(|io_err| matches!(io_err.kind(), std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::NotFound))
+                    .map(|io_err| {
+                        matches!(
+                            io_err.kind(),
+                            std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::NotFound
+                        )
+                    })
                     .unwrap_or(false);
 
                 if is_benign {
@@ -133,9 +146,11 @@ fn main() -> Result<()> {
             // <= EXTENSIONLESS_TEXT_MAX_BYTES. If read_to_string() fails, we emit a warning and continue.
             let should_scan = match path.extension().and_then(|ext| ext.to_str()) {
                 // Whitelist text extensions to skip binary files.
-                Some(ext_str) => ["rs", "sql", "md", "txt", "toml", "sh", "yaml", "yml", "json"]
-                    .iter()
-                    .any(|allowed| allowed.eq_ignore_ascii_case(ext_str)),
+                Some(ext_str) => [
+                    "rs", "sql", "md", "txt", "toml", "sh", "yaml", "yml", "json",
+                ]
+                .iter()
+                .any(|allowed| allowed.eq_ignore_ascii_case(ext_str)),
                 // Also scan small files without extensions (e.g., Makefile-like files).
                 None => path
                     .metadata()
@@ -155,7 +170,11 @@ fn main() -> Result<()> {
                 let file_reqs = extract_reqs(&content, &re_req);
                 for req in file_reqs {
                     if !matrix_reqs.contains(&req) {
-                        eprintln!("Error: Undefined REQ ID '{}' found in {}", req, path.display());
+                        eprintln!(
+                            "Error: Undefined REQ ID '{}' found in {}",
+                            req,
+                            path.display()
+                        );
                         errors = true;
                     }
                 }

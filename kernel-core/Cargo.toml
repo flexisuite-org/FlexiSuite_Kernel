@@ -12,6 +12,8 @@ serde = { version = "1.0", features = ["derive"] }
 ring = "0.17"
 hex = "0.4"
 rand = "0.8"
+# Exception (system-scoped only): KeyManager performs key lifecycle persistence.
+# Tenant-scoped data access must continue to go through kernel-data TenantContext APIs.
 kernel-data = { path = "../kernel-data" }
 sea-orm = { version = "1.1.0", features = ["sqlx-postgres", "runtime-tokio-rustls", "macros"] }
 tracing = "0.1.44"

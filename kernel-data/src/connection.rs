@@ -1,11 +1,11 @@
 use crate::auth_context::TenantContext;
 use crate::error::DataError;
+use futures::future::BoxFuture;
 use sea_orm::{
     ConnectionTrait, DatabaseConnection, DatabaseTransaction, DbBackend, DbErr, Statement,
     TransactionTrait,
 };
 use tracing::{error, warn};
-use futures::future::BoxFuture;
 
 // Sealed Internal Wrapper
 pub struct RawConnection {
@@ -58,7 +58,6 @@ impl TenantScoped<RawConnection> {
     pub(crate) async fn rollback(self) -> Result<(), DbErr> {
         self.inner.txn.rollback().await
     }
-
 }
 
 // Implement Sealed trait for TenantScoped
@@ -77,7 +76,8 @@ pub async fn with_tenant_tx<F, R>(
     f: F,
 ) -> Result<R, DataError>
 where
-    F: for<'c> FnOnce(&'c TenantScoped<RawConnection>) -> BoxFuture<'c, Result<R, DataError>> + Send,
+    F: for<'c> FnOnce(&'c TenantScoped<RawConnection>) -> BoxFuture<'c, Result<R, DataError>>
+        + Send,
     R: Send,
 {
     let txn = pool.begin().await.map_err(DataError::DbError)?;
@@ -94,6 +94,30 @@ where
         DataError::TenantAuthorizationFailed(e.to_string())
     })?;
 
+    let token_tenant = if let Some(tid) = parse_tenant_from_token(token) {
+        tid
+    } else {
+        if let Err(rollback_err) = txn.rollback().await {
+            error!("rollback failed after token parse failure: {rollback_err}");
+        }
+        return Err(DataError::TenantAuthorizationFailed(
+            "invalid tenant token format".to_string(),
+        ));
+    };
+    if token_tenant != ctx.tenant_id().as_str() {
+        warn!(
+            expected_tenant = %ctx.tenant_id(),
+            token_tenant = %token_tenant,
+            "tenant mismatch between context and token"
+        );
+        if let Err(rollback_err) = txn.rollback().await {
+            error!("rollback failed after tenant mismatch: {rollback_err}");
+        }
+        return Err(DataError::TenantAuthorizationFailed(
+            "tenant mismatch between context and token".to_string(),
+        ));
+    }
+
     let scoped = TenantScoped::new(
         RawConnection::new(txn),
         ctx.tenant_id().clone(),
@@ -101,16 +125,14 @@ where
     );
 
     match f(&scoped).await {
-        Ok(result) => {
-            match scoped.commit().await {
-                Ok(()) => Ok(result),
-                Err(commit_err) => {
-                    error!(
-                        tenant_id = %ctx.tenant_id(),
-                        "commit failed (outcome unknown): {commit_err}"
-                    );
-                    Err(DataError::CommitUnknown(commit_err.to_string()))
-                }
+        Ok(result) => match scoped.commit().await {
+            Ok(()) => Ok(result),
+            Err(commit_err) => {
+                error!(
+                    tenant_id = %ctx.tenant_id(),
+                    "commit failed (outcome unknown): {commit_err}"
+                );
+                Err(DataError::CommitUnknown(commit_err.to_string()))
             }
         },
         Err(e) => {
@@ -123,16 +145,34 @@ where
     }
 }
 
+fn parse_tenant_from_token(token: &str) -> Option<&str> {
+    let mut parts = token.split(':');
+    let ver = parts.next()?;
+    let _kid = parts.next()?;
+    let _ts = parts.next()?;
+    let _nonce = parts.next()?;
+    let tenant_id = parts.next()?;
+    let _sig = parts.next()?;
+    if ver != "v2" || parts.next().is_some() {
+        return None;
+    }
+    Some(tenant_id)
+}
+
 // Legacy exports for compatibility if needed (deprecated)
-#[deprecated(note = "Legacy migration shim; no-op - remove callers and use token-based authorization API")]
+#[deprecated(
+    note = "Legacy migration shim; no-op - remove callers and use token-based authorization API"
+)]
 pub fn init_hmac_secret() -> Result<(), String> {
     // No-op or return error as it's no longer used
     Ok(())
 }
 
 #[cfg(feature = "test-utils")]
-#[deprecated(note = "Legacy migration shim; no-op - remove callers and use test fixtures with KeyManager")]
+#[deprecated(
+    note = "Legacy migration shim; no-op - remove callers and use test fixtures with KeyManager"
+)]
 pub fn init_hmac_secret_for_test(_secret: impl Into<String>) -> Result<(), String> {
-     // No-op
+    // No-op
     Ok(())
 }
