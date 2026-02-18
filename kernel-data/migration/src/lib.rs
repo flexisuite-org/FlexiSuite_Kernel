@@ -31,7 +31,10 @@ where
         Self(db)
     }
 
-    pub async fn execute_unprepared(&self, sql: &str) -> Result<sea_orm_migration::sea_orm::ExecResult, sea_orm_migration::sea_orm::DbErr> {
+    pub async fn execute_unprepared(
+        &self,
+        sql: &str,
+    ) -> Result<sea_orm_migration::sea_orm::ExecResult, sea_orm_migration::sea_orm::DbErr> {
         self.0.execute_unprepared(sql).await
     }
 }
