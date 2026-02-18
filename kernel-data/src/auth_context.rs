@@ -48,7 +48,7 @@ macro_rules! define_principal_id {
                 &self.0
             }
 
-            pub fn new_unchecked(id: impl Into<String>) -> Self {
+            pub(crate) fn new_unchecked(id: impl Into<String>) -> Self {
                 Self(id.into())
             }
         }
@@ -82,11 +82,22 @@ define_principal_id!(UserId, "user_id");
 pub struct TenantContext {
     tenant_id: TenantId,
     user_id: Option<UserId>,
+    #[serde(skip)]
+    db: Option<std::sync::Arc<sea_orm::DatabaseConnection>>,
 }
 
 impl TenantContext {
     pub fn new(tenant_id: TenantId, user_id: Option<UserId>) -> Self {
-        Self { tenant_id, user_id }
+        Self {
+            tenant_id,
+            user_id,
+            db: None,
+        }
+    }
+
+    pub fn with_db(mut self, db: std::sync::Arc<sea_orm::DatabaseConnection>) -> Self {
+        self.db = Some(db);
+        self
     }
 
     pub fn tenant_id(&self) -> &TenantId {
@@ -95,6 +106,16 @@ impl TenantContext {
 
     pub fn user_id(&self) -> Option<&UserId> {
         self.user_id.as_ref()
+    }
+
+    pub fn is_system(&self) -> bool {
+        self.tenant_id.as_str() == "system"
+    }
+
+    pub fn db(&self) -> Result<&sea_orm::DatabaseConnection, String> {
+        self.db
+            .as_deref()
+            .ok_or_else(|| "Database connection not attached to context".to_string())
     }
 }
 
@@ -110,6 +131,7 @@ impl From<SystemTenantContext> for TenantContext {
         Self {
             tenant_id: TenantId::new_unchecked("system"),
             user_id: None,
+            db: None,
         }
     }
 }

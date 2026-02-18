@@ -20,6 +20,78 @@ fn get_line_number(content: &str, byte_offset: usize) -> usize {
         + 1
 }
 
+fn tokenize_args(args_list: &str) -> Result<Vec<String>, String> {
+    let mut args = Vec::new();
+    let mut current = String::new();
+    let mut depth = 0;
+    let mut in_quote = false;
+    let chars = args_list.chars();
+
+    for c in chars {
+        match c {
+            '\'' => {
+                in_quote = !in_quote;
+                current.push(c);
+            }
+            '(' | '[' if !in_quote => {
+                depth += 1;
+                current.push(c);
+            }
+            ')' | ']' if !in_quote => {
+                if depth == 0 {
+                    return Err(format!("Unbalanced parentheses/brackets in args list: {}", args_list));
+                }
+                depth -= 1;
+                current.push(c);
+            }
+            ',' if depth == 0 && !in_quote => {
+                args.push(current.trim().to_string());
+                current.clear();
+            }
+            _ => {
+                current.push(c);
+            }
+        }
+    }
+
+    if in_quote {
+        return Err(format!("Unterminated quote in args list: {}", args_list));
+    }
+    if depth != 0 {
+        return Err(format!("Unbalanced parentheses/brackets in args list: {}", args_list));
+    }
+
+    if !current.trim().is_empty() {
+        args.push(current.trim().to_string());
+    }
+
+    // Extract types
+    let mut types = Vec::new();
+    for s in args {
+        let parts: Vec<&str> = s.split_whitespace().collect();
+        if parts.is_empty() {
+            continue;
+        }
+
+        let default_pos = parts.iter().position(|&p| p.to_uppercase() == "DEFAULT");
+        let type_parts = if let Some(pos) = default_pos {
+            &parts[..pos]
+        } else {
+            &parts[..]
+        };
+
+        if type_parts.len() >= 2 {
+            // Likely "name type" or "name type[]"
+            types.push(type_parts[1..].join(" "));
+        } else if type_parts.len() == 1 {
+            // just "type"
+            types.push(type_parts[0].to_string());
+        }
+    }
+
+    Ok(types)
+}
+
 fn main() -> Result<()> {
     let args = Args::parse();
     let root = Path::new(&args.path);
@@ -112,16 +184,23 @@ fn main() -> Result<()> {
                                 let func_name = func_cap.get(1).unwrap().as_str();
                                 let args_list = func_cap.get(2).unwrap().as_str();
 
-                                // Extract just the types from args_list (e.g. "token_val text, other int" -> "text, int")
-                                let arg_types: Vec<String> = args_list
-                                    .split(',')
-                                    .map(|s| s.trim().split_whitespace().last().unwrap_or("").to_string())
-                                    .filter(|s| !s.is_empty())
-                                    .collect();
-                                let arg_signature = arg_types.join(r"\s*,\s*");
+                                // Extract just the types from args_list (e.g. "token_val text, other int" -> ["text", "int"])
+                                let arg_types = match tokenize_args(args_list) {
+                                    Ok(types) => types,
+                                    Err(e) => {
+                                        eprintln!("{}:{}: {}", path.display(), line, e);
+                                        errors = true;
+                                        continue;
+                                    }
+                                };
+                                let arg_signature = arg_types
+                                    .iter()
+                                    .map(|t| regex::escape(t))
+                                    .collect::<Vec<_>>()
+                                    .join(r"\s*,\s*");
 
-                                // Escape dots in func_name for regex
-                                let func_name_regex = func_name.replace('.', r"\.");
+                                // Escape func_name for regex
+                                let func_name_regex = regex::escape(func_name);
 
                                 let revoke_pattern = format!(
                                     r"(?si)REVOKE\s+.*?\s+ON\s+FUNCTION\s+{}\s*\(\s*{}\s*\)\s+FROM\s+PUBLIC",

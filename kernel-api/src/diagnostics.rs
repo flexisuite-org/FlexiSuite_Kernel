@@ -73,7 +73,8 @@ async fn generate_token_or_500(
     db: &Arc<DatabaseConnection>,
     ctx: &TenantContext,
 ) -> Result<String, StatusCode> {
-    match KeyManager::generate_tenant_token(ctx, db, ctx.tenant_id()).await {
+    let ctx_with_db = ctx.clone().with_db(db.clone());
+    match KeyManager::generate_tenant_token(&ctx_with_db, ctx.tenant_id()).await {
         Ok(token) => Ok(token),
         Err(e) => {
             tracing::error!("Failed to generate tenant token: {}", e);

@@ -34,19 +34,22 @@ async fn main() {
         .acquire_timeout(Duration::from_secs(30))
         .sqlx_logging(false);
 
-    let db = Database::connect(opt).await.unwrap_or_else(|e| {
+    let db = std::sync::Arc::new(Database::connect(opt).await.unwrap_or_else(|e| {
         eprintln!("Failed to connect to database: {e}");
         std::process::exit(1);
-    });
+    }));
 
-    use kernel_data::auth_context::SystemTenantContext;
-    KeyManager::rotate_keys(&SystemTenantContext.into(), &db).await.unwrap_or_else(|e| {
-        eprintln!("Failed to initialize key rotation state: {e}");
-        std::process::exit(1);
-    });
+    use kernel_data::auth_context::{SystemTenantContext, TenantContext};
+    let init_ctx = TenantContext::from(SystemTenantContext).with_db(db.clone());
+    KeyManager::rotate_keys(&init_ctx)
+        .await
+        .unwrap_or_else(|e| {
+            eprintln!("Failed to initialize key rotation state: {e}");
+            std::process::exit(1);
+        });
 
     let config = MiddlewareConfig::default();
-    let (app, _cleanup_handle) = build_app(config, db).await.unwrap_or_else(|e| {
+    let (app, _cleanup_handle) = build_app(config, db.clone()).await.unwrap_or_else(|e| {
         eprintln!("kernel-api startup error (middleware): {e}");
         std::process::exit(1);
     });
