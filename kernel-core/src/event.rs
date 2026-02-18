@@ -123,7 +123,7 @@ pub fn validate_order_mode_transition(
     Ok(())
 }
 
-pub fn compare_event_order(a: &EventEnvelope, b: &EventEnvelope) -> Ordering {
+pub fn compare_event_order(a: &EventEnvelope, b: &EventEnvelope) -> Option<Ordering> {
     match (&a.order_mode, &b.order_mode) {
         (
             OrderMode::Entity {
@@ -134,7 +134,7 @@ pub fn compare_event_order(a: &EventEnvelope, b: &EventEnvelope) -> Ordering {
                 entity_id: bid,
                 seq: bseq,
             },
-        ) if aid == bid => aseq.cmp(bseq),
+        ) if aid == bid => Some(aseq.cmp(bseq)),
         (
             OrderMode::Causality {
                 key: akey,
@@ -144,11 +144,34 @@ pub fn compare_event_order(a: &EventEnvelope, b: &EventEnvelope) -> Ordering {
                 key: bkey,
                 seq: bseq,
             },
-        ) if akey == bkey => aseq.cmp(bseq),
-        _ => Ordering::Equal,
+        ) if akey == bkey => Some(aseq.cmp(bseq)),
+        _ => None,
     }
 }
 
+/// REQ-EVENT-GAP-001: Gap detection occurs via the outbox/consumer layer (e.g., Redis Streams)
+/// when a non-contiguous sequence ID is observed.
+/// REQ-EVENT-GAP-002: progress_gap_recovery drives the FSM to resolve detected gaps.
+///
+/// Lifecycle/Contract:
+/// 1. GapDetected is emitted by the consumer logic when `delivery.seq > expected_seq`.
+/// 2. The event loop invokes `progress_gap_recovery` once per recovery attempt.
+/// 3. Recovering -> Normal transition ignores `outbox_has_missing_seq` under the assumption
+///    that the recovery poll itself either filled the gap or confirmed it's unrecoverable.
+/// 4. RebuildRequired is an absorbing state indicating manual intervention or full re-sync is needed.
+///
+/// Example:
+/// ```
+/// use kernel_core::event::{GapRecoveryState, progress_gap_recovery};
+/// let mut state = GapRecoveryState::Normal;
+/// let gap_detected = true;
+/// if gap_detected {
+///     state = GapRecoveryState::GapDetected;
+/// }
+/// let has_missing = true;
+/// // ... later in event loop ...
+/// state = progress_gap_recovery(state, has_missing);
+/// ```
 pub fn progress_gap_recovery(
     state: GapRecoveryState,
     outbox_has_missing_seq: bool,
@@ -306,6 +329,46 @@ mod tests {
             seq: Some(2),
         };
         assert!(validate_order_mode_transition(Some(&existing), &next).is_err());
+    }
+
+    #[test]
+    fn test_validate_order_mode_transition_edge_cases() {
+        let entity_id = Uuid::now_v7();
+        let mode = OrderMode::Entity {
+            entity_id,
+            seq: Some(1),
+        };
+
+        // First event (None) -> Ok
+        assert!(validate_order_mode_transition(None, &mode).is_ok());
+
+        // Same kind -> Ok
+        assert!(validate_order_mode_transition(Some(&mode), &mode).is_ok());
+
+        let causality = OrderMode::Causality {
+            key: "key".to_string(),
+            seq: Some(1),
+        };
+        assert!(validate_order_mode_transition(Some(&causality), &causality).is_ok());
+    }
+
+    #[test]
+    fn test_progress_gap_recovery_absorbing_states() {
+        // Normal false -> RebuildRequired
+        assert_eq!(
+            progress_gap_recovery(GapRecoveryState::Normal, false),
+            GapRecoveryState::RebuildRequired
+        );
+
+        // RebuildRequired is absorbing
+        assert_eq!(
+            progress_gap_recovery(GapRecoveryState::RebuildRequired, true),
+            GapRecoveryState::RebuildRequired
+        );
+        assert_eq!(
+            progress_gap_recovery(GapRecoveryState::RebuildRequired, false),
+            GapRecoveryState::RebuildRequired
+        );
     }
 
     #[test]

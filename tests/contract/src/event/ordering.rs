@@ -1,3 +1,4 @@
+use std::cmp::Ordering;
 use chrono::Utc;
 use kernel_core::auth::TenantId;
 use kernel_core::event::{
@@ -44,7 +45,8 @@ async fn test_event_ordering_entity() {
         })
         .collect::<Vec<_>>();
 
-    events.sort_by(compare_event_order);
+    // Use partial_cmp-aware sorting with a deterministic tiebreaker (Ordering::Equal for incomparable)
+    events.sort_by(|a, b| compare_event_order(a, b).unwrap_or(Ordering::Equal));
 
     assert_eq!(events[0].order_mode.seq(), Some(1));
     assert_eq!(events[1].order_mode.seq(), Some(2));

@@ -16,9 +16,22 @@ pub fn setup() {
     let (_, pub_b64) = get_test_keypair();
     AUTH_INIT.get_or_init(|| {
         let _ = tracing_subscriber::fmt().with_test_writer().try_init();
-        let _ = init_auth_config_with_public_key_and_revoked_kids(&pub_b64, &["revoked"])
-            .or_else(|_| init_auth_config_with_public_key_b64url(&pub_b64));
-        ()
+        if let Err(e1) = init_auth_config_with_public_key_and_revoked_kids(&pub_b64, &["revoked"]) {
+            match init_auth_config_with_public_key_b64url(&pub_b64) {
+                Ok(_) => {
+                    tracing::warn!(
+                        "init_auth_config_with_public_key_and_revoked_kids failed (e: {}), but fallback to init_auth_config_with_public_key_b64url succeeded",
+                        e1
+                    );
+                }
+                Err(e2) => {
+                    panic!(
+                        "Auth initialization failed.\nPrimary error: {}\nFallback error: {}",
+                        e1, e2
+                    );
+                }
+            }
+        }
     });
 }
 
