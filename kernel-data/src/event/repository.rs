@@ -13,6 +13,8 @@ pub struct EventRepository;
 impl EventRepository {
     /// Creates an event and inserts it into the outbox within the given transaction.
     /// Returns the fully formed EventEnvelope with the assigned sequence number.
+    /// Creates an event and inserts it into the outbox within the given transaction.
+    /// Returns the fully formed EventEnvelope with the assigned sequence number.
     pub async fn create_event(
         db: &TenantScoped<RawConnection>,
         event_type: String,
@@ -26,7 +28,7 @@ impl EventRepository {
         // 1. Generate Sequence
         let (seq, metadata_mode_str) = match &order_mode {
             OrderMode::Entity { entity_id, .. } => {
-                let seq = Self::next_entity_seq(db, tenant_id.as_str(), *entity_id)
+                let seq = Self::next_entity_seq(db, *entity_id)
                     .await
                     .map_err(|e| {
                         EventError::Store(format!("failed to generate entity seq: {}", e))
@@ -34,7 +36,7 @@ impl EventRepository {
                 (seq, "entity")
             }
             OrderMode::Causality { key, .. } => {
-                let seq = Self::next_causality_seq(db, tenant_id.as_str(), key)
+                let seq = Self::next_causality_seq(db, key)
                     .await
                     .map_err(|e| {
                         EventError::Store(format!("failed to generate causality seq: {}", e))
@@ -89,7 +91,7 @@ impl EventRepository {
         };
 
         outbox_model
-            .insert(&db.inner.txn)
+            .insert(db.txn())
             .await
             .map_err(|e| EventError::Store(format!("failed to insert into outbox: {}", e)))?;
 
@@ -106,7 +108,6 @@ impl EventRepository {
 
     async fn next_entity_seq(
         db: &TenantScoped<RawConnection>,
-        tenant_id: &str,
         entity_id: Uuid,
     ) -> Result<i64, DbErr> {
         let on_conflict = OnConflict::columns([
@@ -120,12 +121,12 @@ impl EventRepository {
         .to_owned();
 
         let model = entities_entity_seq::Entity::insert(entities_entity_seq::ActiveModel {
-            tenant_id: Set(tenant_id.to_string()),
+            tenant_id: Set(db.tenant_id.as_str().to_string()),
             entity_id: Set(entity_id),
             last_seq: Set(1),
         })
         .on_conflict(on_conflict)
-        .exec_with_returning(&db.inner.txn)
+        .exec_with_returning(db.txn())
         .await?;
 
         Ok(model.last_seq)
@@ -133,7 +134,6 @@ impl EventRepository {
 
     async fn next_causality_seq(
         db: &TenantScoped<RawConnection>,
-        tenant_id: &str,
         key: &str,
     ) -> Result<i64, DbErr> {
         let on_conflict = OnConflict::columns([
@@ -147,12 +147,12 @@ impl EventRepository {
         .to_owned();
 
         let model = entities_causality_seq::Entity::insert(entities_causality_seq::ActiveModel {
-            tenant_id: Set(tenant_id.to_string()),
+            tenant_id: Set(db.tenant_id.as_str().to_string()),
             causality_key: Set(key.to_string()),
             last_seq: Set(1),
         })
         .on_conflict(on_conflict)
-        .exec_with_returning(&db.inner.txn)
+        .exec_with_returning(db.txn())
         .await?;
 
         Ok(model.last_seq)
