@@ -21,7 +21,7 @@ async-trait = "0.1"
 kernel-core = { path = "../kernel-core" }
 kernel-data = { path = "../kernel-data" }
 tracing = "0.1.44"
-rusty_paseto = "0.7.1"
+rusty_paseto = { version = "0.8", features = ["v4_public"] }
 chrono = { version = "0.4", features = ["serde"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 redis = { version = "1.0.3", features = ["aio", "connection-manager", "tokio-comp", "tokio-rustls-comp"] }
@@ -32,3 +32,6 @@ opentelemetry_sdk = { version = "0.31", features = ["metrics"] }
 opentelemetry-prometheus = { version = "0.31", default-features = false }
 prometheus = "0.14"
 sysinfo = "0.30"
+
+[dev-dependencies]
+temp-env = "0.3"

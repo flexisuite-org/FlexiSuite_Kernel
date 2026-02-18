@@ -101,6 +101,9 @@ use std::sync::OnceLock;
 static PASETO_PUBLIC_KEY: OnceLock<Vec<u8>> = OnceLock::new();
 static PASETO_KEYSET: OnceLock<PasetoKeyset> = OnceLock::new();
 
+/// [NOT-IMPLEMENTED] Multi-key support: PasetoKeyset models multiple KID categories
+/// but verify_paseto_v4_public_token always uses the single static PASETO_PUBLIC_KEY today.
+/// True per-KID key selection/rotation is not yet implemented.
 #[derive(Debug)]
 struct PasetoKeyset {
     active_kid: String,
@@ -143,7 +146,8 @@ impl PasetoKeyset {
             return Ok(());
         }
 
-        Err(AuthError::Forbidden)
+        // Return Unauthorized for unknown KIDs to avoid leaking keyset state
+        Err(AuthError::Unauthorized)
     }
 }
 
@@ -209,6 +213,9 @@ fn verify_paseto_v4_public_from_env(auth_header: &str) -> Result<TenantContext, 
     })
 }
 
+/// Verifies a PASETO v4.public token using the provided public key.
+/// Note: Only one Ed25519 key (PASETO_PUBLIC_KEY) is used for verification today.
+/// Multi-key verification mapping footer.kid to specific keys is not yet implemented.
 fn verify_paseto_v4_public_token(
     token: &str,
     public_key_bytes: &[u8],
@@ -299,6 +306,10 @@ fn parse_kid_csv_env(key: &str) -> HashSet<String> {
         .unwrap_or_default()
 }
 
+/// Pre-parses the PASETO v4.public token to extract kid from the footer.
+/// This manual pre-parse is required to reject revoked KIDs before running full signature verification.
+/// CAUTION: This logic is coupled to the PASETO v4.public wire format (4 segments, base64url footer).
+/// Update this if the PASETO spec or rusty_paseto serialization changes.
 fn extract_footer_kid(token: &str) -> Result<(String, String), AuthError> {
     let parts = token.split('.').collect::<Vec<_>>();
     if parts.len() != 4 {
@@ -365,5 +376,92 @@ mod tests {
         assert!(!is_valid_principal("tenant/1")); // Slash
         assert!(!is_valid_principal("tenant 1")); // Space
         assert!(!is_valid_principal("tenant@1")); // At
+    }
+
+    #[test]
+    fn test_validate_token_kid() {
+        let mut keyset = PasetoKeyset::default_for_single_key();
+        keyset.next_kids.insert("next".to_string());
+        keyset.retired_kids.insert("retired".to_string());
+        keyset.revoked_kids.insert("revoked".to_string());
+
+        assert!(keyset.validate_token_kid("active").is_ok());
+        assert!(keyset.validate_token_kid("next").is_ok());
+        assert!(keyset.validate_token_kid("retired").is_ok());
+        assert!(matches!(
+            keyset.validate_token_kid("revoked"),
+            Err(AuthError::Unauthorized)
+        ));
+        assert!(matches!(
+            keyset.validate_token_kid("unknown"),
+            Err(AuthError::Unauthorized) // Should be Unauthorized, not Forbidden
+        ));
+    }
+
+    #[test]
+    fn test_extract_footer_kid_valid() {
+        // v4.public.PAYLOAD.FOOTER(base64url of {"kid":"my-kid"})
+        let footer_raw = r#"{"kid":"my-kid"}"#;
+        let footer_b64 = URL_SAFE_NO_PAD.encode(footer_raw);
+        let token = format!("v4.public.payload.{}", footer_b64);
+
+        let (kid, footer) = extract_footer_kid(&token).unwrap();
+        assert_eq!(kid, "my-kid");
+        assert_eq!(footer, footer_raw);
+    }
+
+    #[test]
+    fn test_extract_footer_kid_invalid() {
+        assert!(extract_footer_kid("v3.public.p.f").is_err()); // Wrong version
+        assert!(extract_footer_kid("v4.local.p.f").is_err()); // Wrong purpose
+        assert!(extract_footer_kid("v4.public.p").is_err()); // Missing footer segment
+        assert!(extract_footer_kid("v4.public.p.f.extra").is_err()); // Too many segments
+        assert!(extract_footer_kid("v4.public.p.!!!").is_err()); // Invalid b64
+        assert!(extract_footer_kid(&format!("v4.public.p.{}", URL_SAFE_NO_PAD.encode(r#"{"not_kid":"val"}"#))).is_err()); // Missing kid key
+        assert!(extract_footer_kid(&format!("v4.public.p.{}", URL_SAFE_NO_PAD.encode(r#"{"kid":" "}"#))).is_err()); // Empty kid
+    }
+
+    #[test]
+    fn test_parse_kid_csv_env() {
+        temp_env::with_vars(
+            [
+                ("KIDS_EMPTY", Some("")),
+                ("KIDS_SINGLE", Some("k1")),
+                ("KIDS_MULTI", Some(" k1, k2 ,k3,, ")),
+            ],
+            || {
+                assert!(parse_kid_csv_env("KIDS_EMPTY").is_empty());
+                let single = parse_kid_csv_env("KIDS_SINGLE");
+                assert_eq!(single.len(), 1);
+                assert!(single.contains("k1"));
+
+                let multi = parse_kid_csv_env("KIDS_MULTI");
+                assert_eq!(multi.len(), 3);
+                assert!(multi.contains("k1"));
+                assert!(multi.contains("k2"));
+                assert!(multi.contains("k3"));
+            },
+        );
+    }
+
+    #[test]
+    fn test_paseto_keyset_initialization() {
+        // Successful default
+        let default = PasetoKeyset::default_for_single_key();
+        assert_eq!(default.active_kid, "active");
+
+        // From env
+        temp_env::with_vars(
+            [
+                ("FLEXI_PASETO_V4_ACTIVE_KID", Some("env-active")),
+                ("FLEXI_PASETO_V4_REVOKED_KIDS", Some("r1,r2")),
+            ],
+            || {
+                let keyset = PasetoKeyset::from_env();
+                assert_eq!(keyset.active_kid, "env-active");
+                assert!(keyset.revoked_kids.contains("r1"));
+                assert!(keyset.revoked_kids.contains("r2"));
+            },
+        );
     }
 }

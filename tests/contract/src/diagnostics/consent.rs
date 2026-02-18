@@ -1,16 +1,16 @@
 use kernel_core::auth::TenantId;
 use kernel_core::diagnostics::{DiagnosticPolicy, is_diagnostics_enabled};
 
-#[tokio::test]
-async fn test_diagnostics_opt_out_default() {
+#[test]
+fn test_diagnostics_opt_out_default() {
     assert!(
         !is_diagnostics_enabled(None),
-        "Diagnostics MUST be opt-out by default"
+        "In-memory check: Diagnostics MUST be opt-out by default"
     );
 }
 
-#[tokio::test]
-async fn test_diagnostics_policy_revocation() {
+#[test]
+fn test_diagnostics_policy_revocation() {
     let tenant_id = TenantId::new("tenant-diag").unwrap();
 
     let enabled = DiagnosticPolicy::new(tenant_id.clone(), true, None);
@@ -19,6 +19,6 @@ async fn test_diagnostics_policy_revocation() {
     let revoked = DiagnosticPolicy::new(tenant_id, false, None);
     assert!(
         !is_diagnostics_enabled(Some(&revoked)),
-        "Revocation MUST stop transmission immediately"
+        "In-memory revoked policy disables diagnostics"
     );
 }
