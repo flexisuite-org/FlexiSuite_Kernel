@@ -5,8 +5,8 @@ use crate::event::entities_outbox;
 use kernel_core::event::{EventEnvelope, EventError, OrderMode};
 use sea_orm::sea_query::{Expr, OnConflict};
 use sea_orm::{ActiveModelTrait, DbErr, EntityTrait, Set};
-use uuid::Uuid;
 use std::convert::TryFrom;
+use uuid::Uuid;
 
 pub struct EventRepository;
 
@@ -26,19 +26,15 @@ impl EventRepository {
         // 1. Generate Sequence
         let (seq, metadata_mode_str) = match &order_mode {
             OrderMode::Entity { entity_id, .. } => {
-                let seq = Self::next_entity_seq(db, *entity_id)
-                    .await
-                    .map_err(|e| {
-                        EventError::Store(format!("failed to generate entity seq: {}", e))
-                    })?;
+                let seq = Self::next_entity_seq(db, *entity_id).await.map_err(|e| {
+                    EventError::Store(format!("failed to generate entity seq: {}", e))
+                })?;
                 (seq, "entity")
             }
             OrderMode::Causality { key, .. } => {
-                let seq = Self::next_causality_seq(db, key)
-                    .await
-                    .map_err(|e| {
-                        EventError::Store(format!("failed to generate causality seq: {}", e))
-                    })?;
+                let seq = Self::next_causality_seq(db, key).await.map_err(|e| {
+                    EventError::Store(format!("failed to generate causality seq: {}", e))
+                })?;
                 (seq, "causality")
             }
         };
@@ -47,7 +43,10 @@ impl EventRepository {
         // Safety: seq is generated from i64 in DB (BIGINT), we assumes it fits in u64 if non-negative.
         // Logic ensures strictly positive seq from next_*_seq.
         let seq_u64 = u64::try_from(seq).map_err(|e| {
-            EventError::Store(format!("generated sequence {} is invalid for u64: {}", seq, e))
+            EventError::Store(format!(
+                "generated sequence {} is invalid for u64: {}",
+                seq, e
+            ))
         })?;
 
         let final_order_mode = match order_mode {
@@ -95,13 +94,13 @@ impl EventRepository {
 
         // 4. Return Envelope
         Ok(EventEnvelope {
-                event_id,
-                tenant_id: tenant_id.clone(),
-                event_type,
-                order_mode: final_order_mode,
-                payload,
-                created_at: now, // Use captured time
-            })
+            event_id,
+            tenant_id: tenant_id.clone(),
+            event_type,
+            order_mode: final_order_mode,
+            payload,
+            created_at: now, // Use captured time
+        })
     }
 
     async fn next_entity_seq(
@@ -130,10 +129,7 @@ impl EventRepository {
         Ok(model.last_seq)
     }
 
-    async fn next_causality_seq(
-        db: &TenantScoped<RawConnection>,
-        key: &str,
-    ) -> Result<i64, DbErr> {
+    async fn next_causality_seq(db: &TenantScoped<RawConnection>, key: &str) -> Result<i64, DbErr> {
         let on_conflict = OnConflict::columns([
             entities_causality_seq::Column::TenantId,
             entities_causality_seq::Column::CausalityKey,

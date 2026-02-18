@@ -14,7 +14,7 @@ use kernel_api::middleware::{
 use std::sync::Arc;
 use tokio::sync::Notify;
 
-use sea_orm::{MockDatabase, DatabaseBackend};
+use sea_orm::{DatabaseBackend, MockDatabase};
 
 #[cfg(debug_assertions)]
 use serde_json::Value;
@@ -34,8 +34,7 @@ fn setup_app_with_config(
         MiddlewareState::new(config)
     };
 
-    let db = MockDatabase::new(DatabaseBackend::Postgres)
-        .into_connection();
+    let db = MockDatabase::new(DatabaseBackend::Postgres).into_connection();
 
     let (app, _cleanup) = kernel_api::build_app_with_state(state, db);
     app

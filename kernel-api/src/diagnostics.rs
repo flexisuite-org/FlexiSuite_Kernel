@@ -24,11 +24,7 @@ const MAX_STRING_LEN: usize = 256;
 /// Maximum allowed length for DOM snapshot
 const MAX_DOM_SNAPSHOT_LEN: usize = 1024 * 1024; // 1MB
 
-fn validate_string_length(
-    value: &str,
-    field_name: &str,
-    max_len: usize,
-) -> Result<(), StatusCode> {
+fn validate_string_length(value: &str, field_name: &str, max_len: usize) -> Result<(), StatusCode> {
     if value.len() > max_len {
         tracing::warn!(
             field = %field_name,
@@ -62,10 +58,7 @@ pub struct UpdatePolicyRequest {
 #[serde(untagged)]
 enum DiagnosticPolicyResponse {
     Configured(diagnostic_policy::Model),
-    NotConfigured {
-        tenant_id: String,
-        enabled: bool,
-    },
+    NotConfigured { tenant_id: String, enabled: bool },
 }
 
 pub fn routes() -> Router {

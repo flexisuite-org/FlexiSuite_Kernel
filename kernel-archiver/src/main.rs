@@ -240,7 +240,10 @@ fn parse_object_lock_config() -> Result<Option<ObjectLockConfig>> {
         return Err(anyhow!("S3_OBJECT_LOCK_DAYS must be > 0"));
     }
 
-    Ok(Some(ObjectLockConfig { mode, retain_days: days }))
+    Ok(Some(ObjectLockConfig {
+        mode,
+        retain_days: days,
+    }))
 }
 
 async fn run_archive_cycle(db: &DatabaseConnection, s3: &Client, config: &AppConfig) -> Result<()> {
@@ -252,9 +255,7 @@ async fn run_archive_cycle(db: &DatabaseConnection, s3: &Client, config: &AppCon
 
         let fetched = with_tenant_tx(db, &ctx, |repo| {
             Box::pin(async move {
-                let histories = repo
-                    .find_unarchived_entity_histories(batch_size)
-                    .await?;
+                let histories = repo.find_unarchived_entity_histories(batch_size).await?;
                 let logs = repo.find_unarchived_audit_logs(batch_size).await?;
                 Ok((histories, logs))
             })
@@ -273,7 +274,7 @@ async fn run_archive_cycle(db: &DatabaseConnection, s3: &Client, config: &AppCon
         };
 
         let tenant_id_str = ctx.tenant_id().to_string();
-        
+
         let entity_histories_result = archive_items(
             "entity history",
             "entity-history",
@@ -299,7 +300,10 @@ async fn run_archive_cycle(db: &DatabaseConnection, s3: &Client, config: &AppCon
         let entity_history_ids = match entity_histories_result {
             Ok(ids) => ids,
             Err(e) => {
-                error!("Tenant {} failed to archive entity history: {}", tenant_id, e);
+                error!(
+                    "Tenant {} failed to archive entity history: {}",
+                    tenant_id, e
+                );
                 Vec::new()
             }
         };

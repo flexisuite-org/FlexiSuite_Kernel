@@ -1,9 +1,9 @@
+use anyhow::Result;
+use clap::Parser;
+use regex::Regex;
 use std::fs;
 use std::path::Path;
 use walkdir::WalkDir;
-use regex::Regex;
-use anyhow::Result;
-use clap::Parser;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -13,7 +13,11 @@ struct Args {
 }
 
 fn get_line_number(content: &str, byte_offset: usize) -> usize {
-    content[..byte_offset].chars().filter(|&c| c == '\n').count() + 1
+    content[..byte_offset]
+        .chars()
+        .filter(|&c| c == '\n')
+        .count()
+        + 1
 }
 
 fn main() -> Result<()> {
@@ -22,7 +26,8 @@ fn main() -> Result<()> {
 
     let re_security_definer = Regex::new(r"(?i)SECURITY\s+DEFINER").unwrap();
     // Allow variations in spacing and newlines
-    let re_search_path = Regex::new(r"(?i)SET\s+search_path\s*=\s*flexi\s*,\s*pg_catalog\s*,\s*pg_temp").unwrap();
+    let re_search_path =
+        Regex::new(r"(?i)SET\s+search_path\s*=\s*flexi\s*,\s*pg_catalog\s*,\s*pg_temp").unwrap();
     // Use (?s) to allow '.' to match newlines for multi-line REVOKE statements
     let re_revoke = Regex::new(r"(?si)REVOKE\s+.*?FROM\s+PUBLIC").unwrap();
     let re_kernel_mode = Regex::new(r"flexi\.kernel_mode").unwrap();
@@ -38,7 +43,8 @@ fn main() -> Result<()> {
             let s = c.as_os_str().to_string_lossy();
             s.starts_with('.') && s != "." && s != ".."
         }) || path.components().any(|c| c.as_os_str() == "target")
-           || path.to_string_lossy().contains("ops/linters") {
+            || path.to_string_lossy().contains("ops/linters")
+        {
             continue;
         }
 
@@ -60,7 +66,11 @@ fn main() -> Result<()> {
                     if is_migration {
                         for cap in re_kernel_mode.find_iter(&content) {
                             let line = get_line_number(&content, cap.start());
-                            eprintln!("{}:{}: forbidden usage of 'flexi.kernel_mode' in migration", path.display(), line);
+                            eprintln!(
+                                "{}:{}: forbidden usage of 'flexi.kernel_mode' in migration",
+                                path.display(),
+                                line
+                            );
                             errors = true;
                         }
                     }
@@ -81,7 +91,7 @@ fn main() -> Result<()> {
                         // Check search_path in the vicinity (bidirectional 500 chars)
                         let mut start_search = if start > 500 { start - 500 } else { 0 };
                         while !content.is_char_boundary(start_search) {
-                            start_search = start_search. saturating_sub(1);
+                            start_search = start_search.saturating_sub(1);
                         }
 
                         let mut end_search = std::cmp::min(content.len(), start + 500);
