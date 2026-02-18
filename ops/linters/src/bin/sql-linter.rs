@@ -2,7 +2,7 @@ use anyhow::Result;
 use clap::Parser;
 use regex::Regex;
 use std::fs;
-use std::path::Path;
+use std::path::{Component, Path};
 use walkdir::WalkDir;
 
 #[derive(Parser, Debug)]
@@ -36,14 +36,18 @@ fn main() -> Result<()> {
 
     for entry in WalkDir::new(root).into_iter().filter_map(|e| e.ok()) {
         let path = entry.path();
+        let components: Vec<Component<'_>> = path.components().collect();
+        let in_ops_linters = components
+            .windows(2)
+            .any(|w| w[0].as_os_str() == "ops" && w[1].as_os_str() == "linters");
 
         // Skip hidden directories, target directory, and linters source
         // We must check that the component is not strictly "." or ".."
-        if path.components().any(|c| {
+        if components.iter().any(|c| {
             let s = c.as_os_str().to_string_lossy();
             s.starts_with('.') && s != "." && s != ".."
-        }) || path.components().any(|c| c.as_os_str() == "target")
-            || path.to_string_lossy().contains("ops/linters")
+        }) || components.iter().any(|c| c.as_os_str() == "target")
+            || in_ops_linters
         {
             continue;
         }
@@ -97,7 +101,7 @@ fn main() -> Result<()> {
                         let mut end_search = std::cmp::min(content.len(), start + 500);
                         // Ensure we slice at a valid char boundary
                         while !content.is_char_boundary(end_search) {
-                            end_search -= 1;
+                            end_search = end_search.saturating_sub(1);
                         }
                         let window = &content[start_search..end_search];
 

@@ -16,7 +16,7 @@ use ring::digest::{SHA256, digest};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt;
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, Notify};
 use tracing::{error, info, instrument, warn};
@@ -32,6 +32,29 @@ pub struct MiddlewareConfig {
     pub inflight_wait_timeout: Duration,
     pub redis_url: String,
     pub require_redis: bool,
+    pub quota: QuotaConfig,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct QuotaLayerConfig {
+    pub rate: f64,
+    pub capacity: f64,
+    pub cost: f64,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct TenantQuotaOverride {
+    pub system_hard_limit: Option<QuotaLayerConfig>,
+    pub tenant_budget: Option<QuotaLayerConfig>,
+    pub api_rate_limit: Option<QuotaLayerConfig>,
+}
+
+#[derive(Clone, Debug)]
+pub struct QuotaConfig {
+    pub system_hard_limit: QuotaLayerConfig,
+    pub tenant_budget: QuotaLayerConfig,
+    pub api_rate_limit: QuotaLayerConfig,
+    pub tenant_overrides: HashMap<String, TenantQuotaOverride>,
 }
 
 impl fmt::Debug for MiddlewareConfig {
@@ -44,6 +67,7 @@ impl fmt::Debug for MiddlewareConfig {
             .field("inflight_wait_timeout", &self.inflight_wait_timeout)
             .field("redis_url", &"<redacted>")
             .field("require_redis", &self.require_redis)
+            .field("quota", &self.quota)
             .finish()
     }
 }
@@ -94,6 +118,19 @@ impl Default for MiddlewareConfig {
             }
         }
 
+        fn get_env_f64(key: &str, default_val: f64) -> f64 {
+            match std::env::var(key) {
+                Ok(v) => match v.parse::<f64>() {
+                    Ok(s) => s,
+                    Err(_) => {
+                        tracing::warn!(key = %key, value = %v, "Invalid f64 env var, using default");
+                        default_val
+                    }
+                },
+                Err(_) => default_val,
+            }
+        }
+
         Self {
             idempotency_ttl: get_env_duration("IDEMPOTENCY_TTL_SECS", 24 * 60 * 60),
             action_ttl: get_env_duration("ACTION_TTL_SECS", 24 * 60 * 60),
@@ -102,6 +139,24 @@ impl Default for MiddlewareConfig {
             inflight_wait_timeout: get_env_duration("INFLIGHT_WAIT_TIMEOUT_SECS", 5),
             redis_url: get_env_string("REDIS_URL", "redis://127.0.0.1:6379"),
             require_redis: get_env_bool("REQUIRE_REDIS", true),
+            quota: QuotaConfig {
+                system_hard_limit: QuotaLayerConfig {
+                    rate: get_env_f64("QUOTA_SYSTEM_HARD_LIMIT_RATE", 1000.0),
+                    capacity: get_env_f64("QUOTA_SYSTEM_HARD_LIMIT_CAPACITY", 1000.0),
+                    cost: get_env_f64("QUOTA_SYSTEM_HARD_LIMIT_COST", 1.0),
+                },
+                tenant_budget: QuotaLayerConfig {
+                    rate: get_env_f64("QUOTA_TENANT_BUDGET_RATE", 1000.0),
+                    capacity: get_env_f64("QUOTA_TENANT_BUDGET_CAPACITY", 3000.0),
+                    cost: get_env_f64("QUOTA_TENANT_BUDGET_COST", 5.0),
+                },
+                api_rate_limit: QuotaLayerConfig {
+                    rate: get_env_f64("QUOTA_API_RATE_LIMIT_RATE", 16.666),
+                    capacity: get_env_f64("QUOTA_API_RATE_LIMIT_CAPACITY", 100.0),
+                    cost: get_env_f64("QUOTA_API_RATE_LIMIT_COST", 1.0),
+                },
+                tenant_overrides: HashMap::new(),
+            },
         }
     }
 }
@@ -284,11 +339,21 @@ impl IdempotencyStore for InMemoryIdempotencyStore {
 pub struct RedisIdempotencyStore {
     client: redis::Client,
     manager: redis::aio::ConnectionManager,
+    subscriptions: Arc<Mutex<HashMap<String, ChannelSubscriptionState>>>,
+}
+
+struct ChannelSubscriptionState {
+    waiters: Vec<Weak<Notify>>,
+    running: bool,
 }
 
 impl RedisIdempotencyStore {
     pub fn new(client: redis::Client, manager: redis::aio::ConnectionManager) -> Self {
-        Self { client, manager }
+        Self {
+            client,
+            manager,
+            subscriptions: Arc::new(Mutex::new(HashMap::new())),
+        }
     }
 
     fn format_key(key: &IdempotencyScopeKey) -> String {
@@ -325,6 +390,138 @@ impl RedisIdempotencyStore {
         let version = parts.next()?.parse::<u64>().ok()?;
         Some((owner_token, body_hash, version))
     }
+
+    fn notify_waiters_and_prune(waiters: &mut Vec<Weak<Notify>>) -> usize {
+        let mut alive = 0usize;
+        waiters.retain(|weak| {
+            if let Some(notify) = weak.upgrade() {
+                notify.notify_waiters();
+                alive += 1;
+                true
+            } else {
+                false
+            }
+        });
+        alive
+    }
+
+    fn prune_waiters(waiters: &mut Vec<Weak<Notify>>) -> usize {
+        let mut alive = 0usize;
+        waiters.retain(|weak| {
+            let keep = weak.strong_count() > 0;
+            if keep {
+                alive += 1;
+            }
+            keep
+        });
+        alive
+    }
+
+    async fn register_waiter(&self, channel: String) -> Arc<Notify> {
+        let notify = Arc::new(Notify::new());
+
+        let mut should_spawn = false;
+        {
+            let mut subscriptions = self.subscriptions.lock().await;
+            let state =
+                subscriptions
+                    .entry(channel.clone())
+                    .or_insert_with(|| ChannelSubscriptionState {
+                        waiters: Vec::new(),
+                        running: false,
+                    });
+            state.waiters.push(Arc::downgrade(&notify));
+            if !state.running {
+                state.running = true;
+                should_spawn = true;
+            }
+        }
+
+        if should_spawn {
+            let subscriptions = Arc::clone(&self.subscriptions);
+            let client = self.client.clone();
+            tokio::spawn(async move {
+                let mut pubsub = match client.get_async_pubsub().await {
+                    Ok(p) => p,
+                    Err(e) => {
+                        error!("Redis pubsub create error: {}", e);
+                        let mut lock = subscriptions.lock().await;
+                        if let Some(state) = lock.get_mut(&channel) {
+                            Self::notify_waiters_and_prune(&mut state.waiters);
+                            state.running = false;
+                        }
+                        return;
+                    }
+                };
+
+                if let Err(e) = pubsub.subscribe(&channel).await {
+                    error!("Redis pubsub subscribe error: {}", e);
+                    let mut lock = subscriptions.lock().await;
+                    if let Some(state) = lock.get_mut(&channel) {
+                        Self::notify_waiters_and_prune(&mut state.waiters);
+                        state.running = false;
+                    }
+                    return;
+                }
+
+                let mut stream = pubsub.on_message();
+                let mut poll_waiters_every = tokio::time::interval(Duration::from_secs(5));
+                poll_waiters_every.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+                loop {
+                    tokio::select! {
+                        _ = poll_waiters_every.tick() => {
+                            let has_waiters = {
+                                let mut lock = subscriptions.lock().await;
+                                if let Some(state) = lock.get_mut(&channel) {
+                                    Self::prune_waiters(&mut state.waiters) > 0
+                                } else {
+                                    false
+                                }
+                            };
+                            if !has_waiters {
+                                break;
+                            }
+                        }
+                        msg = futures_util::StreamExt::next(&mut stream) => {
+                            if msg.is_none() {
+                                break;
+                            }
+                            let has_waiters = {
+                                let mut lock = subscriptions.lock().await;
+                                if let Some(state) = lock.get_mut(&channel) {
+                                    Self::notify_waiters_and_prune(&mut state.waiters) > 0
+                                } else {
+                                    false
+                                }
+                            };
+                            if !has_waiters {
+                                break;
+                            }
+                        }
+                    }
+                }
+
+                drop(stream);
+                if let Err(e) = pubsub.unsubscribe(&channel).await {
+                    warn!("Redis pubsub unsubscribe error: {}", e);
+                }
+
+                let mut lock = subscriptions.lock().await;
+                let remove = if let Some(state) = lock.get_mut(&channel) {
+                    state.running = false;
+                    Self::prune_waiters(&mut state.waiters) == 0
+                } else {
+                    false
+                };
+                if remove {
+                    lock.remove(&channel);
+                }
+            });
+        }
+
+        notify
+    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -358,32 +555,8 @@ impl IdempotencyStore for RedisIdempotencyStore {
         match val {
             Some(s) if Self::parse_inflight_value(&s).is_some() => {
                 let (_, body_hash, _) = Self::parse_inflight_value(&s).expect("checked");
-                let notify = Arc::new(Notify::new());
-                let notify_clone = notify.clone();
                 let channel = Self::channel_name(&redis_key);
-                let timeout = Duration::from_secs(30);
-                let client = self.client.clone();
-                tokio::spawn(async move {
-                    let mut pubsub = match client.get_async_pubsub().await {
-                        Ok(p) => p,
-                        Err(e) => {
-                            error!("Redis pubsub create error: {}", e);
-                            notify_clone.notify_waiters();
-                            return;
-                        }
-                    };
-                    if let Err(e) = pubsub.subscribe(&channel).await {
-                        error!("Redis pubsub subscribe error: {}", e);
-                        notify_clone.notify_waiters();
-                        return;
-                    }
-
-                    let mut stream = pubsub.on_message();
-                    let _ =
-                        tokio::time::timeout(timeout, futures_util::StreamExt::next(&mut stream))
-                            .await;
-                    notify_clone.notify_waiters();
-                });
+                let notify = self.register_waiter(channel).await;
 
                 Ok(Some(IdempotencyEntry::InFlight {
                     body_hash,
@@ -393,11 +566,24 @@ impl IdempotencyStore for RedisIdempotencyStore {
             }
             Some(s) => {
                 if let Ok(dto) = serde_json::from_str::<RedisIdempotencyRecordDto>(&s) {
-                    let body_bytes = BASE64_STANDARD.decode(&dto.body).unwrap_or_default();
+                    let body_bytes = match BASE64_STANDARD.decode(&dto.body) {
+                        Ok(bytes) => bytes,
+                        Err(_) => {
+                            warn!("Invalid Redis idempotency payload for key {}", redis_key);
+                            return Ok(None);
+                        }
+                    };
+                    let status = match StatusCode::from_u16(dto.status) {
+                        Ok(status) => status,
+                        Err(_) => {
+                            warn!("Invalid Redis idempotency payload for key {}", redis_key);
+                            return Ok(None);
+                        }
+                    };
                     Ok(Some(IdempotencyEntry::Completed(IdempotencyRecord {
                         body_hash: dto.body_hash,
                         action_id: dto.action_id,
-                        status: StatusCode::from_u16(dto.status).unwrap_or(StatusCode::OK),
+                        status,
                         headers: dto.headers,
                         body: body_bytes,
                         expires_at: Instant::now() + Duration::from_secs(3600),
@@ -799,6 +985,7 @@ impl QuotaStore for InMemoryQuotaStore {
         _tenant_id: &kernel_core::auth::TenantId,
         _layer: QuotaLayer,
     ) -> Result<(), QuotaViolation> {
+        // Intentional no-op fallback when Redis quota enforcement is disabled/unavailable.
         Ok(())
     }
 }
@@ -807,10 +994,11 @@ pub struct RedisQuotaStore {
     manager: redis::aio::ConnectionManager,
     script: redis::Script,
     script_multi: redis::Script,
+    quota: QuotaConfig,
 }
 
 impl RedisQuotaStore {
-    pub fn new(manager: redis::aio::ConnectionManager) -> Self {
+    pub fn new(manager: redis::aio::ConnectionManager, quota: QuotaConfig) -> Self {
         let script = redis::Script::new(
             r#"
             local key = KEYS[1]
@@ -851,10 +1039,10 @@ impl RedisQuotaStore {
             local new_tokens = {}
 
             for i = 1, n do
-                local key = ARGV[idx]
-                local rate = tonumber(ARGV[idx + 1])
-                local capacity = tonumber(ARGV[idx + 2])
-                local cost = tonumber(ARGV[idx + 3])
+                local key = KEYS[i]
+                local rate = tonumber(ARGV[idx])
+                local capacity = tonumber(ARGV[idx + 1])
+                local cost = tonumber(ARGV[idx + 2])
 
                 local tokens = tonumber(redis.call("HGET", key, "tokens"))
                 local last_refill = tonumber(redis.call("HGET", key, "last_refill"))
@@ -872,7 +1060,7 @@ impl RedisQuotaStore {
 
                 keys[i] = key
                 new_tokens[i] = filled - cost
-                idx = idx + 4
+                idx = idx + 3
             end
 
             for i = 1, n do
@@ -887,27 +1075,46 @@ impl RedisQuotaStore {
             manager,
             script,
             script_multi,
+            quota,
         }
     }
 
     fn layer_config(
+        &self,
         tenant_id: &kernel_core::auth::TenantId,
         layer: QuotaLayer,
     ) -> Option<(String, f64, f64, f64)> {
+        let tenant_id_str = tenant_id.to_string();
+        let tenant_override = self.quota.tenant_overrides.get(&tenant_id_str);
         match layer {
-            QuotaLayer::SystemHardLimit => Some(("quota:system".to_string(), 1000.0, 1000.0, 1.0)),
-            QuotaLayer::TenantBudget => Some((
-                format!("quota:tenant:{}:cpu", tenant_id),
-                1000.0,
-                3000.0,
-                5.0,
-            )),
-            QuotaLayer::ApiRateLimit => Some((
-                format!("quota:tenant:{}:api", tenant_id),
-                16.666,
-                100.0,
-                1.0,
-            )),
+            QuotaLayer::SystemHardLimit => {
+                let q = tenant_override
+                    .and_then(|o| o.system_hard_limit)
+                    .unwrap_or(self.quota.system_hard_limit);
+                Some(("quota:{global}:system".to_string(), q.rate, q.capacity, q.cost))
+            }
+            QuotaLayer::TenantBudget => {
+                let q = tenant_override
+                    .and_then(|o| o.tenant_budget)
+                    .unwrap_or(self.quota.tenant_budget);
+                Some((
+                    format!("quota:{{global}}:tenant:{}:cpu", tenant_id),
+                    q.rate,
+                    q.capacity,
+                    q.cost,
+                ))
+            }
+            QuotaLayer::ApiRateLimit => {
+                let q = tenant_override
+                    .and_then(|o| o.api_rate_limit)
+                    .unwrap_or(self.quota.api_rate_limit);
+                Some((
+                    format!("quota:{{global}}:tenant:{}:api", tenant_id),
+                    q.rate,
+                    q.capacity,
+                    q.cost,
+                ))
+            }
             QuotaLayer::CircuitBreaker => None,
         }
     }
@@ -920,7 +1127,7 @@ impl QuotaStore for RedisQuotaStore {
         tenant_id: &kernel_core::auth::TenantId,
         layer: QuotaLayer,
     ) -> Result<(), QuotaViolation> {
-        let Some((key, rate, capacity, cost)) = Self::layer_config(tenant_id, layer) else {
+        let Some((key, rate, capacity, cost)) = self.layer_config(tenant_id, layer) else {
             return Ok(());
         };
 
@@ -970,7 +1177,8 @@ impl QuotaStore for RedisQuotaStore {
         let checks: Vec<(QuotaLayer, String, f64, f64, f64)> = layers
             .iter()
             .filter_map(|layer| {
-                Self::layer_config(tenant_id, *layer).map(|(k, r, c, cost)| (*layer, k, r, c, cost))
+                self.layer_config(tenant_id, *layer)
+                    .map(|(k, r, c, cost)| (*layer, k, r, c, cost))
             })
             .collect();
 
@@ -987,7 +1195,7 @@ impl QuotaStore for RedisQuotaStore {
         let mut inv = self.script_multi.prepare_invoke();
         inv.arg(now).arg(checks.len() as i64);
         for (_, key, rate, capacity, cost) in &checks {
-            inv.arg(key).arg(rate).arg(capacity).arg(cost);
+            inv.key(key).arg(rate).arg(capacity).arg(cost);
         }
 
         let res: Result<(i32, i64, f64), _> = inv.invoke_async(&mut conn).await;
@@ -1036,15 +1244,19 @@ impl MiddlewareState {
     }
 
     pub async fn new_with_redis(config: MiddlewareConfig) -> Result<Self, String> {
+        let redacted_redis_url = redact_redis_url(&config.redis_url);
         if !config.redis_url.starts_with("redis://") && !config.redis_url.starts_with("rediss://") {
             let msg = format!(
                 "REDIS_URL must use redis:// or rediss:// scheme, got: {}",
-                config.redis_url
+                redacted_redis_url
             );
             if config.require_redis {
                 return Err(msg);
             }
             warn!("{}", msg);
+            warn!(
+                "InMemoryQuotaStore selected — quota enforcement disabled; SystemHardLimit and other layers will be bypassed"
+            );
             return Ok(Self::with_store(
                 config,
                 Arc::new(InMemoryIdempotencyStore::new()),
@@ -1056,18 +1268,28 @@ impl MiddlewareState {
         let client = redis::Client::open(config.redis_url.clone());
         match client {
             Ok(c) => match c.get_connection_manager().await {
-                Ok(manager) => Ok(Self::with_store(
-                    config,
-                    Arc::new(RedisIdempotencyStore::new(c, manager.clone())),
-                    Arc::new(RedisActionStore::new(manager.clone())),
-                    Arc::new(RedisQuotaStore::new(manager.clone())),
-                )),
+                Ok(manager) => {
+                    let quota = config.quota.clone();
+                    Ok(Self::with_store(
+                        config,
+                        Arc::new(RedisIdempotencyStore::new(c, manager.clone())),
+                        Arc::new(RedisActionStore::new(manager.clone())),
+                        Arc::new(RedisQuotaStore::new(manager.clone(), quota)),
+                    ))
+                }
                 Err(e) => {
-                    let msg = format!("Failed to create Redis connection manager: {e}");
+                    let sanitized_error = sanitize_redis_error(&e.to_string(), &config.redis_url);
+                    let msg = format!(
+                        "Failed to create Redis connection manager for {}: {}",
+                        redacted_redis_url, sanitized_error
+                    );
                     if config.require_redis {
                         return Err(msg);
                     }
                     error!("{msg}");
+                    warn!(
+                        "InMemoryQuotaStore selected — quota enforcement disabled; SystemHardLimit and other layers will be bypassed"
+                    );
                     Ok(Self::with_store(
                         config,
                         Arc::new(InMemoryIdempotencyStore::new()),
@@ -1077,11 +1299,18 @@ impl MiddlewareState {
                 }
             },
             Err(e) => {
-                let msg = format!("Invalid Redis URL: {e}");
+                let sanitized_error = sanitize_redis_error(&e.to_string(), &config.redis_url);
+                let msg = format!(
+                    "Invalid Redis URL ({}): {}",
+                    redacted_redis_url, sanitized_error
+                );
                 if config.require_redis {
                     return Err(msg);
                 }
                 error!("{msg}");
+                warn!(
+                    "InMemoryQuotaStore selected — quota enforcement disabled; SystemHardLimit and other layers will be bypassed"
+                );
                 Ok(Self::with_store(
                     config,
                     Arc::new(InMemoryIdempotencyStore::new()),
@@ -1119,6 +1348,21 @@ impl MiddlewareState {
             }
         })
     }
+}
+
+fn redact_redis_url(redis_url: &str) -> String {
+    if let Some((scheme, remainder)) = redis_url.split_once("://") {
+        let after_auth = remainder.rsplit_once('@').map(|(_, host)| host).unwrap_or(remainder);
+        let host_port = after_auth.split('/').next().unwrap_or(after_auth);
+        if !host_port.is_empty() {
+            return format!("{scheme}://{host_port}");
+        }
+    }
+    "<redacted-redis-url>".to_string()
+}
+
+fn sanitize_redis_error(error_text: &str, redis_url: &str) -> String {
+    error_text.replace(redis_url, &redact_redis_url(redis_url))
 }
 
 // ... rest of the file (record_action, get_action, middlewares) ...
