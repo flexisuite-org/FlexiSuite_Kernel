@@ -52,6 +52,16 @@ impl RedisProducer {
         let num = hasher.finish();
         num % SHARD_COUNT
     }
+
+    fn validate_stream_base(stream_base: &str) -> Result<(), EventError> {
+        if stream_base.is_empty() || stream_base.contains(':') {
+            return Err(EventError::Producer(format!(
+                "invalid stream_base: '{}'. Must not be empty or contain ':'",
+                stream_base
+            )));
+        }
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -62,6 +72,8 @@ impl ReliableProducer for RedisProducer {
         stream_base: &str,
         event: EventEnvelope,
     ) -> Result<PublishAck, EventError> {
+        Self::validate_stream_base(stream_base)?;
+
         let shard = Self::calculate_shard(&event.order_mode.shard_input(&event.tenant_id));
         // Ensure tenant isolation in stream namespace
         let stream_key = format!("{}:{}:{}", event.tenant_id, stream_base, shard);
@@ -124,5 +136,19 @@ mod tests {
             shards.insert(RedisProducer::calculate_shard(&format!("key-{}", i)));
         }
         assert!(shards.len() > 40);
+    }
+
+    #[test]
+    fn test_validate_stream_base() {
+        // Valid cases
+        assert!(RedisProducer::validate_stream_base("events").is_ok());
+        assert!(RedisProducer::validate_stream_base("my-stream").is_ok());
+        assert!(RedisProducer::validate_stream_base("valid_underscore").is_ok());
+
+        // Invalid cases
+        assert!(RedisProducer::validate_stream_base("").is_err());
+        assert!(RedisProducer::validate_stream_base("invalid:colon").is_err());
+        assert!(RedisProducer::validate_stream_base("colon:at:start").is_err());
+        assert!(RedisProducer::validate_stream_base("end:").is_err());
     }
 }
