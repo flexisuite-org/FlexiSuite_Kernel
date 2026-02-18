@@ -1914,7 +1914,8 @@ fn response_not_cacheable_for_replay(headers: &HeaderMap, max_size: usize) -> bo
 pub fn violation_to_status(v: &QuotaViolation) -> StatusCode {
     match v.layer {
         QuotaLayer::SystemHardLimit => StatusCode::SERVICE_UNAVAILABLE,
-        _ => StatusCode::TOO_MANY_REQUESTS,
+        QuotaLayer::CircuitBreaker => StatusCode::SERVICE_UNAVAILABLE,
+        QuotaLayer::TenantBudget | QuotaLayer::ApiRateLimit => StatusCode::TOO_MANY_REQUESTS,
     }
 }
 

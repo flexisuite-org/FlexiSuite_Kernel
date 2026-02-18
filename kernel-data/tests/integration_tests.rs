@@ -8,6 +8,7 @@ use sea_orm::{
     ActiveValue, ConnectionTrait, Database, DatabaseConnection, DbBackend, Statement,
     TransactionTrait,
 };
+use std::sync::OnceLock;
 use testcontainers::{RunnableImage, clients};
 use testcontainers_modules::postgres::Postgres;
 use uuid::Uuid;
@@ -16,8 +17,13 @@ const TEST_HMAC_SECRET: &str = "test_secret_for_integration_tests_shared";
 
 type PostgresNode = testcontainers::Container<'static, Postgres>;
 
+fn get_docker_client() -> &'static clients::Cli {
+    static DOCKER: OnceLock<&'static clients::Cli> = OnceLock::new();
+    DOCKER.get_or_init(|| Box::leak(Box::new(clients::Cli::default())))
+}
+
 async fn setup_test_db() -> (DatabaseConnection, PostgresNode) {
-    let docker = Box::leak(Box::new(clients::Cli::default()));
+    let docker = get_docker_client();
     let image = RunnableImage::from(Postgres::default()).with_tag("15-alpine");
     let node = docker.run(image);
     let port = node.get_host_port_ipv4(5432);
@@ -58,56 +64,8 @@ async fn setup_test_db() -> (DatabaseConnection, PostgresNode) {
 #[tokio::test(flavor = "multi_thread")]
 #[ignore] // Requires Docker
 async fn test_tenant_isolation_rls() {
-    let docker = clients::Cli::default();
-    let image = RunnableImage::from(Postgres::default()).with_tag("15-alpine");
-    let node = docker.run(image);
-    let port = node.get_host_port_ipv4(5432);
-    let connection_string = format!("postgres://postgres:postgres@127.0.0.1:{}/postgres", port);
+    let (db, _node) = setup_test_db().await;
 
-    // 1. Connect
-    let db = Database::connect(&connection_string)
-        .await
-        .expect("Failed to connect to DB");
-
-    // Initialize HMAC Secret for tests (using deterministic secret specific to tests)
-    if let Err(e) = kernel_data::init_hmac_secret_for_test(TEST_HMAC_SECRET) {
-        // Assert it's the expected "already initialized" error if it fails
-        assert!(
-            e.contains("already initialized"),
-            "Unexpected error from init_hmac_secret: {}",
-            e
-        );
-    }
-
-    // Verify Role Exists (Grant statements in migration depend on it)
-    db.execute_unprepared("DO $$ BEGIN IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = 'flexi') THEN CREATE ROLE flexi; END IF; END $$;").await.expect("Failed to create role flexi");
-
-    // 2. Run Migrations
-    migration::Migrator::up(&db, None)
-        .await
-        .expect("Failed to run migrations");
-
-    // 3. Configure Database Secret
-    // We must set the secret in the database so the real `authorize_tenant` can verify the signature.
-    // We use ALTER ROLE ... SET so it persists for all future sessions in this test instance.
-    // NOTE: TEST_HMAC_SECRET is a compile-time constant (see const definition), so direct interpolation
-    // is safe here. Parameterized queries (binding) are not supported for utility statements like 
-    // ALTER ROLE in Postgres, so we cannot use $1 arguments. 
-    // Verified safe as per audit_tests.rs patterns.
-    db.execute_unprepared(&format!(
-        "ALTER ROLE postgres SET flexi.hmac_secret = '{}'",
-        TEST_HMAC_SECRET
-    ))
-    .await
-    .expect("Failed to set flexi.hmac_secret for role");
-
-    // 4. Reconnect to ensure all pool connections pick up the new GUC
-    drop(db);
-    let db = Database::connect(&connection_string)
-        .await
-        .expect("Failed to reconnect to DB");
-
-    // 5. Test Logic
     use kernel_core::auth::{TenantId, UserId};
     let tenant_a = TenantContext::new(
         TenantId::new("tenant-a").unwrap(),
