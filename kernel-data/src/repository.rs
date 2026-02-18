@@ -152,7 +152,7 @@ impl TenantRepository for TenantScoped<RawConnection> {
         // Since we have a composite primary key (id, tenant_id), we must provide both.
         // RLS will also filter this, but SeaORM requires both for the PK lookup.
         let result =
-            EntityRecord::find_by_id((id.to_string(), self.tenant_id.as_str().to_string()))
+            EntityRecord::find_by_id((id.to_string(), self.tenant_id.to_string()))
                 .one(&self.inner.txn)
                 .await
                 .map_err(KernelError::db_error)?;
