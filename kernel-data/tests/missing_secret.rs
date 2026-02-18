@@ -1,12 +1,22 @@
-use kernel_core::auth::{TenantContext, TenantId, UserId};
+//! This test intentionally performs raw/unscoped DB setup and migrations
+//! for testing only and is exempt from the rule "Every database access
+//! MUST go through TenantContext".
+//!
+//! This is a test-only exception and should not be copied into production code.
+//!
+//! Relevant symbols: [`TenantContext`], [`with_tenant_tx`], [`TestAuth`], [`migration::Migrator`].
+
+use kernel_data::auth_context::{TenantContext, TenantId, UserId};
+mod common;
+use common::auth::TestAuth;
 use kernel_data::connection::with_tenant_tx;
-use sea_orm::Database;
+use migration::MigratorTrait;
+use sea_orm::{ConnectionTrait, Database};
 use testcontainers::{RunnableImage, clients};
 use testcontainers_modules::postgres::Postgres;
 
 #[tokio::test(flavor = "multi_thread")]
-async fn test_transaction_fails_without_secret_init() {
-    // 1. Setup DB (Needed because with_tenant_tx starts a transaction before checking secret)
+async fn test_auth_failures() {
     let docker = clients::Cli::default();
     let image = RunnableImage::from(Postgres::default()).with_tag("15-alpine");
     let node = docker.run(image);
@@ -17,22 +27,78 @@ async fn test_transaction_fails_without_secret_init() {
         .await
         .expect("Failed to connect to DB");
 
-    // 2. Prepare Context
-    // Note: We intentionally DO NOT call init_hmac_secret_for_test here.
+    // Create Role
+    db.execute_unprepared("DO $$ BEGIN IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = 'flexi') THEN CREATE ROLE flexi; END IF; END $$;").await.unwrap();
+
+    // Run Migrations (creates key table and authorized_tenant function)
+    migration::Migrator::up(&db, None)
+        .await
+        .expect("Failed to run migrations");
+
+    // Set Internal Secret
+    db.execute_unprepared("ALTER ROLE postgres SET flexi.hmac_secret = 'internal-secret'")
+        .await
+        .unwrap();
+
+    // Reconnect
+    drop(db);
+    let db = Database::connect(&connection_string)
+        .await
+        .expect("Failed to reconnect");
+
+    // Init Keys
+    TestAuth::init_keys(&db).await.expect("Failed to init keys");
 
     let tenant_id = TenantId::new("tenant-x").unwrap();
-    let ctx = TenantContext::new(tenant_id, Some(UserId::new("user-1").unwrap()));
+    let ctx = TenantContext::new(tenant_id.clone(), Some(UserId::new("user-1").unwrap()));
 
-    // 3. Call with_tenant_tx
-    let res = with_tenant_tx(&db, &ctx, |_| Box::pin(async { Ok(()) })).await;
+    // 1. Test: Invalid Token Format
+    let res = with_tenant_tx(&db, &ctx, "invalid-token", |_| Box::pin(async { Ok(()) })).await;
+    assert!(res.is_err(), "Should fail with invalid token format");
 
-    // 4. Verification
-    assert!(res.is_err(), "Should fail when HMAC secret is missing");
-    let err = res.unwrap_err();
-    let msg = err.to_string();
+    // 2. Test: Token signed with unknown Key ID
+    let current_ts = chrono::Utc::now().timestamp();
+    let token = format!("v2:unknown-kid:{current_ts}:nonce:tenant-x:sig");
+    let res = with_tenant_tx(&db, &ctx, &token, |_| Box::pin(async { Ok(()) })).await;
+    assert!(res.is_err(), "Should fail with unknown kid");
+
+    // 3. Test: Valid format, Invalid Signature
+    // Generate a valid-ish token
+    let real_token = TestAuth::generate_tenant_token(&db, &tenant_id)
+        .await
+        .unwrap();
+    // Tamper with signature (last part)
+    let parts: Vec<&str> = real_token.split(':').collect();
+    let tampered_token = format!(
+        "{}:{}:{}:{}:{}:bad_sig",
+        parts[0], parts[1], parts[2], parts[3], parts[4]
+    );
+
+    let res = with_tenant_tx(&db, &ctx, &tampered_token, |_| Box::pin(async { Ok(()) })).await;
+    assert!(res.is_err(), "Should fail with invalid signature");
+
+    // 4. Test: Missing Internal Secret
+    // Unset secret
+    db.execute_unprepared("ALTER ROLE postgres RESET flexi.hmac_secret")
+        .await
+        .unwrap();
+
+    // Reconnect
+    drop(db);
+    let db = Database::connect(&connection_string)
+        .await
+        .expect("Reconnect");
+
+    let token = TestAuth::generate_tenant_token(&db, &tenant_id)
+        .await
+        .unwrap();
+
+    let res = with_tenant_tx(&db, &ctx, &token, |_| Box::pin(async { Ok(()) })).await;
+    assert!(res.is_err());
+    let err = res.unwrap_err().to_string();
     assert!(
-        msg.contains("HMAC secret not initialized"),
-        "Error message should indicate missing secret, got: {}",
-        msg
+        err.contains("Internal HMAC secret not set"),
+        "Should fail due to missing internal secret: {}",
+        err
     );
 }
