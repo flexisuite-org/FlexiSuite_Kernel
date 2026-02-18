@@ -8,8 +8,7 @@ use async_trait::async_trait;
 use kernel_core::kernel::{self, KernelError};
 use sea_orm::sea_query::{Expr, OnConflict};
 use sea_orm::{
-    ActiveModelTrait, ActiveValue, ColumnTrait, EntityTrait, QueryFilter,
-    QueryOrder, QuerySelect,
+    ActiveModelTrait, ActiveValue, ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect,
 };
 use uuid::Uuid;
 
@@ -29,7 +28,11 @@ pub trait TenantRepository: private::Sealed + Send + Sync {
         active_model: entity_record::ActiveModel,
     ) -> kernel::Result<entity_record::Model>;
     async fn get_entity(&self, id: &str) -> kernel::Result<Option<entity_record::Model>>;
-    async fn update_entity(&self, id: &str, active_model: entity_record::ActiveModel) -> kernel::Result<entity_record::Model>;
+    async fn update_entity(
+        &self,
+        id: &str,
+        active_model: entity_record::ActiveModel,
+    ) -> kernel::Result<entity_record::Model>;
     async fn delete_entity(&self, id: &str) -> kernel::Result<()>;
 
     // Diagnostic methods
@@ -61,10 +64,8 @@ pub trait TenantRepository: private::Sealed + Send + Sync {
     ) -> kernel::Result<Vec<entity_history::Model>>;
     async fn mark_entity_history_archived(&self, id: String) -> kernel::Result<()>;
     async fn mark_entity_histories_archived(&self, ids: Vec<String>) -> kernel::Result<()>;
-    async fn find_unarchived_audit_logs(
-        &self,
-        limit: u64,
-    ) -> kernel::Result<Vec<audit_log::Model>>;
+    async fn find_unarchived_audit_logs(&self, limit: u64)
+    -> kernel::Result<Vec<audit_log::Model>>;
     async fn mark_audit_log_archived(&self, id: String) -> kernel::Result<()>;
     async fn mark_audit_logs_archived(&self, ids: Vec<String>) -> kernel::Result<()>;
 }
@@ -147,7 +148,6 @@ impl TenantRepository for TenantScoped<RawConnection> {
         Ok(result)
     }
 
-
     async fn get_entity(&self, id: &str) -> kernel::Result<Option<entity_record::Model>> {
         // Since we have a composite primary key (id, tenant_id), we must provide both.
         // RLS will also filter this, but SeaORM requires both for the PK lookup.
@@ -191,21 +191,87 @@ impl TenantRepository for TenantScoped<RawConnection> {
         Ok(result)
     }
 
-    async fn update_entity(&self, id: &str, mut active_model: entity_record::ActiveModel) -> kernel::Result<entity_record::Model> {
-        // Enforce tenant scoping by overriding the tenant_id field
-        active_model.tenant_id = sea_orm::ActiveValue::Set(self.tenant_id.to_string());
-        // Ensure ID matches
-        active_model.id = sea_orm::ActiveValue::Set(id.to_string());
+    async fn update_entity(
+        &self,
+        id: &str,
+        mut active_model: entity_record::ActiveModel,
+    ) -> kernel::Result<entity_record::Model> {
+        // Enforce tenant scoping
+        active_model.tenant_id = ActiveValue::Unchanged(self.tenant_id.to_string());
 
-        let result = active_model.update(&self.inner.txn).await.map_err(KernelError::db_error)?;
+        match active_model.id.clone() {
+            ActiveValue::Set(model_id) | ActiveValue::Unchanged(model_id) if model_id != id => {
+                return Err(KernelError::ValidationError(format!(
+                    "entity id mismatch: path={id}, payload={model_id}"
+                )));
+            }
+            _ => {}
+        }
+        active_model.id = ActiveValue::Unchanged(id.to_string());
+
+        let existing = EntityRecord::find_by_id((id.to_string(), self.tenant_id.to_string()))
+            .one(&self.inner.txn)
+            .await
+            .map_err(KernelError::db_error)?
+            .ok_or_else(|| KernelError::ValidationError("Entity not found".into()))?;
+
+        match active_model.version.clone() {
+            ActiveValue::Set(v) | ActiveValue::Unchanged(v) if v != existing.version => {
+                return Err(KernelError::ValidationError(format!(
+                    "version conflict: expected {}, got {}",
+                    existing.version, v
+                )));
+            }
+            _ => {}
+        }
+
+        let next_version = existing.version + 1;
+        active_model.version = ActiveValue::Set(next_version);
+        active_model.updated_at = ActiveValue::Set(chrono::Utc::now().into());
+
+        let user_id_str = history_actor_id(self.tenant_id.as_str(), self.user_id.as_ref());
+
+        // 1. Update Entity
+        let result = active_model
+            .update(&self.inner.txn)
+            .await
+            .map_err(KernelError::db_error)?;
+
+        let patch = json_patch::diff(&existing.content, &result.content);
+        let patch_json = serde_json::to_value(&patch).map_err(|e| {
+            KernelError::ValidationError(format!("failed to serialize content patch: {e}"))
+        })?;
+
+        // 2. Insert History
+        let history = entity_history::ActiveModel {
+            id: ActiveValue::Set(Uuid::now_v7().to_string()),
+            tenant_id: ActiveValue::Set(self.tenant_id.to_string()),
+            entity_id: ActiveValue::Set(id.to_string()),
+            entity_type: ActiveValue::Set(result.entity_type.clone()),
+            change_type: ActiveValue::Set("UPDATE".to_string()),
+            version: ActiveValue::Set(next_version),
+            diff: ActiveValue::Set(patch_json),
+            created_at: ActiveValue::Set(chrono::Utc::now().into()),
+            created_by: ActiveValue::Set(user_id_str),
+            archived_at: ActiveValue::NotSet,
+        };
+        history
+            .insert(&self.inner.txn)
+            .await
+            .map_err(KernelError::db_error)?;
+
         Ok(result)
     }
 
     async fn delete_entity(&self, id: &str) -> kernel::Result<()> {
-        entity_record::Entity::delete_by_id((id.to_string(), self.tenant_id.to_string()))
-            .exec(&self.inner.txn)
-            .await
-            .map_err(KernelError::db_error)?;
+        let delete_result =
+            entity_record::Entity::delete_by_id((id.to_string(), self.tenant_id.to_string()))
+                .exec(&self.inner.txn)
+                .await
+                .map_err(KernelError::db_error)?;
+        if delete_result.rows_affected == 0 {
+            return Err(KernelError::ValidationError("Entity not found".into()));
+        }
         Ok(())
     }
 

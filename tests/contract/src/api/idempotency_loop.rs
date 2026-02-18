@@ -5,12 +5,11 @@ use axum::{
     middleware,
     routing::post,
 };
-use tower::ServiceExt; // for oneshot
-use kernel_api::middleware::{MiddlewareConfig, MiddlewareState, idempotency_middleware};
 use kernel_api::auth::{TenantContext, TenantId, UserId};
+use kernel_api::middleware::{MiddlewareConfig, MiddlewareState, idempotency_middleware};
 use std::time::Duration;
 use tokio::task::JoinSet;
-
+use tower::ServiceExt; // for oneshot
 
 #[tokio::test]
 async fn test_idempotency_loop_limit() {
@@ -38,8 +37,8 @@ async fn test_idempotency_loop_limit() {
         .layer(Extension(state));
 
     let mut set = JoinSet::new();
-    let num_requests = 20; 
-    
+    let num_requests = 20;
+
     let tenant_ctx = TenantContext::new(
         TenantId::new("tenant-1").unwrap(),
         Some(UserId::new("user-1").unwrap()),
