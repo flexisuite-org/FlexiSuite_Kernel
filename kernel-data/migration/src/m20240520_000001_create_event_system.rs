@@ -63,6 +63,7 @@ impl MigrationTrait for Migration {
             CREATE TABLE IF NOT EXISTS flexi.outbox (
                 event_id UUID NOT NULL,
                 tenant_id TEXT NOT NULL,
+                event_type TEXT NOT NULL,
                 order_mode TEXT NOT NULL,
                 entity_id UUID,
                 entity_seq BIGINT,

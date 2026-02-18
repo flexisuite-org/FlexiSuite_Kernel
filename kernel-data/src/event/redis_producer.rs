@@ -53,7 +53,8 @@ impl ReliableProducer for RedisProducer {
         };
 
         let shard = Self::calculate_shard(&key_str);
-        let stream_key = format!("{}:{}", stream_base, shard);
+        // Ensure tenant isolation in stream namespace
+        let stream_key = format!("{}:{}:{}", event.tenant_id, stream_base, shard);
 
         let payload_json = serde_json::to_string(&event).map_err(EventError::Serialization)?;
 
