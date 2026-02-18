@@ -97,6 +97,10 @@ static PASETO_PUBLIC_KEY: OnceLock<Vec<u8>> = OnceLock::new();
 pub fn init_auth_config() -> Result<(), String> {
     let key = std::env::var("FLEXI_PASETO_V4_PUBLIC_KEY_B64URL")
         .map_err(|_| "FLEXI_PASETO_V4_PUBLIC_KEY_B64URL is not set".to_string())?;
+    init_auth_config_with_public_key_b64url(&key)
+}
+
+pub fn init_auth_config_with_public_key_b64url(key: &str) -> Result<(), String> {
     let decoded = URL_SAFE_NO_PAD.decode(key).map_err(|_| {
         "FLEXI_PASETO_V4_PUBLIC_KEY_B64URL must be base64url (no padding)".to_string()
     })?;
