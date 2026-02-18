@@ -1940,9 +1940,15 @@ pub fn violation_to_response(v: &QuotaViolation) -> Response {
     #[cfg(any(test, feature = "test-utils"))]
     {
         // For tests, we might want to inspect specific violation details via headers
+        let violation_type = match v.layer {
+            QuotaLayer::SystemHardLimit => "system_hard_limit",
+            QuotaLayer::CircuitBreaker => "circuit_breaker",
+            QuotaLayer::TenantBudget => "tenant_budget",
+            QuotaLayer::ApiRateLimit => "api_rate_limit",
+        };
         headers.insert(
             "X-Violation-Type",
-            HeaderValue::from_str(&format!("{:?}", v)).unwrap_or(HeaderValue::from_static("unknown")),
+            HeaderValue::from_str(violation_type).unwrap_or(HeaderValue::from_static("unknown")),
         );
     }
 

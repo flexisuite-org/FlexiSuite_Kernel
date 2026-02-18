@@ -275,6 +275,7 @@ impl TenantRepository for TenantScoped<RawConnection> {
         let user_id_str = history_actor_id(self.tenant_id.as_str(), self.user_id.as_ref());
 
         let existing = EntityRecord::find_by_id((id.to_string(), self.tenant_id.to_string()))
+            .lock_exclusive()
             .one(&self.inner.txn)
             .await
             .map_err(KernelError::db_error)?
