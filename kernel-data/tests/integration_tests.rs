@@ -47,12 +47,13 @@ async fn setup_test_db() -> (DatabaseConnection, PostgresNode) {
     migration::Migrator::up(&db, None)
         .await
         .expect("Failed to run migrations");
-    db.execute_unprepared(&format!(
-        "ALTER ROLE postgres SET flexi.hmac_secret = '{}'",
-        TEST_HMAC_SECRET
+    db.execute(Statement::from_sql_and_values(
+        DbBackend::Postgres,
+        "SELECT set_config('flexi.hmac_secret', $1, false)",
+        [TEST_HMAC_SECRET.into()],
     ))
     .await
-    .expect("Failed to set flexi.hmac_secret for role");
+    .expect("Failed to set flexi.hmac_secret for session");
 
     drop(db);
     let db = Database::connect(&connection_string)
