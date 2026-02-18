@@ -66,6 +66,11 @@ name    = "tracing"
 version = "=0.1.43"
 reason  = "Pinned to avoid 0.1.44 binary-size regression; tracked in GH#25 / upstream tokio-rs/tracing#3455"
 
+[[bans.deny]]
+name    = "tracing"
+version = ">=0.1.44"
+reason  = "Explicitly deny tracing releases newer than the pinned 0.1.43 until tokio-rs/tracing#3455 is resolved and GH#25 is closed"
+
 # ---------------------------------------------------------------------------
 # [sources] — Allowed crate sources
 # ---------------------------------------------------------------------------
