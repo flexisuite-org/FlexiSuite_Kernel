@@ -2,7 +2,7 @@ use anyhow::Result;
 use clap::Parser;
 use regex::Regex;
 use std::fs;
-use std::path::Path;
+use std::path::{Component, Path};
 use walkdir::WalkDir;
 
 #[derive(Parser, Debug)]
@@ -27,7 +27,7 @@ fn main() -> Result<()> {
     let re_security_definer = Regex::new(r"(?i)SECURITY\s+DEFINER").unwrap();
     // Allow variations in spacing and newlines
     let re_search_path =
-        Regex::new(r"(?i)SET\s+search_path\s*=\s*flexi\s*,\s*pg_catalog\s*,\s*pg_temp").unwrap();
+        Regex::new(r"(?i)SET\s+(?:(?:SESSION|LOCAL)\s+)?search_path\s*(?:=|TO)\s*flexi\s*,\s*pg_catalog\s*,\s*pg_temp").unwrap();
     // Use (?s) to allow '.' to match newlines for multi-line REVOKE statements
     let re_revoke = Regex::new(r"(?si)REVOKE\s+.*?FROM\s+PUBLIC").unwrap();
     let re_kernel_mode = Regex::new(r"(?i)flexi\.kernel_mode").unwrap();
@@ -36,14 +36,18 @@ fn main() -> Result<()> {
 
     for entry in WalkDir::new(root).into_iter().filter_map(|e| e.ok()) {
         let path = entry.path();
+        let components: Vec<Component<'_>> = path.components().collect();
+        let in_ops_linters = components
+            .windows(2)
+            .any(|w| w[0].as_os_str() == "ops" && w[1].as_os_str() == "linters");
 
         // Skip hidden directories, target directory, and linters source
         // We must check that the component is not strictly "." or ".."
-        if path.components().any(|c| {
+        if components.iter().any(|c| {
             let s = c.as_os_str().to_string_lossy();
             s.starts_with('.') && s != "." && s != ".."
-        }) || path.components().any(|c| c.as_os_str() == "target")
-            || path.starts_with(Path::new("ops").join("linters"))
+        }) || components.iter().any(|c| c.as_os_str() == "target")
+            || in_ops_linters
         {
             continue;
         }
@@ -55,7 +59,8 @@ fn main() -> Result<()> {
                     let content = match fs::read_to_string(path) {
                         Ok(c) => c,
                         Err(e) => {
-                            eprintln!("Warning: Failed to read file {}: {}", path.display(), e);
+                            eprintln!("Error: Failed to read file {}: {}", path.display(), e);
+                            errors = true;
                             continue;
                         }
                     };
@@ -93,7 +98,7 @@ fn main() -> Result<()> {
                         let window = &content[start_search..end_search];
 
                         if !re_search_path.is_match(window) {
-                            eprintln!("{}:{}: SECURITY DEFINER found without 'SET search_path = flexi, pg_catalog, pg_temp' nearby", path.display(), line);
+                            eprintln!("{}:{}: SECURITY DEFINER found without a valid search_path reset nearby. Accepted forms: SET [SESSION|LOCAL] search_path {{=|TO}} flexi, pg_catalog, pg_temp", path.display(), line);
                             errors = true;
                         }
 

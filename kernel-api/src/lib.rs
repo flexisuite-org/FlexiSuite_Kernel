@@ -35,8 +35,12 @@ pub struct ActionStatusResponse {
     pub status: ActionStatus,
 }
 
-pub fn build_app(config: MiddlewareConfig, db: DatabaseConnection) -> (Router, JoinHandle<()>) {
-    build_app_with_state(MiddlewareState::new(config), db)
+pub async fn build_app(
+    config: MiddlewareConfig,
+    db: DatabaseConnection,
+) -> Result<(Router, JoinHandle<()>), String> {
+    let state = MiddlewareState::new(config).await?;
+    Ok(build_app_with_state(state, db))
 }
 
 pub fn build_app_with_state(
