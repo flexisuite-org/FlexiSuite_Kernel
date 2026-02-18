@@ -7,7 +7,7 @@ use std::time::Duration;
 use wasmtime::{Config, Engine, Linker, Module, Store, StoreLimits, StoreLimitsBuilder, Trap};
 use wasmtime_wasi::WasiCtxBuilder;
 use wasmtime_wasi::p1::WasiP1Ctx;
-use wasmtime_wasi::p2::pipe::MemoryOutputPipe;
+use wasmtime_wasi::p2::pipe::{MemoryInputPipe, MemoryOutputPipe};
 
 pub struct WasmSandbox {
     engine: Engine,
@@ -44,7 +44,11 @@ fn map_wasm_error(error: anyhow::Error) -> SandboxError {
     }
 
     let message = error.to_string();
-    if message.contains("memory") && message.contains("limit") {
+    // String mapping fallback for wasmtime 41.0.3 diagnostics when no Trap is available.
+    if message.contains("allocation too large")
+        || message.contains("memory out of bounds")
+        || message.contains("exceeds memory limits")
+    {
         SandboxError::MemoryLimitExceeded
     } else {
         SandboxError::RuntimeError(message)
@@ -56,7 +60,7 @@ impl SandboxRuntime for WasmSandbox {
     async fn execute(
         &mut self,
         code: &str,
-        _input: serde_json::Value,
+        input: serde_json::Value,
     ) -> Result<serde_json::Value, SandboxError> {
         if !self.options.permissions.network_allowlist.is_empty() {
             return Err(SandboxError::PermissionDenied(
@@ -71,7 +75,10 @@ impl SandboxRuntime for WasmSandbox {
 
         const MAX_STDOUT_SIZE: usize = 1 << 20;
         let stdout = MemoryOutputPipe::new(MAX_STDOUT_SIZE);
+        let input_json = serde_json::to_string(&input)
+            .map_err(|e| SandboxError::RuntimeError(format!("failed to serialize input: {e}")))?;
         let mut wasi_builder = WasiCtxBuilder::new();
+        wasi_builder.stdin(MemoryInputPipe::new(input_json.into_bytes()));
         wasi_builder.stdout(stdout.clone());
         let wasi = wasi_builder.build_p1();
 
@@ -89,7 +96,12 @@ impl SandboxRuntime for WasmSandbox {
         );
         store.limiter(|state| &mut state.limits);
 
-        let fuel = self.options.cpu_time_limit.as_millis() as u64 * 10_000;
+        let fuel = self
+            .options
+            .cpu_time_limit
+            .as_millis()
+            .saturating_mul(10_000)
+            .min(u128::from(u64::MAX)) as u64;
         store
             .set_fuel(fuel)
             .map_err(|e| SandboxError::InitError(e.to_string()))?;

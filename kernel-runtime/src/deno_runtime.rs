@@ -1,12 +1,9 @@
 use crate::{RuntimeOptions, SandboxError, SandboxRuntime};
 use async_trait::async_trait;
-use deno_core::{JsRuntime, OpState, RuntimeOptions as DenoOptions, op2, v8};
+use deno_core::{JsRuntime, OpState, RuntimeOptions as DenoOptions, error::AnyError, op2, v8};
 use std::sync::Arc;
-use std::sync::Once;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
-
-static INIT_V8: Once = Once::new();
 
 pub struct DenoSandbox {
     options: RuntimeOptions,
@@ -24,10 +21,13 @@ struct OutputState {
 }
 
 #[op2(fast)]
-pub fn op_set_output(state: &mut OpState, #[string] json: String) {
-    if let Ok(value) = serde_json::from_str::<serde_json::Value>(&json) {
-        state.put(OutputState { value });
-    }
+pub fn op_set_output(state: &mut OpState, #[string] json: String) -> Result<(), std::io::Error> {
+    let value = serde_json::from_str::<serde_json::Value>(&json).map_err(|err| {
+        let any_error: AnyError = err.into();
+        std::io::Error::new(std::io::ErrorKind::InvalidData, any_error)
+    })?;
+    state.put(OutputState { value });
+    Ok(())
 }
 
 deno_core::extension!(sandbox_ext, ops = [op_set_output],);
@@ -49,8 +49,6 @@ impl SandboxRuntime for DenoSandbox {
         let code = code.to_string();
 
         let result = tokio::task::spawn_blocking(move || {
-            INIT_V8.call_once(|| { });
-
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
@@ -71,11 +69,11 @@ impl SandboxRuntime for DenoSandbox {
 
                 let isolate_handle = js_runtime.v8_isolate().thread_safe_handle();
                 let wall_clock_limit = options.wall_clock_limit;
-                let cpu_time_limit = options.cpu_time_limit;
+                let cpu_wall_time_limit = options.cpu_time_limit;
                 let cancelled = Arc::new(AtomicBool::new(false));
                 let is_heap_oom = Arc::new(AtomicBool::new(false));
                 let is_wall_timeout = Arc::new(AtomicBool::new(false));
-                let is_cpu_timeout = Arc::new(AtomicBool::new(false));
+                let is_cpu_wall_timeout = Arc::new(AtomicBool::new(false));
 
                 let near_heap_isolate = isolate_handle.clone();
                 let near_heap_flag = is_heap_oom.clone();
@@ -104,19 +102,20 @@ impl SandboxRuntime for DenoSandbox {
                 });
 
                 let cpu_cancel = cancelled.clone();
-                let cpu_timeout_flag = is_cpu_timeout.clone();
+                let cpu_wall_timeout_flag = is_cpu_wall_timeout.clone();
                 let cpu_isolate_handle = isolate_handle.clone();
+                // This is a wall-clock timeout approximation, not actual CPU consumption metering; true CPU accounting is not implemented.
                 std::thread::spawn(move || {
                     let sleep_slice = Duration::from_millis(10);
                     let started = std::time::Instant::now();
-                    while started.elapsed() < cpu_time_limit {
+                    while started.elapsed() < cpu_wall_time_limit {
                         if cpu_cancel.load(Ordering::SeqCst) {
                             return;
                         }
                         std::thread::sleep(sleep_slice);
                     }
                     if !cpu_cancel.load(Ordering::SeqCst) {
-                        cpu_timeout_flag.store(true, Ordering::SeqCst);
+                        cpu_wall_timeout_flag.store(true, Ordering::SeqCst);
                         cpu_isolate_handle.terminate_execution();
                     }
                 });
@@ -146,22 +145,19 @@ impl SandboxRuntime for DenoSandbox {
                 );
 
                 let execution_future = async {
-                    let result = js_runtime.execute_script("user_code", wrapped_code);
-                    match result {
-                        Ok(global) => {
-                            let result = js_runtime.resolve(global).await;
-                            match result {
-                                Ok(_) => Ok(()),
-                                Err(e) => Err(e),
-                            }
-                        }
-                        Err(e) => Err(e),
-                    }
+                    js_runtime
+                        .execute_script("user_code", wrapped_code)
+                        .map_err(|e| SandboxError::RuntimeError(e.to_string()))?;
+                    js_runtime
+                        .run_event_loop(Default::default())
+                        .await
+                        .map_err(|e| SandboxError::RuntimeError(e.to_string()))?;
+                    Ok::<(), SandboxError>(())
                 };
 
                 let execution_result =
                     match tokio::time::timeout(options.wall_clock_limit, execution_future).await {
-                        Ok(res) => res.map_err(|e| SandboxError::RuntimeError(e.to_string())),
+                        Ok(res) => res,
                         Err(_) => {
                             is_wall_timeout.store(true, Ordering::SeqCst);
                             isolate_handle.terminate_execution();
@@ -175,7 +171,7 @@ impl SandboxRuntime for DenoSandbox {
                     return Err(SandboxError::MemoryLimitExceeded);
                 }
 
-                if is_cpu_timeout.load(Ordering::SeqCst) {
+                if is_cpu_wall_timeout.load(Ordering::SeqCst) {
                     return Err(SandboxError::CpuLimitExceeded);
                 }
 
