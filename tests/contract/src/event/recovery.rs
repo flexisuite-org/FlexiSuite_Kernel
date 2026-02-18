@@ -1,5 +1,4 @@
 #![allow(dead_code)]
-#![allow(unused_imports)]
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -12,6 +11,7 @@ enum RecoveryState {
     Normal,
     GapDetected,
     Recovering,
+    #[allow(dead_code)]
     Skipped, // Poison Marker
     RebuildRequired,
 }
@@ -57,15 +57,22 @@ impl GapRecoveryController {
         // Check outbox
         if self.outbox.contains(missing_seq) {
             // Found -> Recovering
+            {
+                let mut state = self.state.lock().unwrap();
+                *state = RecoveryState::Recovering;
+            }
+            
+            // Make transition observable
+            tokio::task::yield_now().await;
+            sleep(Duration::from_millis(10)).await;
+
+            // Simulate recovery completion
             let mut state = self.state.lock().unwrap();
-            *state = RecoveryState::Recovering;
-            // Simulate recovery (fetching and processing)
             *state = RecoveryState::Normal;
         } else {
             // Not Found -> Rebuild
             let mut state = self.state.lock().unwrap();
             *state = RecoveryState::RebuildRequired;
-            // In real system, this triggers rebuild job and blocks writes.
         }
     }
 }

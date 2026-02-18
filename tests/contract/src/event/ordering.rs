@@ -1,11 +1,9 @@
 #![allow(dead_code)]
-#![allow(unused_imports)]
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
-use tokio::time::{sleep, Duration};
 
 // --- Contract Definitions (from docs/implementation_plan.md) ---
 
@@ -67,28 +65,31 @@ impl MockEventSystem {
 #[async_trait]
 impl ReliableProducer for MockEventSystem {
     async fn publish(&self, stream: &str, event: EventEnvelope) -> Result<String, String> {
-        let mut modes = self.entity_modes.lock().unwrap();
+        // Scope for entity_modes lock to prevent deadlock with streams lock
+        {
+            let mut modes = self.entity_modes.lock().unwrap();
 
-        // Contract: Mixed modes forbidden
-        if let Some(existing_mode) = modes.get(&event.entity_id) {
-            if *existing_mode != event.order_mode {
-                return Err("Mixed order_mode forbidden".to_string());
-            }
-        } else {
-            modes.insert(event.entity_id.clone(), event.order_mode.clone());
-        }
-
-        // Contract: Mandatory fields per mode
-        match event.order_mode {
-            OrderMode::Entity => {
-                if event.entity_seq.is_none() {
-                    return Err("entity_seq missing for Entity mode".to_string());
+            // Contract: Mandatory fields per mode (Check BEFORE insert)
+            match event.order_mode {
+                OrderMode::Entity => {
+                    if event.entity_seq.is_none() {
+                        return Err("entity_seq missing for Entity mode".to_string());
+                    }
+                }
+                OrderMode::Causality => {
+                    if event.causality_key.is_none() || event.causality_seq.is_none() {
+                        return Err("causality_key/seq missing for Causality mode".to_string());
+                    }
                 }
             }
-            OrderMode::Causality => {
-                if event.causality_key.is_none() || event.causality_seq.is_none() {
-                    return Err("causality_key/seq missing for Causality mode".to_string());
+
+            // Contract: Mixed modes forbidden
+            if let Some(existing_mode) = modes.get(&event.entity_id) {
+                if *existing_mode != event.order_mode {
+                    return Err("Mixed order_mode forbidden".to_string());
                 }
+            } else {
+                modes.insert(event.entity_id.clone(), event.order_mode.clone());
             }
         }
 
@@ -104,15 +105,33 @@ impl ReliableConsumer for MockEventSystem {
         let mut streams = self.streams.lock().unwrap();
         if let Some(queue) = streams.get_mut(stream) {
             let mut deliveries = Vec::new();
-            for _ in 0..max_count {
-                if let Some(env) = queue.pop_front() {
-                     deliveries.push(Delivery {
-                         delivery_id: format!("{}-d", env.event_id),
-                         envelope: env,
-                     });
+            
+            // Collect events
+            let mut available: Vec<EventEnvelope> = Vec::new();
+            while let Some(env) = queue.pop_front() {
+                available.push(env);
+            }
+
+            // Resequence for Entity mode
+            available.sort_by(|a, b| {
+                if a.order_mode == OrderMode::Entity && b.order_mode == OrderMode::Entity && a.entity_id == b.entity_id {
+                    a.entity_seq.cmp(&b.entity_seq)
                 } else {
-                    break;
+                    std::cmp::Ordering::Equal
                 }
+            });
+
+            // Put back excess events and take only max_count
+            let to_deliver = available.drain(0..std::cmp::min(available.len(), max_count)).collect::<Vec<_>>();
+            for env in available.into_iter().rev() {
+                queue.push_front(env);
+            }
+
+            for env in to_deliver {
+                 deliveries.push(Delivery {
+                     delivery_id: format!("{}-d", env.event_id),
+                     envelope: env,
+                 });
             }
             deliveries
         } else {
@@ -120,9 +139,7 @@ impl ReliableConsumer for MockEventSystem {
         }
     }
 
-    async fn ack(&self, _stream: &str, _delivery_id: &str) {
-        // No-op for mock
-    }
+    async fn ack(&self, _stream: &str, _delivery_id: &str) {}
 }
 
 
@@ -146,7 +163,7 @@ async fn test_event_mode_mix_forbidden() {
     let event2 = EventEnvelope {
         event_id: "e2".to_string(),
         entity_id: "entity-A".to_string(),
-        order_mode: OrderMode::Causality, // MIXED MODE!
+        order_mode: OrderMode::Causality,
         entity_seq: None,
         causality_key: Some("key-A".to_string()),
         causality_seq: Some(1),
@@ -162,12 +179,8 @@ async fn test_event_ordering_entity() {
     let sys = Arc::new(MockEventSystem::new());
     let stream = "events:shard-1";
 
-    // Publish out of order (simulating arrival time diff or just verifying consumer reordering if implemented?
-    // Usually producer sends in order of commit. If producer sends 1 then 2, consumer reads 1 then 2.
-    // The test ensures that if we publish 1, 2, 3, we consume 1, 2, 3.
-    // Also "entity_seq" is the logical clock.
-
-    for i in 1..=3 {
+    let seqs = vec![2, 1, 3];
+    for i in seqs {
         let event = EventEnvelope {
             event_id: format!("e{}", i),
             entity_id: "entity-B".to_string(),
@@ -182,6 +195,7 @@ async fn test_event_ordering_entity() {
 
     let deliveries = sys.poll(stream, "c1", 10).await;
     assert_eq!(deliveries.len(), 3);
+    
     assert_eq!(deliveries[0].envelope.entity_seq, Some(1));
     assert_eq!(deliveries[1].envelope.entity_seq, Some(2));
     assert_eq!(deliveries[2].envelope.entity_seq, Some(3));

@@ -1,12 +1,12 @@
-#![allow(dead_code)]
-#![allow(unused_imports)]
+#[allow(dead_code)]
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::sync::Mutex;
+use std::time::Instant;
 
 // --- Contract Definitions ---
 
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 struct DiagnosticsPolicy {
     tenant_id: String,
