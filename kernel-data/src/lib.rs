@@ -1,5 +1,6 @@
 pub mod connection;
 pub mod entities;
+pub mod event;
 pub mod repository;
 
 #[cfg(feature = "test-utils")]

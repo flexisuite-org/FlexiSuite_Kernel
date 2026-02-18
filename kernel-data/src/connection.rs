@@ -80,13 +80,6 @@ impl<C> TenantScoped<C> {
 }
 
 impl TenantScoped<RawConnection> {
-    /// Access the underlying database transaction.
-    ///
-    /// # Visibility
-    /// Restricted to `pub(crate)` to prevent external callers from bypassing
-    /// tenant isolation. External crates (e.g., kernel-archiver) should use
-    /// `TenantRepository` trait methods instead.
-    #[allow(dead_code)]
     pub(crate) fn txn(&self) -> &DatabaseTransaction {
         &self.inner.txn
     }
@@ -99,6 +92,8 @@ impl TenantScoped<RawConnection> {
         self.inner.txn.rollback().await
     }
 }
+
+
 
 // Implement Sealed trait for TenantScoped
 impl super::repository::private::Sealed for TenantScoped<RawConnection> {}
