@@ -175,9 +175,7 @@ fn parse_tenant_from_token(token: &str) -> Option<&str> {
 
 // Legacy exports retained for binary compatibility during migration.
 // These shims now fail loudly so callers are forced to migrate.
-#[deprecated(
-    note = "Legacy migration shim; removed - use token-based authorization API"
-)]
+#[deprecated(note = "Legacy migration shim; removed - use token-based authorization API")]
 pub fn init_hmac_secret() -> Result<(), String> {
     Err(String::from(
         "init_hmac_secret is removed/deprecated: use token-based authorization API",
@@ -185,9 +183,7 @@ pub fn init_hmac_secret() -> Result<(), String> {
 }
 
 #[cfg(feature = "test-utils")]
-#[deprecated(
-    note = "Legacy migration shim; removed - use test fixtures with KeyManager"
-)]
+#[deprecated(note = "Legacy migration shim; removed - use test fixtures with KeyManager")]
 pub fn init_hmac_secret_for_test(_secret: impl Into<String>) -> Result<(), String> {
     Err(String::from(
         "init_hmac_secret_for_test is removed/deprecated: use test fixtures with KeyManager",
