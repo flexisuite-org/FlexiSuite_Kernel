@@ -293,15 +293,29 @@ impl IdempotencyStore for InMemoryIdempotencyStore {
     ) -> Result<IdempotencyAcquireResult, IdempotencyStoreError> {
         let mut lock = self.inner.lock().await;
         if let Some(entry) = lock.get(&key) {
-            if let IdempotencyEntry::InFlight { expires_at, .. } = entry {
-                if *expires_at <= Instant::now() {
-                    lock.remove(&key);
-                    // 期限切れのため、新規リースとして続行
-                } else {
-                    return Ok(IdempotencyAcquireResult::Existing(entry.clone()));
+            let now = Instant::now();
+            match entry {
+                IdempotencyEntry::InFlight { expires_at, notify, .. } => {
+                    if *expires_at <= now {
+                        // 期限切れ InFlight: 待機中のwaitersに通知してから削除
+                        let notify = notify.clone();
+                        lock.remove(&key);
+                        drop(lock);
+                        notify.notify_waiters();
+                        // 新規リースとして続行するためロックを再取得
+                        lock = self.inner.lock().await;
+                    } else {
+                        return Ok(IdempotencyAcquireResult::Existing(entry.clone()));
+                    }
                 }
-            } else {
-                return Ok(IdempotencyAcquireResult::Existing(entry.clone()));
+                IdempotencyEntry::Completed(record) => {
+                    if record.expires_at <= now {
+                        // 期限切れ Completed: 削除して新規リースとして続行
+                        lock.remove(&key);
+                    } else {
+                        return Ok(IdempotencyAcquireResult::Existing(entry.clone()));
+                    }
+                }
             }
         }
 
