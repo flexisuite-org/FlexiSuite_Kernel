@@ -1,4 +1,6 @@
-use kernel_core::auth::{KeyManager, TenantContext, TenantId, UserId};
+use kernel_data::auth_context::{TenantContext, TenantId, UserId};
+mod common;
+use common::auth::TestAuth;
 use kernel_data::connection::with_tenant_tx;
 use migration::MigratorTrait;
 use sea_orm::{ConnectionTrait, Database};
@@ -37,7 +39,7 @@ async fn test_auth_failures() {
         .expect("Failed to reconnect");
 
     // Init Keys
-    KeyManager::rotate_keys(&db)
+    TestAuth::init_keys(&db)
         .await
         .expect("Failed to init keys");
 
@@ -56,7 +58,7 @@ async fn test_auth_failures() {
 
     // 3. Test: Valid format, Invalid Signature
     // Generate a valid-ish token
-    let real_token = KeyManager::generate_tenant_token(&db, &tenant_id)
+    let real_token = TestAuth::generate_tenant_token(&db, &tenant_id)
         .await
         .unwrap();
     // Tamper with signature (last part)
@@ -81,7 +83,7 @@ async fn test_auth_failures() {
         .await
         .expect("Reconnect");
 
-    let token = KeyManager::generate_tenant_token(&db, &tenant_id)
+    let token = TestAuth::generate_tenant_token(&db, &tenant_id)
         .await
         .unwrap();
 
