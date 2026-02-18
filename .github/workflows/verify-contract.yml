@@ -37,6 +37,7 @@ jobs:
 
   test-contract:
     name: ci:test-contract (${{ matrix.suite }})
+    needs: [lint-test-utils-scope]
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false

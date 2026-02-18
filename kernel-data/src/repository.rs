@@ -216,13 +216,17 @@ impl TenantRepository for TenantScoped<RawConnection> {
             .ok_or_else(|| KernelError::ValidationError("Entity not found".into()))?;
 
         match active_model.version.clone() {
-            ActiveValue::Set(v) | ActiveValue::Unchanged(v) if v != existing.version => {
-                return Err(KernelError::ValidationError(format!(
-                    "version conflict: expected {}, got {}",
-                    existing.version, v
-                )));
+            ActiveValue::Set(v) | ActiveValue::Unchanged(v) => {
+                if v != existing.version {
+                    return Err(KernelError::ValidationError(format!(
+                        "version conflict: expected {}, got {}",
+                        existing.version, v
+                    )));
+                }
             }
-            _ => {}
+            ActiveValue::NotSet => {
+                return Err(KernelError::ValidationError("version is required for update".into()));
+            }
         }
 
         let next_version = existing.version + 1;
@@ -264,12 +268,41 @@ impl TenantRepository for TenantScoped<RawConnection> {
     }
 
     async fn delete_entity(&self, id: &str) -> kernel::Result<()> {
+        let user_id_str = history_actor_id(self.tenant_id.as_str(), self.user_id.as_ref());
+        
+        let existing = EntityRecord::find_by_id((id.to_string(), self.tenant_id.to_string()))
+            .one(&self.inner.txn)
+            .await
+            .map_err(KernelError::db_error)?
+            .ok_or_else(|| KernelError::ValidationError("Entity not found".into()))?;
+
+        // 1. Insert History
+        let history = entity_history::ActiveModel {
+            id: ActiveValue::Set(Uuid::now_v7().to_string()),
+            tenant_id: ActiveValue::Set(self.tenant_id.to_string()),
+            entity_id: ActiveValue::Set(id.to_string()),
+            entity_type: ActiveValue::Set(existing.entity_type),
+            change_type: ActiveValue::Set("DELETE".to_string()),
+            version: ActiveValue::Set(existing.version),
+            diff: ActiveValue::Set(serde_json::Value::Null), // No content for delete, or could store full content? Plan said "same fields/schema", diff usually implies null or empty for delete, or snapshot. The prompt says "entity_history record ... same attribution ...". Let's set diff to Null as there is no "new content".
+            created_at: ActiveValue::Set(chrono::Utc::now().into()),
+            created_by: ActiveValue::Set(user_id_str),
+            archived_at: ActiveValue::NotSet,
+        };
+        history
+            .insert(&self.inner.txn)
+            .await
+            .map_err(KernelError::db_error)?;
+
+        // 2. Delete Entity
         let delete_result =
             entity_record::Entity::delete_by_id((id.to_string(), self.tenant_id.to_string()))
                 .exec(&self.inner.txn)
                 .await
                 .map_err(KernelError::db_error)?;
+        
         if delete_result.rows_affected == 0 {
+             // This technically shouldn't happen if we found it above, but good to keep
             return Err(KernelError::ValidationError("Entity not found".into()));
         }
         Ok(())
