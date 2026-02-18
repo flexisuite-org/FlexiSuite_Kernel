@@ -80,7 +80,7 @@ impl<C> TenantScoped<C> {
 }
 
 impl TenantScoped<RawConnection> {
-    pub fn txn(&self) -> &DatabaseTransaction {
+    pub(crate) fn txn(&self) -> &DatabaseTransaction {
         &self.inner.txn
     }
 
