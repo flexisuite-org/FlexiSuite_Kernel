@@ -5,11 +5,12 @@ use axum::{
     middleware,
     routing::post,
 };
-use kernel_api::auth::TenantContext;
+use tower::ServiceExt; // for oneshot
 use kernel_api::middleware::{MiddlewareConfig, MiddlewareState, idempotency_middleware};
+use kernel_api::auth::{TenantContext, TenantId, UserId};
 use std::time::Duration;
 use tokio::task::JoinSet;
-use tower::ServiceExt; // for oneshot
+
 
 #[tokio::test]
 async fn test_idempotency_loop_limit() {
@@ -37,12 +38,12 @@ async fn test_idempotency_loop_limit() {
         .layer(Extension(state));
 
     let mut set = JoinSet::new();
-    let num_requests = 20;
-
-    let tenant_ctx = TenantContext {
-        tenant_id: "tenant-1".to_string(),
-        user_id: Some("user-1".to_string()),
-    };
+    let num_requests = 20; 
+    
+    let tenant_ctx = TenantContext::new(
+        TenantId::new("tenant-1").unwrap(),
+        Some(UserId::new("user-1").unwrap()),
+    );
 
     for _ in 0..num_requests {
         let app = app.clone();
@@ -64,20 +65,20 @@ async fn test_idempotency_loop_limit() {
     }
 
     let mut service_unavailable_count = 0; // 503
-    let mut internal_error_count = 0; // 500 (from handler)
-    let mut conflict_count = 0; // 409
-    let mut other_count = 0;
+    let mut _internal_error_count = 0; // 500 (from handler)
+    let mut _conflict_count = 0; // 409
+    let mut _other_count = 0;
 
     while let Some(res) = set.join_next().await {
         let status = res.unwrap();
         if status == StatusCode::SERVICE_UNAVAILABLE {
             service_unavailable_count += 1;
         } else if status == StatusCode::INTERNAL_SERVER_ERROR {
-            internal_error_count += 1;
+            _internal_error_count += 1;
         } else if status == StatusCode::CONFLICT {
-            conflict_count += 1;
+            _conflict_count += 1;
         } else {
-            other_count += 1;
+            _other_count += 1;
         }
     }
 

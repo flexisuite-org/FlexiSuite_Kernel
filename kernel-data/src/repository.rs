@@ -3,10 +3,17 @@ use crate::entities::audit_log;
 use crate::entities::entity_history;
 use crate::entities::entity_record;
 use crate::entities::prelude::*;
+use crate::entities::{diagnostic_policy, diagnostic_report};
 use async_trait::async_trait;
 use kernel_core::kernel::{self, KernelError};
-use sea_orm::{ActiveModelTrait, ActiveValue, EntityTrait};
+use sea_orm::sea_query::{Expr, OnConflict};
+use sea_orm::{
+    ActiveModelTrait, ActiveValue, ColumnTrait, EntityTrait, QueryFilter,
+    QueryOrder, QuerySelect,
+};
 use uuid::Uuid;
+
+const MARK_ARCHIVE_CHUNK_SIZE: usize = 500;
 
 /// Sealed trait to prevent external implementations.
 pub(crate) mod private {
@@ -26,12 +33,42 @@ pub trait TenantRepository: private::Sealed + Send + Sync {
         active_model: entity_record::ActiveModel,
     ) -> kernel::Result<entity_record::Model>;
     async fn get_entity(&self, id: &str) -> kernel::Result<Option<entity_record::Model>>;
+
+    // Diagnostic methods
+    async fn create_diagnostic_report(
+        &self,
+        active_model: diagnostic_report::ActiveModel,
+    ) -> kernel::Result<diagnostic_report::Model>;
+    async fn get_diagnostic_report(
+        &self,
+        trace_id: &str,
+    ) -> kernel::Result<Option<diagnostic_report::Model>>;
+    async fn get_diagnostic_policy(&self) -> kernel::Result<Option<diagnostic_policy::Model>>;
+    async fn upsert_diagnostic_policy(
+        &self,
+        active_model: diagnostic_policy::ActiveModel,
+    ) -> kernel::Result<diagnostic_policy::Model>;
+
     async fn log_audit(
         &self,
         action: String,
         resource: String,
         details: serde_json::Value,
     ) -> kernel::Result<()>;
+
+    // Archive methods (for kernel-archiver)
+    async fn find_unarchived_entity_histories(
+        &self,
+        limit: u64,
+    ) -> kernel::Result<Vec<entity_history::Model>>;
+    async fn mark_entity_history_archived(&self, id: String) -> kernel::Result<()>;
+    async fn mark_entity_histories_archived(&self, ids: Vec<String>) -> kernel::Result<()>;
+    async fn find_unarchived_audit_logs(
+        &self,
+        limit: u64,
+    ) -> kernel::Result<Vec<audit_log::Model>>;
+    async fn mark_audit_log_archived(&self, id: String) -> kernel::Result<()>;
+    async fn mark_audit_logs_archived(&self, ids: Vec<String>) -> kernel::Result<()>;
 }
 
 fn pseudonymize_user_id_for_audit(tenant_id: &str, user_id: &str) -> String {
@@ -186,6 +223,61 @@ impl TenantRepository for TenantScoped<RawConnection> {
         Ok(result)
     }
 
+    async fn create_diagnostic_report(
+        &self,
+        mut active_model: diagnostic_report::ActiveModel,
+    ) -> kernel::Result<diagnostic_report::Model> {
+        active_model.tenant_id = sea_orm::ActiveValue::Set(self.tenant_id.to_string());
+        let result = active_model
+            .insert(&self.inner.txn)
+            .await
+            .map_err(KernelError::db_error)?;
+        Ok(result)
+    }
+
+    async fn get_diagnostic_report(
+        &self,
+        trace_id: &str,
+    ) -> kernel::Result<Option<diagnostic_report::Model>> {
+        let result =
+            DiagnosticReport::find_by_id((trace_id.to_string(), self.tenant_id.to_string()))
+                .one(&self.inner.txn)
+                .await
+                .map_err(KernelError::db_error)?;
+        Ok(result)
+    }
+
+    async fn get_diagnostic_policy(&self) -> kernel::Result<Option<diagnostic_policy::Model>> {
+        let result = DiagnosticPolicy::find_by_id(self.tenant_id.to_string())
+            .one(&self.inner.txn)
+            .await
+            .map_err(KernelError::db_error)?;
+        Ok(result)
+    }
+
+    async fn upsert_diagnostic_policy(
+        &self,
+        mut active_model: diagnostic_policy::ActiveModel,
+    ) -> kernel::Result<diagnostic_policy::Model> {
+        active_model.tenant_id = sea_orm::ActiveValue::Set(self.tenant_id.to_string());
+
+        let result = DiagnosticPolicy::insert(active_model)
+            .on_conflict(
+                OnConflict::column(diagnostic_policy::Column::TenantId)
+                    .update_columns([
+                        diagnostic_policy::Column::Enabled,
+                        diagnostic_policy::Column::UpdatedAt,
+                        diagnostic_policy::Column::UpdatedBy,
+                    ])
+                    .to_owned(),
+            )
+            .exec_with_returning(&self.inner.txn)
+            .await
+            .map_err(KernelError::db_error)?;
+
+        Ok(result)
+    }
+
     async fn log_audit(
         &self,
         action: String,
@@ -212,6 +304,84 @@ impl TenantRepository for TenantScoped<RawConnection> {
         log.insert(&self.inner.txn)
             .await
             .map_err(KernelError::db_error)?;
+        Ok(())
+    }
+
+    async fn find_unarchived_entity_histories(
+        &self,
+        limit: u64,
+    ) -> kernel::Result<Vec<entity_history::Model>> {
+        EntityHistory::find()
+            .filter(entity_history::Column::TenantId.eq(self.tenant_id.to_string()))
+            .filter(entity_history::Column::ArchivedAt.is_null())
+            .order_by_asc(entity_history::Column::CreatedAt)
+            .limit(limit)
+            .all(&self.inner.txn)
+            .await
+            .map_err(KernelError::db_error)
+    }
+
+    async fn mark_entity_history_archived(&self, id: String) -> kernel::Result<()> {
+        self.mark_entity_histories_archived(vec![id]).await
+    }
+
+    async fn mark_entity_histories_archived(&self, ids: Vec<String>) -> kernel::Result<()> {
+        if ids.is_empty() {
+            return Ok(());
+        }
+        let tenant_id = self.tenant_id.to_string();
+        for chunk in ids.chunks(MARK_ARCHIVE_CHUNK_SIZE) {
+            EntityHistory::update_many()
+                .col_expr(
+                    entity_history::Column::ArchivedAt,
+                    Expr::current_timestamp().into(),
+                )
+                .filter(entity_history::Column::Id.is_in(chunk.iter().cloned()))
+                .filter(entity_history::Column::TenantId.eq(tenant_id.clone()))
+                .filter(entity_history::Column::ArchivedAt.is_null())
+                .exec(&self.inner.txn)
+                .await
+                .map_err(KernelError::db_error)?;
+        }
+        Ok(())
+    }
+
+    async fn find_unarchived_audit_logs(
+        &self,
+        limit: u64,
+    ) -> kernel::Result<Vec<audit_log::Model>> {
+        AuditLog::find()
+            .filter(audit_log::Column::TenantId.eq(self.tenant_id.to_string()))
+            .filter(audit_log::Column::ArchivedAt.is_null())
+            .order_by_asc(audit_log::Column::CreatedAt)
+            .limit(limit)
+            .all(&self.inner.txn)
+            .await
+            .map_err(KernelError::db_error)
+    }
+
+    async fn mark_audit_log_archived(&self, id: String) -> kernel::Result<()> {
+        self.mark_audit_logs_archived(vec![id]).await
+    }
+
+    async fn mark_audit_logs_archived(&self, ids: Vec<String>) -> kernel::Result<()> {
+        if ids.is_empty() {
+            return Ok(());
+        }
+        let tenant_id = self.tenant_id.to_string();
+        for chunk in ids.chunks(MARK_ARCHIVE_CHUNK_SIZE) {
+            AuditLog::update_many()
+                .col_expr(
+                    audit_log::Column::ArchivedAt,
+                    Expr::current_timestamp().into(),
+                )
+                .filter(audit_log::Column::Id.is_in(chunk.iter().cloned()))
+                .filter(audit_log::Column::TenantId.eq(tenant_id.clone()))
+                .filter(audit_log::Column::ArchivedAt.is_null())
+                .exec(&self.inner.txn)
+                .await
+                .map_err(KernelError::db_error)?;
+        }
         Ok(())
     }
 }
