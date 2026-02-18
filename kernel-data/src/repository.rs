@@ -4,8 +4,8 @@ use crate::entities::entity_history;
 use crate::entities::entity_record;
 use crate::entities::prelude::*;
 use crate::entities::{diagnostic_policy, diagnostic_report};
+use crate::error::DataError;
 use async_trait::async_trait;
-use kernel_core::kernel::{self, KernelError};
 use sea_orm::sea_query::{Expr, OnConflict};
 use sea_orm::{
     ActiveModelTrait, ActiveValue, ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect,
@@ -26,46 +26,48 @@ pub trait TenantRepository: private::Sealed + Send + Sync {
     async fn create_entity(
         &self,
         active_model: entity_record::ActiveModel,
-    ) -> kernel::Result<entity_record::Model>;
+    ) -> Result<entity_record::Model, DataError>;
     async fn update_entity(
         &self,
         active_model: entity_record::ActiveModel,
-    ) -> kernel::Result<entity_record::Model>;
-    async fn get_entity(&self, id: &str) -> kernel::Result<Option<entity_record::Model>>;
+    ) -> Result<entity_record::Model, DataError>;
+    async fn get_entity(&self, id: &str) -> Result<Option<entity_record::Model>, DataError>;
 
     // Diagnostic methods
     async fn create_diagnostic_report(
         &self,
         active_model: diagnostic_report::ActiveModel,
-    ) -> kernel::Result<diagnostic_report::Model>;
+    ) -> Result<diagnostic_report::Model, DataError>;
     async fn get_diagnostic_report(
         &self,
         trace_id: &str,
-    ) -> kernel::Result<Option<diagnostic_report::Model>>;
-    async fn get_diagnostic_policy(&self) -> kernel::Result<Option<diagnostic_policy::Model>>;
+    ) -> Result<Option<diagnostic_report::Model>, DataError>;
+    async fn get_diagnostic_policy(&self) -> Result<Option<diagnostic_policy::Model>, DataError>;
     async fn upsert_diagnostic_policy(
         &self,
         active_model: diagnostic_policy::ActiveModel,
-    ) -> kernel::Result<diagnostic_policy::Model>;
+    ) -> Result<diagnostic_policy::Model, DataError>;
 
     async fn log_audit(
         &self,
         action: String,
         resource: String,
         details: serde_json::Value,
-    ) -> kernel::Result<()>;
+    ) -> Result<(), DataError>;
 
     // Archive methods (for kernel-archiver)
     async fn find_unarchived_entity_histories(
         &self,
         limit: u64,
-    ) -> kernel::Result<Vec<entity_history::Model>>;
-    async fn mark_entity_history_archived(&self, id: String) -> kernel::Result<()>;
-    async fn mark_entity_histories_archived(&self, ids: Vec<String>) -> kernel::Result<()>;
-    async fn find_unarchived_audit_logs(&self, limit: u64)
-    -> kernel::Result<Vec<audit_log::Model>>;
-    async fn mark_audit_log_archived(&self, id: String) -> kernel::Result<()>;
-    async fn mark_audit_logs_archived(&self, ids: Vec<String>) -> kernel::Result<()>;
+    ) -> Result<Vec<entity_history::Model>, DataError>;
+    async fn mark_entity_history_archived(&self, id: String) -> Result<(), DataError>;
+    async fn mark_entity_histories_archived(&self, ids: Vec<String>) -> Result<(), DataError>;
+    async fn find_unarchived_audit_logs(
+        &self,
+        limit: u64,
+    ) -> Result<Vec<audit_log::Model>, DataError>;
+    async fn mark_audit_log_archived(&self, id: String) -> Result<(), DataError>;
+    async fn mark_audit_logs_archived(&self, ids: Vec<String>) -> Result<(), DataError>;
 }
 
 fn pseudonymize_user_id_for_audit(tenant_id: &str, user_id: &str) -> String {
@@ -74,19 +76,19 @@ fn pseudonymize_user_id_for_audit(tenant_id: &str, user_id: &str) -> String {
     format!("uidh:{}", hex::encode(digest.as_ref()))
 }
 
-fn history_actor_id(tenant_id: &str, user_id: Option<&kernel_core::auth::UserId>) -> String {
+fn history_actor_id(tenant_id: &str, user_id: Option<&crate::auth_context::UserId>) -> String {
     user_id
         .map(|u| pseudonymize_user_id_for_audit(tenant_id, u.as_str()))
         .unwrap_or_else(|| "system".to_string())
 }
 
-fn required_active_value<T: Clone>(value: &ActiveValue<T>, field_name: &str) -> kernel::Result<T>
+fn required_active_value<T: Clone>(value: &ActiveValue<T>, field_name: &str) -> Result<T, DataError>
 where
     T: Into<sea_orm::Value>,
 {
     match value {
         ActiveValue::Set(v) | ActiveValue::Unchanged(v) => Ok(v.clone()),
-        ActiveValue::NotSet => Err(KernelError::ValidationError(format!(
+        ActiveValue::NotSet => Err(DataError::ValidationError(format!(
             "{field_name} is required"
         ))),
     }
@@ -107,7 +109,7 @@ impl TenantRepository for TenantScoped<RawConnection> {
     async fn create_entity(
         &self,
         mut active_model: entity_record::ActiveModel,
-    ) -> kernel::Result<entity_record::Model> {
+    ) -> Result<entity_record::Model, DataError> {
         // Enforce tenant scoping by overriding the tenant_id field
         active_model.tenant_id = ActiveValue::Set(self.tenant_id.to_string());
 
@@ -123,7 +125,7 @@ impl TenantRepository for TenantScoped<RawConnection> {
         let result = active_model
             .insert(&self.inner.txn)
             .await
-            .map_err(KernelError::db_error)?;
+            .map_err(DataError::DbError)?;
 
         // 2. Insert History
         let history = entity_history::ActiveModel {
@@ -141,7 +143,7 @@ impl TenantRepository for TenantScoped<RawConnection> {
         history
             .insert(&self.inner.txn)
             .await
-            .map_err(KernelError::db_error)?;
+            .map_err(DataError::DbError)?;
 
         Ok(result)
     }
@@ -149,7 +151,7 @@ impl TenantRepository for TenantScoped<RawConnection> {
     async fn update_entity(
         &self,
         mut active_model: entity_record::ActiveModel,
-    ) -> kernel::Result<entity_record::Model> {
+    ) -> Result<entity_record::Model, DataError> {
         // Enforce tenant scoping
         active_model.tenant_id = ActiveValue::Unchanged(self.tenant_id.to_string());
 
@@ -158,12 +160,12 @@ impl TenantRepository for TenantScoped<RawConnection> {
         let existing = EntityRecord::find_by_id((entity_id.clone(), self.tenant_id.to_string()))
             .one(&self.inner.txn)
             .await
-            .map_err(KernelError::db_error)?
-            .ok_or_else(|| KernelError::ValidationError("Entity not found".into()))?;
+            .map_err(DataError::DbError)?
+            .ok_or_else(|| DataError::EntityNotFound(format!("Entity {} not found", entity_id)))?;
 
         match active_model.version.clone() {
             ActiveValue::Set(v) | ActiveValue::Unchanged(v) if v != existing.version => {
-                return Err(KernelError::ValidationError(format!(
+                return Err(DataError::ValidationError(format!(
                     "version conflict: expected {}, got {}",
                     existing.version, v
                 )));
@@ -181,11 +183,11 @@ impl TenantRepository for TenantScoped<RawConnection> {
         let result = active_model
             .update(&self.inner.txn)
             .await
-            .map_err(KernelError::db_error)?;
+            .map_err(DataError::DbError)?;
 
         let patch = json_patch::diff(&existing.content, &result.content);
         let patch_json = serde_json::to_value(&patch).map_err(|e| {
-            KernelError::ValidationError(format!("failed to serialize content patch: {e}"))
+            DataError::SerializationError(format!("failed to serialize content patch: {e}"))
         })?;
 
         // 2. Insert History
@@ -204,58 +206,58 @@ impl TenantRepository for TenantScoped<RawConnection> {
         history
             .insert(&self.inner.txn)
             .await
-            .map_err(KernelError::db_error)?;
+            .map_err(DataError::DbError)?;
 
         Ok(result)
     }
 
-    async fn get_entity(&self, id: &str) -> kernel::Result<Option<entity_record::Model>> {
+    async fn get_entity(&self, id: &str) -> Result<Option<entity_record::Model>, DataError> {
         // Since we have a composite primary key (id, tenant_id), we must provide both.
         // RLS will also filter this, but SeaORM requires both for the PK lookup.
         let result =
             EntityRecord::find_by_id((id.to_string(), self.tenant_id.as_str().to_string()))
                 .one(&self.inner.txn)
                 .await
-                .map_err(KernelError::db_error)?;
+                .map_err(DataError::DbError)?;
         Ok(result)
     }
 
     async fn create_diagnostic_report(
         &self,
         mut active_model: diagnostic_report::ActiveModel,
-    ) -> kernel::Result<diagnostic_report::Model> {
+    ) -> Result<diagnostic_report::Model, DataError> {
         active_model.tenant_id = sea_orm::ActiveValue::Set(self.tenant_id.to_string());
         let result = active_model
             .insert(&self.inner.txn)
             .await
-            .map_err(KernelError::db_error)?;
+            .map_err(DataError::DbError)?;
         Ok(result)
     }
 
     async fn get_diagnostic_report(
         &self,
         trace_id: &str,
-    ) -> kernel::Result<Option<diagnostic_report::Model>> {
+    ) -> Result<Option<diagnostic_report::Model>, DataError> {
         let result =
             DiagnosticReport::find_by_id((trace_id.to_string(), self.tenant_id.to_string()))
                 .one(&self.inner.txn)
                 .await
-                .map_err(KernelError::db_error)?;
+                .map_err(DataError::DbError)?;
         Ok(result)
     }
 
-    async fn get_diagnostic_policy(&self) -> kernel::Result<Option<diagnostic_policy::Model>> {
+    async fn get_diagnostic_policy(&self) -> Result<Option<diagnostic_policy::Model>, DataError> {
         let result = DiagnosticPolicy::find_by_id(self.tenant_id.to_string())
             .one(&self.inner.txn)
             .await
-            .map_err(KernelError::db_error)?;
+            .map_err(DataError::DbError)?;
         Ok(result)
     }
 
     async fn upsert_diagnostic_policy(
         &self,
         mut active_model: diagnostic_policy::ActiveModel,
-    ) -> kernel::Result<diagnostic_policy::Model> {
+    ) -> Result<diagnostic_policy::Model, DataError> {
         active_model.tenant_id = sea_orm::ActiveValue::Set(self.tenant_id.to_string());
 
         let result = DiagnosticPolicy::insert(active_model)
@@ -270,7 +272,7 @@ impl TenantRepository for TenantScoped<RawConnection> {
             )
             .exec_with_returning(&self.inner.txn)
             .await
-            .map_err(KernelError::db_error)?;
+            .map_err(DataError::DbError)?;
 
         Ok(result)
     }
@@ -280,10 +282,11 @@ impl TenantRepository for TenantScoped<RawConnection> {
         action: String,
         resource: String,
         details: serde_json::Value,
-    ) -> kernel::Result<()> {
-        let user_id = self.user_id.clone().ok_or_else(|| {
-            KernelError::ValidationError("missing actor for audit log".to_string())
-        })?;
+    ) -> Result<(), DataError> {
+        let user_id = self
+            .user_id
+            .clone()
+            .ok_or_else(|| DataError::ValidationError("missing actor for audit log".to_string()))?;
         let user_id_str = pseudonymize_user_id_for_audit(self.tenant_id.as_str(), user_id.as_str());
 
         let log = audit_log::ActiveModel {
@@ -300,14 +303,14 @@ impl TenantRepository for TenantScoped<RawConnection> {
         };
         log.insert(&self.inner.txn)
             .await
-            .map_err(KernelError::db_error)?;
+            .map_err(DataError::DbError)?;
         Ok(())
     }
 
     async fn find_unarchived_entity_histories(
         &self,
         limit: u64,
-    ) -> kernel::Result<Vec<entity_history::Model>> {
+    ) -> Result<Vec<entity_history::Model>, DataError> {
         EntityHistory::find()
             .filter(entity_history::Column::TenantId.eq(self.tenant_id.to_string()))
             .filter(entity_history::Column::ArchivedAt.is_null())
@@ -315,14 +318,14 @@ impl TenantRepository for TenantScoped<RawConnection> {
             .limit(limit)
             .all(&self.inner.txn)
             .await
-            .map_err(KernelError::db_error)
+            .map_err(DataError::DbError)
     }
 
-    async fn mark_entity_history_archived(&self, id: String) -> kernel::Result<()> {
+    async fn mark_entity_history_archived(&self, id: String) -> Result<(), DataError> {
         self.mark_entity_histories_archived(vec![id]).await
     }
 
-    async fn mark_entity_histories_archived(&self, ids: Vec<String>) -> kernel::Result<()> {
+    async fn mark_entity_histories_archived(&self, ids: Vec<String>) -> Result<(), DataError> {
         if ids.is_empty() {
             return Ok(());
         }
@@ -338,7 +341,7 @@ impl TenantRepository for TenantScoped<RawConnection> {
                 .filter(entity_history::Column::ArchivedAt.is_null())
                 .exec(&self.inner.txn)
                 .await
-                .map_err(KernelError::db_error)?;
+                .map_err(DataError::DbError)?;
         }
         Ok(())
     }
@@ -346,7 +349,7 @@ impl TenantRepository for TenantScoped<RawConnection> {
     async fn find_unarchived_audit_logs(
         &self,
         limit: u64,
-    ) -> kernel::Result<Vec<audit_log::Model>> {
+    ) -> Result<Vec<audit_log::Model>, DataError> {
         AuditLog::find()
             .filter(audit_log::Column::TenantId.eq(self.tenant_id.to_string()))
             .filter(audit_log::Column::ArchivedAt.is_null())
@@ -354,14 +357,14 @@ impl TenantRepository for TenantScoped<RawConnection> {
             .limit(limit)
             .all(&self.inner.txn)
             .await
-            .map_err(KernelError::db_error)
+            .map_err(DataError::DbError)
     }
 
-    async fn mark_audit_log_archived(&self, id: String) -> kernel::Result<()> {
+    async fn mark_audit_log_archived(&self, id: String) -> Result<(), DataError> {
         self.mark_audit_logs_archived(vec![id]).await
     }
 
-    async fn mark_audit_logs_archived(&self, ids: Vec<String>) -> kernel::Result<()> {
+    async fn mark_audit_logs_archived(&self, ids: Vec<String>) -> Result<(), DataError> {
         if ids.is_empty() {
             return Ok(());
         }
@@ -377,7 +380,7 @@ impl TenantRepository for TenantScoped<RawConnection> {
                 .filter(audit_log::Column::ArchivedAt.is_null())
                 .exec(&self.inner.txn)
                 .await
-                .map_err(KernelError::db_error)?;
+                .map_err(DataError::DbError)?;
         }
         Ok(())
     }
