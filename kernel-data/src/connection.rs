@@ -80,6 +80,10 @@ impl<C> TenantScoped<C> {
 }
 
 impl TenantScoped<RawConnection> {
+    pub(crate) fn txn(&self) -> &DatabaseTransaction {
+        &self.inner.txn
+    }
+
     pub(crate) async fn commit(self) -> Result<(), DbErr> {
         self.inner.txn.commit().await
     }
