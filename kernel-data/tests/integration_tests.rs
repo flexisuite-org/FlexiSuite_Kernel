@@ -4,12 +4,56 @@ use kernel_data::connection::{RawConnection, TenantScoped, with_tenant_tx};
 use kernel_data::entities::entity_record;
 use kernel_data::repository::TenantRepository;
 use migration::MigratorTrait;
-use sea_orm::{ActiveValue, ConnectionTrait, Database, DbBackend, Statement, TransactionTrait};
+use sea_orm::{
+    ActiveValue, ConnectionTrait, Database, DatabaseConnection, DbBackend, Statement,
+    TransactionTrait,
+};
 use testcontainers::{RunnableImage, clients};
 use testcontainers_modules::postgres::Postgres;
 use uuid::Uuid;
 
 const TEST_HMAC_SECRET: &str = "test_secret_for_integration_tests_shared";
+
+type PostgresNode = testcontainers::Container<'static, Postgres>;
+
+async fn setup_test_db() -> (DatabaseConnection, PostgresNode) {
+    let docker = Box::leak(Box::new(clients::Cli::default()));
+    let image = RunnableImage::from(Postgres::default()).with_tag("15-alpine");
+    let node = docker.run(image);
+    let port = node.get_host_port_ipv4(5432);
+    let connection_string = format!("postgres://postgres:postgres@127.0.0.1:{}/postgres", port);
+
+    let db = Database::connect(&connection_string)
+        .await
+        .expect("Failed to connect to DB");
+
+    if let Err(e) = kernel_data::init_hmac_secret_for_test(TEST_HMAC_SECRET) {
+        assert!(
+            e.contains("already initialized"),
+            "Unexpected error from init_hmac_secret: {}",
+            e
+        );
+    }
+
+    db.execute_unprepared("DO $$ BEGIN IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = 'flexi') THEN CREATE ROLE flexi; END IF; END $$;")
+        .await
+        .expect("Failed to create role flexi");
+    migration::Migrator::up(&db, None)
+        .await
+        .expect("Failed to run migrations");
+    db.execute_unprepared(&format!(
+        "ALTER ROLE postgres SET flexi.hmac_secret = '{}'",
+        TEST_HMAC_SECRET
+    ))
+    .await
+    .expect("Failed to set flexi.hmac_secret for role");
+
+    drop(db);
+    let db = Database::connect(&connection_string)
+        .await
+        .expect("Failed to reconnect to DB");
+    (db, node)
+}
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore] // Requires Docker
@@ -174,39 +218,7 @@ async fn insert_record(
 #[tokio::test(flavor = "multi_thread")]
 #[ignore] // Requires Docker
 async fn test_delete_entity_contract() {
-    let docker = clients::Cli::default();
-    let image = RunnableImage::from(Postgres::default()).with_tag("15-alpine");
-    let node = docker.run(image);
-    let port = node.get_host_port_ipv4(5432);
-    let connection_string = format!("postgres://postgres:postgres@127.0.0.1:{}/postgres", port);
-
-    let db = Database::connect(&connection_string)
-        .await
-        .expect("Failed to connect to DB");
-
-    if let Err(e) = kernel_data::init_hmac_secret_for_test(TEST_HMAC_SECRET) {
-        assert!(
-            e.contains("already initialized"),
-            "Unexpected error from init_hmac_secret: {}",
-            e
-        );
-    }
-
-    db.execute_unprepared("DO $$ BEGIN IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = 'flexi') THEN CREATE ROLE flexi; END IF; END $$;").await.expect("Failed to create role flexi");
-    migration::Migrator::up(&db, None)
-        .await
-        .expect("Failed to run migrations");
-    db.execute_unprepared(&format!(
-        "ALTER ROLE postgres SET flexi.hmac_secret = '{}'",
-        TEST_HMAC_SECRET
-    ))
-    .await
-    .expect("Failed to set flexi.hmac_secret for role");
-
-    drop(db);
-    let db = Database::connect(&connection_string)
-        .await
-        .expect("Failed to reconnect to DB");
+    let (db, _node) = setup_test_db().await;
 
     use kernel_core::auth::{TenantId, UserId};
     let tenant_a = TenantContext::new(
