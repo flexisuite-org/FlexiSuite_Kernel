@@ -120,7 +120,7 @@ impl SandboxRuntime for DenoSandbox {
                     }
                 });
 
-                let input_json = serde_json::to_string(&input).unwrap();
+                let input_json = serde_json::to_string(&input).expect("serialize input JSON must not fail");
                 let setup_code = format!("globalThis.INPUT = {};", input_json);
                 js_runtime
                     .execute_script("setup", setup_code)
@@ -141,7 +141,7 @@ impl SandboxRuntime for DenoSandbox {
                         }}
                     }})()
                 "#,
-                    serde_json::to_string(&code).unwrap()
+                    serde_json::to_string(&code).expect("serialize sandboxed code to JSON must not fail")
                 );
 
                 let execution_future = async {

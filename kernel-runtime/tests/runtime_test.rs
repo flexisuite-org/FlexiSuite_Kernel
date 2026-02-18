@@ -188,6 +188,39 @@ async fn test_wasm_stdout() {
 }
 
 #[tokio::test]
+async fn test_wasm_invalid_stdout_utf8() {
+    let wat = r#"
+    (module
+        (import "wasi_snapshot_preview1" "fd_write"
+            (func $fd_write (param i32 i32 i32 i32) (result i32)))
+        (memory (export "memory") 1)
+        (data (i32.const 0) "\ff\fe\fd") ;; Invalid UTF-8
+        (func (export "_start")
+            (i32.store (i32.const 8) (i32.const 0))
+            (i32.store (i32.const 12) (i32.const 3))
+            (call $fd_write
+                (i32.const 1)
+                (i32.const 8)
+                (i32.const 1)
+                (i32.const 20))
+            drop
+        )
+    )
+    "#;
+    let options = RuntimeOptions::default();
+    let mut runtime = WasmSandbox::new(options).unwrap();
+    let input = serde_json::Value::Null;
+    let result = runtime.execute(wat, input).await;
+    match result {
+        Err(SandboxError::RuntimeError(e)) => {
+            assert!(e.contains("stdout contains invalid UTF-8"));
+            assert!(e.contains("fffefd"));
+        }
+        other => panic!("Expected RuntimeError with UTF-8 failure, got: {:?}", other),
+    }
+}
+
+#[tokio::test]
 async fn test_network_allowlist_rejection() {
     let mut options = RuntimeOptions::default();
     options.permissions.network_allowlist = vec!["https://example.com".to_string()];
