@@ -8,6 +8,8 @@ use axum::{
 use serde::Serialize;
 use tokio::task::JoinHandle;
 use uuid::Uuid;
+use sea_orm::DatabaseConnection;
+use std::sync::Arc;
 
 use crate::auth::{TenantContext, auth_middleware};
 use crate::middleware::{
@@ -17,6 +19,8 @@ use crate::middleware::{
 
 pub mod auth;
 pub mod middleware;
+pub mod diagnostics;
+pub mod profile;
 
 #[derive(Serialize)]
 pub struct TestWriteResponse {
@@ -31,11 +35,11 @@ pub struct ActionStatusResponse {
     pub status: ActionStatus,
 }
 
-pub fn build_app(config: MiddlewareConfig) -> (Router, JoinHandle<()>) {
-    build_app_with_state(MiddlewareState::new(config))
+pub fn build_app(config: MiddlewareConfig, db: DatabaseConnection) -> (Router, JoinHandle<()>) {
+    build_app_with_state(MiddlewareState::new(config), db)
 }
 
-pub fn build_app_with_state(state: MiddlewareState) -> (Router, JoinHandle<()>) {
+pub fn build_app_with_state(state: MiddlewareState, db: DatabaseConnection) -> (Router, JoinHandle<()>) {
     let cleanup_handle = state.start_cleanup_task();
 
     let public_router = Router::new().route("/health", get(|| async { "OK" }));
@@ -43,6 +47,8 @@ pub fn build_app_with_state(state: MiddlewareState) -> (Router, JoinHandle<()>) 
     let protected_router = Router::new()
         .route("/test", post(write_test).put(write_test))
         .route("/actions/:action_id", get(get_action_status))
+        // Diagnostics routes under /api/v1/diagnostics
+        .nest("/api/v1/diagnostics", diagnostics::routes())
         // Outermost applied last: Auth -> Idempotency -> Quota
         .layer(from_fn(quota_middleware))
         .layer(from_fn(idempotency_middleware))
@@ -52,7 +58,8 @@ pub fn build_app_with_state(state: MiddlewareState) -> (Router, JoinHandle<()>) 
         Router::new()
             .merge(public_router)
             .merge(protected_router)
-            .layer(Extension(state)),
+            .layer(Extension(state))
+            .layer(Extension(Arc::new(db))), // Inject DB connection
         cleanup_handle,
     )
 }

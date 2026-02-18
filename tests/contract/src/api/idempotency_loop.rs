@@ -1,10 +1,9 @@
 use axum::{
+    Extension, Router,
     body::Body,
     http::{Request, StatusCode},
-    routing::post,
-    Router,
     middleware,
-    Extension,
+    routing::post,
 };
 use tower::ServiceExt; // for oneshot
 use kernel_api::middleware::{MiddlewareConfig, MiddlewareState, idempotency_middleware};
@@ -12,13 +11,14 @@ use kernel_api::auth::{TenantContext, TenantId, UserId};
 use std::time::Duration;
 use tokio::task::JoinSet;
 
+
 #[tokio::test]
 async fn test_idempotency_loop_limit() {
     // Setup
     let config = MiddlewareConfig {
         idempotency_ttl: Duration::from_secs(60),
         // Large enough to avoid timeout, so we hit the loop limit instead
-        inflight_wait_timeout: Duration::from_millis(1000), 
+        inflight_wait_timeout: Duration::from_millis(1000),
         ..Default::default()
     };
     let state = MiddlewareState::new(config);
@@ -27,10 +27,13 @@ async fn test_idempotency_loop_limit() {
     // Failure causes the lock to be released (instead of Completed), allowing others to try acquire.
     // This creates the race condition where a waiter can repeatedly lose the race.
     let app = Router::new()
-        .route("/", post(|_: Request<Body>| async move {
-            tokio::time::sleep(Duration::from_millis(10)).await;
-            StatusCode::INTERNAL_SERVER_ERROR // Force release_inflight
-        }))
+        .route(
+            "/",
+            post(|_: Request<Body>| async move {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+                StatusCode::INTERNAL_SERVER_ERROR // Force release_inflight
+            }),
+        )
         .layer(middleware::from_fn(idempotency_middleware))
         .layer(Extension(state));
 
@@ -51,7 +54,7 @@ async fn test_idempotency_loop_limit() {
                 .uri("/")
                 .header("Idempotency-Key", "test-key-loop-v4")
                 .extension(ctx)
-                .body(Body::from("same-body")) 
+                .body(Body::from("same-body"))
                 .unwrap();
 
             match app.oneshot(req).await {
@@ -80,5 +83,8 @@ async fn test_idempotency_loop_limit() {
     }
 
     // We expect some requests to process (return 500) and some to fail acquiring (return 503).
-    assert!(service_unavailable_count > 0, "Expected at least one 503 due to loop limit");
+    assert!(
+        service_unavailable_count > 0,
+        "Expected at least one 503 due to loop limit"
+    );
 }
