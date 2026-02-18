@@ -12,7 +12,7 @@ async fn test_auth_failures() {
     let docker = clients::Cli::default();
     let image = RunnableImage::from(Postgres::default()).with_tag("15-alpine");
     let node = docker.run(image);
-    let port = node.get_host_port_ipv4(5432); // Removed .unwrap()
+    let port = node.get_host_port_ipv4(5432).unwrap();
     let connection_string = format!("postgres://postgres:postgres@127.0.0.1:{}/postgres", port);
 
     let db = Database::connect(&connection_string)
