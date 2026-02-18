@@ -2,11 +2,18 @@ use super::connection::{RawConnection, TenantScoped};
 use crate::entities::audit_log;
 use crate::entities::entity_history;
 use crate::entities::entity_record;
+use crate::entities::prelude::*;
+use crate::entities::{diagnostic_policy, diagnostic_report};
 use crate::error::DataError;
 use async_trait::async_trait;
-use sea_orm::{ActiveModelTrait, ActiveValue, EntityTrait};
-use crate::entities::prelude::*;
+use sea_orm::sea_query::{Expr, OnConflict};
+use sea_orm::{
+    ActiveModelTrait, ActiveValue, ColumnTrait, EntityTrait, QueryFilter,
+    QueryOrder, QuerySelect,
+};
 use uuid::Uuid;
+
+const MARK_ARCHIVE_CHUNK_SIZE: usize = 500;
 
 /// Sealed trait to prevent external implementations.
 pub(crate) mod private {
@@ -17,15 +24,51 @@ pub(crate) mod private {
 /// This trait is sealed and can only be implemented within this crate.
 #[async_trait]
 pub trait TenantRepository: private::Sealed + Send + Sync {
-    async fn create_entity(&self, active_model: entity_record::ActiveModel) -> Result<entity_record::Model, DataError>;
-    async fn update_entity(&self, active_model: entity_record::ActiveModel) -> Result<entity_record::Model, DataError>;
+    async fn create_entity(
+        &self,
+        active_model: entity_record::ActiveModel,
+    ) -> Result<entity_record::Model, DataError>;
+    async fn update_entity(
+        &self,
+        active_model: entity_record::ActiveModel,
+    ) -> Result<entity_record::Model, DataError>;
     async fn get_entity(&self, id: &str) -> Result<Option<entity_record::Model>, DataError>;
+
+    // Diagnostic methods
+    async fn create_diagnostic_report(
+        &self,
+        active_model: diagnostic_report::ActiveModel,
+    ) -> Result<diagnostic_report::Model, DataError>;
+    async fn get_diagnostic_report(
+        &self,
+        trace_id: &str,
+    ) -> Result<Option<diagnostic_report::Model>, DataError>;
+    async fn get_diagnostic_policy(&self) -> Result<Option<diagnostic_policy::Model>, DataError>;
+    async fn upsert_diagnostic_policy(
+        &self,
+        active_model: diagnostic_policy::ActiveModel,
+    ) -> Result<diagnostic_policy::Model, DataError>;
+
     async fn log_audit(
         &self,
         action: String,
         resource: String,
         details: serde_json::Value,
     ) -> Result<(), DataError>;
+
+    // Archive methods (for kernel-archiver)
+    async fn find_unarchived_entity_histories(
+        &self,
+        limit: u64,
+    ) -> Result<Vec<entity_history::Model>, DataError>;
+    async fn mark_entity_history_archived(&self, id: String) -> Result<(), DataError>;
+    async fn mark_entity_histories_archived(&self, ids: Vec<String>) -> Result<(), DataError>;
+    async fn find_unarchived_audit_logs(
+        &self,
+        limit: u64,
+    ) -> Result<Vec<audit_log::Model>, DataError>;
+    async fn mark_audit_log_archived(&self, id: String) -> Result<(), DataError>;
+    async fn mark_audit_logs_archived(&self, ids: Vec<String>) -> Result<(), DataError>;
 }
 
 fn pseudonymize_user_id_for_audit(tenant_id: &str, user_id: &str) -> String {
@@ -172,10 +215,66 @@ impl TenantRepository for TenantScoped<RawConnection> {
     async fn get_entity(&self, id: &str) -> Result<Option<entity_record::Model>, DataError> {
         // Since we have a composite primary key (id, tenant_id), we must provide both.
         // RLS will also filter this, but SeaORM requires both for the PK lookup.
-        let result = EntityRecord::find_by_id((id.to_string(), self.tenant_id.as_str().to_string()))
+        let result =
+            EntityRecord::find_by_id((id.to_string(), self.tenant_id.as_str().to_string()))
+                .one(&self.inner.txn)
+                .await
+                .map_err(DataError::DbError)?;
+        Ok(result)
+    }
+
+    async fn create_diagnostic_report(
+        &self,
+        mut active_model: diagnostic_report::ActiveModel,
+    ) -> Result<diagnostic_report::Model, DataError> {
+        active_model.tenant_id = sea_orm::ActiveValue::Set(self.tenant_id.to_string());
+        let result = active_model
+            .insert(&self.inner.txn)
+            .await
+            .map_err(DataError::DbError)?;
+        Ok(result)
+    }
+
+    async fn get_diagnostic_report(
+        &self,
+        trace_id: &str,
+    ) -> Result<Option<diagnostic_report::Model>, DataError> {
+        let result =
+            DiagnosticReport::find_by_id((trace_id.to_string(), self.tenant_id.to_string()))
+                .one(&self.inner.txn)
+                .await
+                .map_err(DataError::DbError)?;
+        Ok(result)
+    }
+
+    async fn get_diagnostic_policy(&self) -> Result<Option<diagnostic_policy::Model>, DataError> {
+        let result = DiagnosticPolicy::find_by_id(self.tenant_id.to_string())
             .one(&self.inner.txn)
             .await
             .map_err(DataError::DbError)?;
+        Ok(result)
+    }
+
+    async fn upsert_diagnostic_policy(
+        &self,
+        mut active_model: diagnostic_policy::ActiveModel,
+    ) -> Result<diagnostic_policy::Model, DataError> {
+        active_model.tenant_id = sea_orm::ActiveValue::Set(self.tenant_id.to_string());
+
+        let result = DiagnosticPolicy::insert(active_model)
+            .on_conflict(
+                OnConflict::column(diagnostic_policy::Column::TenantId)
+                    .update_columns([
+                        diagnostic_policy::Column::Enabled,
+                        diagnostic_policy::Column::UpdatedAt,
+                        diagnostic_policy::Column::UpdatedBy,
+                    ])
+                    .to_owned(),
+            )
+            .exec_with_returning(&self.inner.txn)
+            .await
+            .map_err(DataError::DbError)?;
+
         Ok(result)
     }
 
@@ -205,6 +304,84 @@ impl TenantRepository for TenantScoped<RawConnection> {
         log.insert(&self.inner.txn)
             .await
             .map_err(DataError::DbError)?;
+        Ok(())
+    }
+
+    async fn find_unarchived_entity_histories(
+        &self,
+        limit: u64,
+    ) -> Result<Vec<entity_history::Model>, DataError> {
+        EntityHistory::find()
+            .filter(entity_history::Column::TenantId.eq(self.tenant_id.to_string()))
+            .filter(entity_history::Column::ArchivedAt.is_null())
+            .order_by_asc(entity_history::Column::CreatedAt)
+            .limit(limit)
+            .all(&self.inner.txn)
+            .await
+            .map_err(DataError::DbError)
+    }
+
+    async fn mark_entity_history_archived(&self, id: String) -> Result<(), DataError> {
+        self.mark_entity_histories_archived(vec![id]).await
+    }
+
+    async fn mark_entity_histories_archived(&self, ids: Vec<String>) -> Result<(), DataError> {
+        if ids.is_empty() {
+            return Ok(());
+        }
+        let tenant_id = self.tenant_id.to_string();
+        for chunk in ids.chunks(MARK_ARCHIVE_CHUNK_SIZE) {
+            EntityHistory::update_many()
+                .col_expr(
+                    entity_history::Column::ArchivedAt,
+                    Expr::current_timestamp().into(),
+                )
+                .filter(entity_history::Column::Id.is_in(chunk.iter().cloned()))
+                .filter(entity_history::Column::TenantId.eq(tenant_id.clone()))
+                .filter(entity_history::Column::ArchivedAt.is_null())
+                .exec(&self.inner.txn)
+                .await
+                .map_err(DataError::DbError)?;
+        }
+        Ok(())
+    }
+
+    async fn find_unarchived_audit_logs(
+        &self,
+        limit: u64,
+    ) -> Result<Vec<audit_log::Model>, DataError> {
+        AuditLog::find()
+            .filter(audit_log::Column::TenantId.eq(self.tenant_id.to_string()))
+            .filter(audit_log::Column::ArchivedAt.is_null())
+            .order_by_asc(audit_log::Column::CreatedAt)
+            .limit(limit)
+            .all(&self.inner.txn)
+            .await
+            .map_err(DataError::DbError)
+    }
+
+    async fn mark_audit_log_archived(&self, id: String) -> Result<(), DataError> {
+        self.mark_audit_logs_archived(vec![id]).await
+    }
+
+    async fn mark_audit_logs_archived(&self, ids: Vec<String>) -> Result<(), DataError> {
+        if ids.is_empty() {
+            return Ok(());
+        }
+        let tenant_id = self.tenant_id.to_string();
+        for chunk in ids.chunks(MARK_ARCHIVE_CHUNK_SIZE) {
+            AuditLog::update_many()
+                .col_expr(
+                    audit_log::Column::ArchivedAt,
+                    Expr::current_timestamp().into(),
+                )
+                .filter(audit_log::Column::Id.is_in(chunk.iter().cloned()))
+                .filter(audit_log::Column::TenantId.eq(tenant_id.clone()))
+                .filter(audit_log::Column::ArchivedAt.is_null())
+                .exec(&self.inner.txn)
+                .await
+                .map_err(DataError::DbError)?;
+        }
         Ok(())
     }
 }
