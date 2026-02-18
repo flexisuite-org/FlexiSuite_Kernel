@@ -327,6 +327,11 @@ async fn test_registry_key_validation_invalid_paths() {
         "key\\backslash",
         "encode%2f",
         "encode%5c",
+        "",
+        "..",
+        ".",
+        "/leading",
+        "a//b",
     ];
 
     for key in invalid_keys {
