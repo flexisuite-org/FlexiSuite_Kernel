@@ -1,6 +1,7 @@
 use crate::{RuntimeOptions, SandboxError, SandboxRuntime};
 use async_trait::async_trait;
-use deno_core::{JsRuntime, OpState, RuntimeOptions as DenoOptions, error::AnyError, op2, v8};
+use deno_core::{JsRuntime, OpState, RuntimeOptions as DenoOptions, op2, v8};
+use std::io::Write;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -20,12 +21,58 @@ struct OutputState {
     value: serde_json::Value,
 }
 
-#[op2(fast)]
-pub fn op_set_output(state: &mut OpState, #[string] json: String) -> Result<(), std::io::Error> {
-    let value = serde_json::from_str::<serde_json::Value>(&json).map_err(|err| {
-        let any_error: AnyError = err.into();
-        std::io::Error::new(std::io::ErrorKind::InvalidData, any_error)
-    })?;
+#[derive(Clone, Copy, Default)]
+struct OutputConfig {
+    max_output_size: Option<usize>,
+}
+
+struct SizeLimitedWriter {
+    written: usize,
+    limit: usize,
+}
+
+impl Write for SizeLimitedWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let next = self.written.saturating_add(buf.len());
+        if next > self.limit {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "output size limit exceeded (max: {} bytes, got: {}+ bytes)",
+                    self.limit, self.limit
+                ),
+            ));
+        }
+        self.written = next;
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+#[op2]
+pub fn op_set_output(
+    state: &mut OpState,
+    #[serde] value: serde_json::Value,
+) -> Result<(), std::io::Error> {
+    if let Some(max_output_size) = state
+        .try_borrow::<OutputConfig>()
+        .and_then(|cfg| cfg.max_output_size)
+    {
+        let mut writer = SizeLimitedWriter {
+            written: 0,
+            limit: max_output_size,
+        };
+        serde_json::to_writer(&mut writer, &value).map_err(|err| {
+            if let Some(io_err) = err.io_error_kind() {
+                return std::io::Error::new(io_err, err.to_string());
+            }
+            std::io::Error::new(std::io::ErrorKind::InvalidData, err.to_string())
+        })?;
+    }
+
     state.put(OutputState { value });
     Ok(())
 }
@@ -49,6 +96,14 @@ impl SandboxRuntime for DenoSandbox {
         let code = code.to_string();
 
         let result = tokio::task::spawn_blocking(move || {
+            // Reserve a bounded headroom within the configured limit so V8 can unwind safely
+            // without allowing memory usage to exceed `options.memory_limit`.
+            let near_heap_headroom = (options.memory_limit / 8).clamp(256 * 1024, 16 * 1024 * 1024);
+            let initial_heap_limit = options
+                .memory_limit
+                .saturating_sub(near_heap_headroom)
+                .max(1);
+
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
@@ -59,12 +114,15 @@ impl SandboxRuntime for DenoSandbox {
                 let ext = sandbox_ext::init();
 
                 let create_params = v8::CreateParams::default()
-                    .heap_limits(0, options.memory_limit);
+                    .heap_limits(0, initial_heap_limit);
 
                 let mut js_runtime = JsRuntime::new(DenoOptions {
                     extensions: vec![ext],
                     create_params: Some(create_params),
                     ..Default::default()
+                });
+                js_runtime.op_state().borrow_mut().put(OutputConfig {
+                    max_output_size: options.max_output_size,
                 });
 
                 let isolate_handle = js_runtime.v8_isolate().thread_safe_handle();
@@ -81,6 +139,8 @@ impl SandboxRuntime for DenoSandbox {
                     near_heap_flag.store(true, Ordering::SeqCst);
                     near_heap_isolate.terminate_execution();
                     current_limit
+                        .saturating_add(near_heap_headroom)
+                        .min(options.memory_limit)
                 });
 
                 let watchdog_cancel = cancelled.clone();
@@ -132,11 +192,10 @@ impl SandboxRuntime for DenoSandbox {
                         try {{
                             const result = eval({});
                             const resolved = await Promise.resolve(result);
-                            const serialized = JSON.stringify(resolved);
-                            Deno.core.ops.op_set_output(serialized === undefined ? "null" : serialized);
+                            Deno.core.ops.op_set_output(resolved === undefined ? null : resolved);
                         }} catch (error) {{
                             const message = error instanceof Error ? error.message : String(error);
-                            Deno.core.ops.op_set_output(JSON.stringify({{ "__sandbox_error__": message }}));
+                            Deno.core.ops.op_set_output({{ "__sandbox_error__": message }});
                             throw error;
                         }}
                     }})()

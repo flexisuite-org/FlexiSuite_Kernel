@@ -25,7 +25,11 @@ async fn test_deno_async() {
     let code = "Promise.resolve(42)";
     let input = serde_json::Value::Null;
     let result = runtime.execute(code, input).await;
-    assert!(result.is_ok(), "Deno async execution failed: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "Deno async execution failed: {:?}",
+        result.err()
+    );
     assert_eq!(result.unwrap(), serde_json::json!(42));
 }
 
@@ -87,13 +91,16 @@ async fn test_deno_memory_limit() {
     options.wall_clock_limit = Duration::from_secs(10);
     options.cpu_time_limit = Duration::from_secs(10);
     let mut runtime = DenoSandbox::new(options);
-    let code = "const x = new Uint8Array(128 * 1024 * 1024); x.length;";
+    let code = "const items = []; for (let i = 0; i < 300_000; i++) { items.push({ i, s: 'memory-test-payload' }); } items.length;";
     let input = serde_json::Value::Null;
     match runtime.execute(code, input).await {
-        Ok(_) => {}
         Err(SandboxError::MemoryLimitExceeded) => {}
         Err(SandboxError::CpuLimitExceeded) => {}
         Err(SandboxError::Timeout) => {}
+        Ok(value) => panic!(
+            "Expected resource-limit error, got successful value: {:?}",
+            value
+        ),
         other => panic!("Expected MemoryLimitExceeded, got: {:?}", other),
     }
 }
@@ -108,8 +115,20 @@ async fn test_deno_cpu_limit() {
     let input = serde_json::Value::Null;
     match runtime.execute(code, input).await {
         Err(SandboxError::CpuLimitExceeded) => {}
-        Err(SandboxError::Timeout) => {}
         other => panic!("Expected CpuLimitExceeded, got: {:?}", other),
+    }
+}
+
+#[tokio::test]
+async fn test_deno_output_limit() {
+    let mut options = RuntimeOptions::default();
+    options.max_output_size = Some(5);
+    let mut runtime = DenoSandbox::new(options);
+    let code = "'123456'";
+    let input = serde_json::Value::Null;
+    match runtime.execute(code, input).await {
+        Err(SandboxError::RuntimeError(_)) => {}
+        other => panic!("Expected RuntimeError for output limit, got: {:?}", other),
     }
 }
 
@@ -129,7 +148,11 @@ async fn test_wasm_memory_limit() {
     let input = serde_json::Value::Null;
     match runtime.execute(wat, input).await.unwrap_err() {
         SandboxError::RuntimeError(e) => {
-            assert!(e.contains("memory minimum size") || e.contains("exceeds memory limits") || e.contains("memory out of bounds"));
+            assert!(
+                e.contains("memory minimum size")
+                    || e.contains("exceeds memory limits")
+                    || e.contains("memory out of bounds")
+            );
         }
         other => panic!("Expected RuntimeError, got: {:?}", other),
     }
@@ -182,10 +205,42 @@ async fn test_wasm_stdout_truncation() {
     let input = serde_json::Value::Null;
     match runtime.execute(wat, input).await.unwrap_err() {
         SandboxError::RuntimeError(e) => {
-            assert!(e.contains("stdout limit exceeded"), "Error message should contain 'stdout limit exceeded', got: {}", e);
+            assert!(
+                e.contains("stdout limit exceeded"),
+                "Error message should contain 'stdout limit exceeded', got: {}",
+                e
+            );
         }
         other => panic!("Expected RuntimeError for truncation, got: {:?}", other),
     }
+}
+
+#[tokio::test]
+async fn test_wasm_stdout_exact_limit_allowed() {
+    let wat = r#"
+    (module
+        (import "wasi_snapshot_preview1" "fd_write"
+            (func $fd_write (param i32 i32 i32 i32) (result i32)))
+        (memory (export "memory") 1)
+        (data (i32.const 0) "12345")
+        (func (export "_start")
+            (i32.store (i32.const 16) (i32.const 0))
+            (i32.store (i32.const 20) (i32.const 5))
+            (call $fd_write
+                (i32.const 1)
+                (i32.const 16)
+                (i32.const 1)
+                (i32.const 32))
+            drop
+        )
+    )
+    "#;
+    let mut options = RuntimeOptions::default();
+    options.max_output_size = Some(5);
+    let mut runtime = WasmSandbox::new(options).unwrap();
+    let input = serde_json::Value::Null;
+    let output = runtime.execute(wat, input).await.unwrap();
+    assert_eq!(output, serde_json::json!("12345"));
 }
 
 #[tokio::test]
@@ -195,6 +250,34 @@ async fn test_wasm_invalid_wat() {
     let mut runtime = WasmSandbox::new(options).unwrap();
     let input = serde_json::Value::Null;
     assert!(runtime.execute(wat, input).await.is_err());
+}
+
+#[tokio::test]
+async fn test_wasm_invalid_wat_does_not_block_next_execution() {
+    let mut options = RuntimeOptions::default();
+    options.wall_clock_limit = Duration::from_secs(2);
+    let mut runtime = WasmSandbox::new(options).unwrap();
+
+    let invalid_wat = "(module (func";
+    let input = serde_json::Value::Null;
+    assert!(runtime.execute(invalid_wat, input.clone()).await.is_err());
+
+    let valid_wat = r#"
+    (module
+        (func (export "_start")
+            nop
+        )
+    )
+    "#;
+    let second = tokio::time::timeout(
+        Duration::from_millis(300),
+        runtime.execute(valid_wat, input),
+    )
+    .await;
+    assert!(
+        second.is_ok(),
+        "second execution timed out, watchdog cleanup may be leaking between runs"
+    );
 }
 
 #[tokio::test]

@@ -12,7 +12,6 @@ use wasmtime_wasi::p2::pipe::{MemoryInputPipe, MemoryOutputPipe};
 pub struct WasmSandbox {
     engine: Engine,
     options: RuntimeOptions,
-    watchdog: Option<(Arc<AtomicBool>, std::thread::JoinHandle<()>)>,
 }
 
 impl WasmSandbox {
@@ -24,7 +23,7 @@ impl WasmSandbox {
 
         let engine = Engine::new(&config).map_err(|e| SandboxError::InitError(e.to_string()))?;
 
-        Ok(Self { engine, options, watchdog: None })
+        Ok(Self { engine, options })
     }
 }
 
@@ -40,7 +39,9 @@ fn map_wasm_error(error: anyhow::Error) -> SandboxError {
             Trap::OutOfFuel => SandboxError::CpuLimitExceeded,
             Trap::Interrupt => SandboxError::Timeout,
             Trap::AllocationTooLarge => SandboxError::MemoryLimitExceeded,
-            Trap::MemoryOutOfBounds => SandboxError::RuntimeError("memory out of bounds".to_string()),
+            Trap::MemoryOutOfBounds => {
+                SandboxError::RuntimeError("memory out of bounds".to_string())
+            }
             _ => SandboxError::RuntimeError(error.to_string()),
         };
     }
@@ -74,8 +75,11 @@ impl SandboxRuntime for WasmSandbox {
         wasmtime_wasi::p1::add_to_linker_async(&mut linker, |ctx: &mut Ctx| &mut ctx.wasi)
             .map_err(|e| SandboxError::InitError(e.to_string()))?;
 
-        let max_stdout = self.options.max_output_size.unwrap_or(1 << 20);
-        let stdout = MemoryOutputPipe::new(max_stdout);
+        let max_stdout = self.options.max_output_size;
+        let stdout_capacity = max_stdout
+            .map(|limit| limit.saturating_add(1))
+            .unwrap_or(usize::MAX);
+        let stdout = MemoryOutputPipe::new(stdout_capacity);
         let input_json = serde_json::to_string(&input)
             .map_err(|e| SandboxError::RuntimeError(format!("failed to serialize input: {e}")))?;
         let mut wasi_builder = WasiCtxBuilder::new();
@@ -106,10 +110,6 @@ impl SandboxRuntime for WasmSandbox {
         store
             .set_fuel(fuel)
             .map_err(|e| SandboxError::InitError(e.to_string()))?;
-        if let Some((cancel, handle)) = self.watchdog.take() {
-            cancel.store(true, Ordering::SeqCst);
-            let _ = handle.join();
-        }
         store.set_epoch_deadline(1);
         store.epoch_deadline_trap();
         let engine_clone = self.engine.clone();
@@ -132,31 +132,62 @@ impl SandboxRuntime for WasmSandbox {
                 engine_clone.increment_epoch();
             }
         });
-        self.watchdog = Some((cancel_watchdog.clone(), watchdog_handle));
+        let mut watchdog = Some((cancel_watchdog.clone(), watchdog_handle));
+        let mut stop_watchdog = || {
+            if let Some((cancel, handle)) = watchdog.take() {
+                cancel.store(true, Ordering::SeqCst);
+                let _ = handle.join();
+            }
+        };
 
         let compile_engine = self.engine.clone();
         let compile_code = code.to_string();
         let module =
-            tokio::task::spawn_blocking(move || Module::new(&compile_engine, compile_code))
+            match tokio::task::spawn_blocking(move || Module::new(&compile_engine, compile_code))
                 .await
-                .map_err(|e| SandboxError::RuntimeError(e.to_string()))?
-                .map_err(map_wasm_error)?;
+            {
+                Ok(Ok(module)) => module,
+                Ok(Err(e)) => {
+                    stop_watchdog();
+                    return Err(map_wasm_error(e.into()));
+                }
+                Err(e) => {
+                    stop_watchdog();
+                    return Err(SandboxError::RuntimeError(e.to_string()));
+                }
+            };
 
-        let instance = linker
-            .instantiate_async(&mut store, &module)
-            .await
-            .map_err(map_wasm_error)?;
+        let instance = match linker.instantiate_async(&mut store, &module).await {
+            Ok(instance) => instance,
+            Err(e) => {
+                stop_watchdog();
+                return Err(map_wasm_error(e));
+            }
+        };
 
-        let start = instance
-            .get_typed_func::<(), ()>(&mut store, "_start")
-            .map_err(map_wasm_error)?;
+        let start = match instance.get_typed_func::<(), ()>(&mut store, "_start") {
+            Ok(start) => start,
+            Err(e) => {
+                stop_watchdog();
+                return Err(map_wasm_error(e));
+            }
+        };
 
         let execution = start.call_async(&mut store, ());
 
         match execution.await {
             Ok(_) => {}
             Err(e) => {
-                cancel_watchdog.store(true, Ordering::SeqCst);
+                stop_watchdog();
+                if let Some(max_stdout) = max_stdout {
+                    let message = e.to_string();
+                    if message.contains("write beyond capacity of MemoryOutputPipe") {
+                        return Err(SandboxError::RuntimeError(format!(
+                            "stdout limit exceeded (max: {} bytes). Output may be truncated.",
+                            max_stdout
+                        )));
+                    }
+                }
                 let mapped = map_wasm_error(e);
                 if matches!(mapped, SandboxError::RuntimeError(_)) {
                     if is_wall_timeout.load(Ordering::SeqCst) {
@@ -167,10 +198,12 @@ impl SandboxRuntime for WasmSandbox {
             }
         }
 
-        cancel_watchdog.store(true, Ordering::SeqCst);
+        stop_watchdog();
 
         let stdout_bytes = store.data().stdout.contents();
-        if stdout_bytes.len() >= max_stdout {
+        if let Some(max_stdout) = max_stdout
+            && stdout_bytes.len() > max_stdout
+        {
             return Err(SandboxError::RuntimeError(format!(
                 "stdout limit exceeded (max: {} bytes). Output may be truncated.",
                 max_stdout
@@ -180,7 +213,10 @@ impl SandboxRuntime for WasmSandbox {
             SandboxError::RuntimeError(format!(
                 "stdout contains invalid UTF-8: {}. Raw bytes (hex): {}",
                 e,
-                stdout_bytes.iter().map(|b| format!("{:02x}", b)).collect::<String>()
+                stdout_bytes
+                    .iter()
+                    .map(|b| format!("{:02x}", b))
+                    .collect::<String>()
             ))
         })?;
         Ok(serde_json::Value::String(output))
