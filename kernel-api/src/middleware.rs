@@ -266,7 +266,18 @@ impl IdempotencyStore for InMemoryIdempotencyStore {
         &self,
         key: &IdempotencyScopeKey,
     ) -> Result<Option<IdempotencyEntry>, IdempotencyStoreError> {
-        Ok(self.inner.lock().await.get(key).cloned())
+        let mut lock = self.inner.lock().await;
+        if let Some(entry) = lock.get(key) {
+            if let IdempotencyEntry::InFlight { expires_at, .. } = entry {
+                if *expires_at <= Instant::now() {
+                    lock.remove(key);
+                    return Ok(None);
+                }
+            }
+            Ok(lock.get(key).cloned())
+        } else {
+            Ok(None)
+        }
     }
 
     async fn try_acquire(
@@ -277,7 +288,16 @@ impl IdempotencyStore for InMemoryIdempotencyStore {
     ) -> Result<IdempotencyAcquireResult, IdempotencyStoreError> {
         let mut lock = self.inner.lock().await;
         if let Some(entry) = lock.get(&key) {
-            return Ok(IdempotencyAcquireResult::Existing(entry.clone()));
+            if let IdempotencyEntry::InFlight { expires_at, .. } = entry {
+                if *expires_at <= Instant::now() {
+                    lock.remove(&key);
+                    // 期限切れのため、新規リースとして続行
+                } else {
+                    return Ok(IdempotencyAcquireResult::Existing(entry.clone()));
+                }
+            } else {
+                return Ok(IdempotencyAcquireResult::Existing(entry.clone()));
+            }
         }
 
         let lease = IdempotencyLease {
