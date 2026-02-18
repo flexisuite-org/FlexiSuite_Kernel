@@ -13,7 +13,7 @@ impl MigrationTrait for Migration {
             r#"
             CREATE TABLE IF NOT EXISTS flexi.key_record (
                 kid TEXT PRIMARY KEY,
-                key_type TEXT NOT NULL CHECK (key_type IN ('hmac', 'paseto_public', 'paseto_private')),
+                key_type TEXT NOT NULL CHECK (key_type IN ('hmac', 'paseto_public')),
                 algorithm TEXT NOT NULL,
                 secret_bytes BYTEA,
                 public_bytes BYTEA,
@@ -31,6 +31,8 @@ impl MigrationTrait for Migration {
             CREATE INDEX IF NOT EXISTS idx_key_record_type_state ON flexi.key_record (key_type, state);
             CREATE UNIQUE INDEX IF NOT EXISTS uq_key_record_active_per_type
                 ON flexi.key_record (key_type) WHERE state = 'active';
+            CREATE UNIQUE INDEX IF NOT EXISTS uq_key_record_next_per_type
+                ON flexi.key_record (key_type) WHERE state = 'next';
             "#
         ).await?;
 

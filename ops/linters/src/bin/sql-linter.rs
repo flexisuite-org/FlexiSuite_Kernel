@@ -43,7 +43,7 @@ fn main() -> Result<()> {
             let s = c.as_os_str().to_string_lossy();
             s.starts_with('.') && s != "." && s != ".."
         }) || path.components().any(|c| c.as_os_str() == "target")
-            || path.to_string_lossy().contains("ops/linters")
+            || path.iter().any(|c| c.to_string_lossy() == "ops") && path.iter().any(|c| c.to_string_lossy() == "linters")
         {
             continue;
         }
@@ -97,7 +97,7 @@ fn main() -> Result<()> {
                             errors = true;
                         }
 
-                        if re_revoke.find_iter(window).next().is_none() {
+                        if !re_revoke.is_match(window) {
                             eprintln!(
                                 "{}:{}: SECURITY DEFINER found without nearby 'REVOKE ... FROM PUBLIC'",
                                 path.display(),

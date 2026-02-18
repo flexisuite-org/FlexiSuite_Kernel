@@ -46,7 +46,7 @@ async fn test_audit_log_creation() {
     // Set Internal Secret
     db.execute_unprepared(&format!(
         "ALTER ROLE postgres SET flexi.hmac_secret = '{}'",
-        TEST_INTERNAL_SECRET
+        TEST_INTERNAL_SECRET.replace("'", "''")
     ))
     .await
     .expect("Failed to set secret");
