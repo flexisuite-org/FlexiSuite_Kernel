@@ -5,11 +5,11 @@ use axum::{
     middleware,
     routing::post,
 };
-use tower::ServiceExt; // for oneshot
-use kernel_api::middleware::{MiddlewareConfig, MiddlewareState, idempotency_middleware};
 use kernel_api::auth::{TenantContext, TenantId, UserId};
+use kernel_api::middleware::{MiddlewareConfig, MiddlewareState, idempotency_middleware};
 use std::time::Duration;
 use tokio::task::JoinSet;
+use tower::ServiceExt; // for oneshot
 
 #[tokio::test]
 async fn test_idempotency_loop_limit() {
@@ -86,7 +86,7 @@ async fn test_idempotency_loop_limit() {
         _other_count
     );
     assert_eq!(
-        service_unavailable_count + _internal_error_count + _conflict_count + _other_count,
+        service_unavailable_count + _internal_error_count + _conflict_count,
         num_requests,
         "Missing responses from idempotency loop"
     );

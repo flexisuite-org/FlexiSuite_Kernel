@@ -1,9 +1,9 @@
 use kernel_core::auth::{KeyManager, TenantContext, TenantId, UserId};
 use kernel_data::connection::with_tenant_tx;
-use sea_orm::{Database, ConnectionTrait};
-use testcontainers::{clients, RunnableImage};
-use testcontainers_modules::postgres::Postgres;
 use migration::MigratorTrait;
+use sea_orm::{ConnectionTrait, Database};
+use testcontainers::{RunnableImage, clients};
+use testcontainers_modules::postgres::Postgres;
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_auth_failures() {
@@ -21,17 +21,25 @@ async fn test_auth_failures() {
     db.execute_unprepared("DO $$ BEGIN IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = 'flexi') THEN CREATE ROLE flexi; END IF; END $$;").await.unwrap();
 
     // Run Migrations (creates key table and authorized_tenant function)
-    migration::Migrator::up(&db, None).await.expect("Failed to run migrations");
+    migration::Migrator::up(&db, None)
+        .await
+        .expect("Failed to run migrations");
 
     // Set Internal Secret
-    db.execute_unprepared("ALTER ROLE postgres SET flexi.hmac_secret = 'internal-secret'").await.unwrap();
-    
+    db.execute_unprepared("ALTER ROLE postgres SET flexi.hmac_secret = 'internal-secret'")
+        .await
+        .unwrap();
+
     // Reconnect
     drop(db);
-    let db = Database::connect(&connection_string).await.expect("Failed to reconnect");
+    let db = Database::connect(&connection_string)
+        .await
+        .expect("Failed to reconnect");
 
     // Init Keys
-    KeyManager::rotate_keys(&db).await.expect("Failed to init keys");
+    KeyManager::rotate_keys(&db)
+        .await
+        .expect("Failed to init keys");
 
     let tenant_id = TenantId::new("tenant-x").unwrap();
     let ctx = TenantContext::new(tenant_id.clone(), Some(UserId::new("user-1").unwrap()));
@@ -47,26 +55,41 @@ async fn test_auth_failures() {
 
     // 3. Test: Valid format, Invalid Signature
     // Generate a valid-ish token
-    let real_token = KeyManager::generate_tenant_token(&db, "tenant-x").await.unwrap();
+    let real_token = KeyManager::generate_tenant_token(&db, &tenant_id)
+        .await
+        .unwrap();
     // Tamper with signature (last part)
     let parts: Vec<&str> = real_token.split(':').collect();
-    let tampered_token = format!("{}:{}:{}:{}:{}:bad_sig", parts[0], parts[1], parts[2], parts[3], parts[4]);
+    let tampered_token = format!(
+        "{}:{}:{}:{}:{}:bad_sig",
+        parts[0], parts[1], parts[2], parts[3], parts[4]
+    );
 
     let res = with_tenant_tx(&db, &ctx, &tampered_token, |_| Box::pin(async { Ok(()) })).await;
     assert!(res.is_err(), "Should fail with invalid signature");
 
     // 4. Test: Missing Internal Secret
     // Unset secret
-    db.execute_unprepared("ALTER ROLE postgres RESET flexi.hmac_secret").await.unwrap();
+    db.execute_unprepared("ALTER ROLE postgres RESET flexi.hmac_secret")
+        .await
+        .unwrap();
 
     // Reconnect
     drop(db);
-    let db = Database::connect(&connection_string).await.expect("Reconnect");
+    let db = Database::connect(&connection_string)
+        .await
+        .expect("Reconnect");
 
-    let token = KeyManager::generate_tenant_token(&db, "tenant-x").await.unwrap();
+    let token = KeyManager::generate_tenant_token(&db, &tenant_id)
+        .await
+        .unwrap();
 
     let res = with_tenant_tx(&db, &ctx, &token, |_| Box::pin(async { Ok(()) })).await;
     assert!(res.is_err());
     let err = res.unwrap_err().to_string();
-    assert!(err.contains("Internal HMAC secret not set"), "Should fail due to missing internal secret: {}", err);
+    assert!(
+        err.contains("Internal HMAC secret not set"),
+        "Should fail due to missing internal secret: {}",
+        err
+    );
 }

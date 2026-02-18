@@ -8,8 +8,7 @@ use crate::error::DataError;
 use async_trait::async_trait;
 use sea_orm::sea_query::{Expr, OnConflict};
 use sea_orm::{
-    ActiveModelTrait, ActiveValue, ColumnTrait, EntityTrait, QueryFilter,
-    QueryOrder, QuerySelect,
+    ActiveModelTrait, ActiveValue, ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect,
 };
 use uuid::Uuid;
 
@@ -284,9 +283,10 @@ impl TenantRepository for TenantScoped<RawConnection> {
         resource: String,
         details: serde_json::Value,
     ) -> Result<(), DataError> {
-        let user_id = self.user_id.clone().ok_or_else(|| {
-            DataError::ValidationError("missing actor for audit log".to_string())
-        })?;
+        let user_id = self
+            .user_id
+            .clone()
+            .ok_or_else(|| DataError::ValidationError("missing actor for audit log".to_string()))?;
         let user_id_str = pseudonymize_user_id_for_audit(self.tenant_id.as_str(), user_id.as_str());
 
         let log = audit_log::ActiveModel {

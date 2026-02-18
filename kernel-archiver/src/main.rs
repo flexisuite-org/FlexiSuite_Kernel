@@ -96,6 +96,9 @@ async fn main() -> Result<()> {
         .await
         .context("failed to connect database")?;
     info!("Connected to database");
+    KeyManager::rotate_keys(&db)
+        .await
+        .context("failed to initialize key rotation state at startup")?;
 
     let region_provider = RegionProviderChain::first_try(Region::new(config.region_name.clone()));
     let aws_config = aws_config::defaults(aws_config::BehaviorVersion::latest())
@@ -239,17 +242,43 @@ fn parse_object_lock_config() -> Result<Option<ObjectLockConfig>> {
         return Err(anyhow!("S3_OBJECT_LOCK_DAYS must be > 0"));
     }
 
-    Ok(Some(ObjectLockConfig { mode, retain_days: days }))
+    Ok(Some(ObjectLockConfig {
+        mode,
+        retain_days: days,
+    }))
 }
 
 async fn run_archive_cycle(db: &DatabaseConnection, s3: &Client, config: &AppConfig) -> Result<()> {
+    KeyManager::rotate_keys(db)
+        .await
+        .context("failed to ensure active keys before archive cycle")?;
+
     for tenant_id in &config.tenant_ids {
         let ctx = TenantContext::new(tenant_id.clone(), None);
         let bucket = config.s3_bucket.clone();
         let lock_config = config.object_lock.clone();
         let batch_size = config.batch_size;
-        let fetch_token = match KeyManager::generate_tenant_token(db, tenant_id.as_str()).await {
+        let fetch_token = match KeyManager::generate_tenant_token(db, tenant_id).await {
             Ok(token) => token,
+            Err(kernel_core::auth::KeyManagerError::NoActiveKey(_)) => {
+                if let Err(rotate_err) = KeyManager::rotate_keys(db).await {
+                    error!(
+                        "Failed to recover missing active key for tenant {}: {}",
+                        tenant_id, rotate_err
+                    );
+                    continue;
+                }
+                match KeyManager::generate_tenant_token(db, tenant_id).await {
+                    Ok(token) => token,
+                    Err(e) => {
+                        error!(
+                            "Failed to generate token for tenant {} after recovery: {}",
+                            tenant_id, e
+                        );
+                        continue;
+                    }
+                }
+            }
             Err(e) => {
                 error!("Failed to generate token for tenant {}: {}", tenant_id, e);
                 continue;
@@ -258,9 +287,7 @@ async fn run_archive_cycle(db: &DatabaseConnection, s3: &Client, config: &AppCon
 
         let fetched = with_tenant_tx(db, &ctx, &fetch_token, |repo| {
             Box::pin(async move {
-                let histories = repo
-                    .find_unarchived_entity_histories(batch_size)
-                    .await?;
+                let histories = repo.find_unarchived_entity_histories(batch_size).await?;
                 let logs = repo.find_unarchived_audit_logs(batch_size).await?;
                 Ok((histories, logs))
             })
@@ -279,7 +306,7 @@ async fn run_archive_cycle(db: &DatabaseConnection, s3: &Client, config: &AppCon
         };
 
         let tenant_id_str = ctx.tenant_id().to_string();
-        
+
         let entity_histories_result = archive_items(
             "entity history",
             "entity-history",
@@ -305,7 +332,10 @@ async fn run_archive_cycle(db: &DatabaseConnection, s3: &Client, config: &AppCon
         let entity_history_ids = match entity_histories_result {
             Ok(ids) => ids,
             Err(e) => {
-                error!("Tenant {} failed to archive entity history: {}", tenant_id, e);
+                error!(
+                    "Tenant {} failed to archive entity history: {}",
+                    tenant_id, e
+                );
                 Vec::new()
             }
         };
@@ -327,8 +357,27 @@ async fn run_archive_cycle(db: &DatabaseConnection, s3: &Client, config: &AppCon
             continue;
         }
 
-        let mark_token = match KeyManager::generate_tenant_token(db, tenant_id.as_str()).await {
+        let mark_token = match KeyManager::generate_tenant_token(db, tenant_id).await {
             Ok(token) => token,
+            Err(kernel_core::auth::KeyManagerError::NoActiveKey(_)) => {
+                if let Err(rotate_err) = KeyManager::rotate_keys(db).await {
+                    error!(
+                        "Failed to recover missing active mark key for tenant {}: {}",
+                        tenant_id, rotate_err
+                    );
+                    continue;
+                }
+                match KeyManager::generate_tenant_token(db, tenant_id).await {
+                    Ok(token) => token,
+                    Err(e) => {
+                        error!(
+                            "Failed to generate mark token for tenant {} after recovery: {}",
+                            tenant_id, e
+                        );
+                        continue;
+                    }
+                }
+            }
             Err(e) => {
                 error!(
                     "Failed to generate mark token for tenant {}: {}",

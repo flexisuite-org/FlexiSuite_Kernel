@@ -27,8 +27,10 @@ impl MigrationTrait for Migration {
                 expires_at TIMESTAMPTZ
             );
 
-            CREATE INDEX idx_key_record_state ON flexi.key_record (state);
-            CREATE INDEX idx_key_record_type_state ON flexi.key_record (key_type, state);
+            CREATE INDEX IF NOT EXISTS idx_key_record_state ON flexi.key_record (state);
+            CREATE INDEX IF NOT EXISTS idx_key_record_type_state ON flexi.key_record (key_type, state);
+            CREATE UNIQUE INDEX IF NOT EXISTS uq_key_record_active_per_type
+                ON flexi.key_record (key_type) WHERE state = 'active';
             "#
         ).await?;
 
@@ -125,7 +127,7 @@ impl MigrationTrait for Migration {
 
                 PERFORM set_config('flexi.ctx_sig', encode(hmac(tenant_id_val, internal_secret, 'sha256'), 'hex'), true);
             END;
-            $$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = flexi, public, pg_catalog, pg_temp;
+            $$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = flexi, pg_catalog, pg_temp;
             "#
         ).await?;
 
@@ -141,7 +143,7 @@ impl MigrationTrait for Migration {
         // So we should revert the function first.
 
         // Re-create original authorize_tenant
-         db.execute_unprepared(
+        db.execute_unprepared(
             r#"
             CREATE OR REPLACE FUNCTION flexi.authorize_tenant(token_val text) RETURNS void AS $$
             DECLARE
@@ -180,11 +182,25 @@ impl MigrationTrait for Migration {
                 PERFORM set_config('flexi.current_tenant', tenant_id_val, true);
                 PERFORM set_config('flexi.ctx_sig', encode(hmac(tenant_id_val, secret, 'sha256'), 'hex'), true);
             END;
-            $$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = flexi, public, pg_catalog, pg_temp;
+            $$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = flexi, pg_catalog, pg_temp;
             "#
         ).await?;
 
-        db.execute_unprepared("DROP TABLE IF EXISTS flexi.key_record").await?;
+        db.execute_unprepared(
+            r#"
+            REVOKE ALL ON FUNCTION flexi.authorize_tenant(text) FROM PUBLIC;
+            DO $$
+            BEGIN
+                IF EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = 'flexi') THEN
+                    GRANT EXECUTE ON FUNCTION flexi.authorize_tenant(text) TO flexi;
+                END IF;
+            END $$;
+            "#,
+        )
+        .await?;
+
+        db.execute_unprepared("DROP TABLE IF EXISTS flexi.key_record")
+            .await?;
 
         Ok(())
     }

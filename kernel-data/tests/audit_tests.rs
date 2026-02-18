@@ -1,5 +1,5 @@
 use kernel_core::auth::{KeyManager, TenantContext, TenantId, UserId};
-use kernel_data::connection::{with_tenant_tx, TenantScoped, RawConnection};
+use kernel_data::connection::{RawConnection, TenantScoped, with_tenant_tx};
 use kernel_data::entities::{audit_log, entity_history, entity_record};
 use kernel_data::repository::TenantRepository;
 use migration::MigratorTrait;
@@ -40,9 +40,12 @@ async fn test_audit_log_creation() {
         .expect("Failed to run migrations");
 
     // Set Internal Secret
-    db.execute_unprepared(&format!("ALTER ROLE postgres SET flexi.hmac_secret = '{}'", TEST_INTERNAL_SECRET))
-        .await
-        .expect("Failed to set secret");
+    db.execute_unprepared(&format!(
+        "ALTER ROLE postgres SET flexi.hmac_secret = '{}'",
+        TEST_INTERNAL_SECRET
+    ))
+    .await
+    .expect("Failed to set secret");
 
     drop(db);
     let db = Database::connect(&connection_string)
@@ -50,7 +53,9 @@ async fn test_audit_log_creation() {
         .expect("Reconnect failed");
 
     // Init Keys
-    KeyManager::rotate_keys(&db).await.expect("Failed to init keys");
+    KeyManager::rotate_keys(&db)
+        .await
+        .expect("Failed to init keys");
 
     // Tenant Context
     let tenant_id = TenantId::new("audit-tenant").unwrap();
@@ -60,22 +65,27 @@ async fn test_audit_log_creation() {
     // 1. Create Entity -> Should create history
     let entity_id = Uuid::now_v7().to_string();
     let entity_id_clone = entity_id.clone();
-    let token_create = KeyManager::generate_tenant_token(&db, tenant_id.as_str())
+    let token_create = KeyManager::generate_tenant_token(&db, &tenant_id)
         .await
         .expect("Failed to gen token for create");
 
-    with_tenant_tx(&db, &ctx, &token_create, |repo: &TenantScoped<RawConnection>| {
-        Box::pin(async move {
-            let active_model = entity_record::ActiveModel {
-                id: ActiveValue::Set(entity_id_clone),
-                entity_type: ActiveValue::Set("test-audit".to_string()),
-                content: ActiveValue::Set(serde_json::json!({"val": 1})),
-                ..Default::default()
-            };
-            repo.create_entity(active_model).await?;
-            Ok(())
-        })
-    })
+    with_tenant_tx(
+        &db,
+        &ctx,
+        &token_create,
+        |repo: &TenantScoped<RawConnection>| {
+            Box::pin(async move {
+                let active_model = entity_record::ActiveModel {
+                    id: ActiveValue::Set(entity_id_clone),
+                    entity_type: ActiveValue::Set("test-audit".to_string()),
+                    content: ActiveValue::Set(serde_json::json!({"val": 1})),
+                    ..Default::default()
+                };
+                repo.create_entity(active_model).await?;
+                Ok(())
+            })
+        },
+    )
     .await
     .expect("Create entity failed");
 
@@ -96,20 +106,25 @@ async fn test_audit_log_creation() {
 
     // 2. Update Entity -> Should create history
     let entity_id_clone = entity_id.clone();
-    let token_update = KeyManager::generate_tenant_token(&db, tenant_id.as_str())
+    let token_update = KeyManager::generate_tenant_token(&db, &tenant_id)
         .await
         .expect("Failed to gen token for update");
-    with_tenant_tx(&db, &ctx, &token_update, |repo: &TenantScoped<RawConnection>| {
-        Box::pin(async move {
-            let active_model = entity_record::ActiveModel {
-                id: ActiveValue::Set(entity_id_clone),
-                content: ActiveValue::Set(serde_json::json!({"val": 2})),
-                ..Default::default()
-            };
-            repo.update_entity(active_model).await?;
-            Ok(())
-        })
-    })
+    with_tenant_tx(
+        &db,
+        &ctx,
+        &token_update,
+        |repo: &TenantScoped<RawConnection>| {
+            Box::pin(async move {
+                let active_model = entity_record::ActiveModel {
+                    id: ActiveValue::Set(entity_id_clone),
+                    content: ActiveValue::Set(serde_json::json!({"val": 2})),
+                    ..Default::default()
+                };
+                repo.update_entity(active_model).await?;
+                Ok(())
+            })
+        },
+    )
     .await
     .expect("Update entity failed");
 
@@ -128,20 +143,25 @@ async fn test_audit_log_creation() {
     );
 
     // 3. Log Audit
-    let token_audit = KeyManager::generate_tenant_token(&db, tenant_id.as_str())
+    let token_audit = KeyManager::generate_tenant_token(&db, &tenant_id)
         .await
         .expect("Failed to gen token for audit");
-    with_tenant_tx(&db, &ctx, &token_audit, |repo: &TenantScoped<RawConnection>| {
-        Box::pin(async move {
-            repo.log_audit(
-                "test.action".to_string(),
-                "resource:1".to_string(),
-                serde_json::json!({"details": "foo"}),
-            )
-            .await?;
-            Ok(())
-        })
-    })
+    with_tenant_tx(
+        &db,
+        &ctx,
+        &token_audit,
+        |repo: &TenantScoped<RawConnection>| {
+            Box::pin(async move {
+                repo.log_audit(
+                    "test.action".to_string(),
+                    "resource:1".to_string(),
+                    serde_json::json!({"details": "foo"}),
+                )
+                .await?;
+                Ok(())
+            })
+        },
+    )
     .await
     .expect("Log audit failed");
 
@@ -160,16 +180,23 @@ async fn test_audit_log_creation() {
     let other_tenant_id = TenantId::new("audit-tenant-other").unwrap();
     let other_user_id = UserId::new("user-audit-other").unwrap();
     let other_ctx = TenantContext::new(other_tenant_id.clone(), Some(other_user_id.clone()));
-    let other_token = KeyManager::generate_tenant_token(&db, other_tenant_id.as_str()).await.expect("Failed to gen token other");
-    
+    let other_token = KeyManager::generate_tenant_token(&db, &other_tenant_id)
+        .await
+        .expect("Failed to gen token other");
+
     let entity_id_clone = entity_id.clone();
-    with_tenant_tx(&db, &other_ctx, &other_token, |repo: &TenantScoped<RawConnection>| {
-        Box::pin(async move {
-            let entity = repo.get_entity(&entity_id_clone).await?;
-            assert!(entity.is_none(), "Cross-tenant entity should be invisible");
-            Ok(())
-        })
-    })
+    with_tenant_tx(
+        &db,
+        &other_ctx,
+        &other_token,
+        |repo: &TenantScoped<RawConnection>| {
+            Box::pin(async move {
+                let entity = repo.get_entity(&entity_id_clone).await?;
+                assert!(entity.is_none(), "Cross-tenant entity should be invisible");
+                Ok(())
+            })
+        },
+    )
     .await
     .expect("Cross-tenant get_entity failed");
 

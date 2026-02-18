@@ -5,11 +5,11 @@ use axum::{
     middleware::from_fn,
     routing::{get, post},
 };
+use sea_orm::DatabaseConnection;
 use serde::Serialize;
+use std::sync::Arc;
 use tokio::task::JoinHandle;
 use uuid::Uuid;
-use sea_orm::DatabaseConnection;
-use std::sync::Arc;
 
 use crate::auth::{TenantContext, auth_middleware};
 use crate::middleware::{
@@ -18,8 +18,8 @@ use crate::middleware::{
 };
 
 pub mod auth;
-pub mod middleware;
 pub mod diagnostics;
+pub mod middleware;
 pub mod profile;
 
 #[derive(Serialize)]
@@ -39,7 +39,10 @@ pub fn build_app(config: MiddlewareConfig, db: DatabaseConnection) -> (Router, J
     build_app_with_state(MiddlewareState::new(config), db)
 }
 
-pub fn build_app_with_state(state: MiddlewareState, db: DatabaseConnection) -> (Router, JoinHandle<()>) {
+pub fn build_app_with_state(
+    state: MiddlewareState,
+    db: DatabaseConnection,
+) -> (Router, JoinHandle<()>) {
     let cleanup_handle = state.start_cleanup_task();
 
     let public_router = Router::new().route("/health", get(|| async { "OK" }));

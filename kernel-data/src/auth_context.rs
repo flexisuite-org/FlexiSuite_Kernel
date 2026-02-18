@@ -1,7 +1,7 @@
-use std::fmt;
-use std::str::FromStr;
 use serde::de::{self, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
+use std::fmt;
+use std::str::FromStr;
 
 macro_rules! define_principal_id {
     ($type_name:ident, $label:literal) => {
@@ -40,7 +40,7 @@ macro_rules! define_principal_id {
                 if is_valid_principal(&s) {
                     Ok(Self(s))
                 } else {
-                    Err(format!("Invalid {} format: {}", $label, s))
+                    Err(format!("Invalid {} format", $label))
                 }
             }
 
@@ -103,7 +103,7 @@ pub fn is_valid_principal(value: &str) -> bool {
     let bytes = value.as_bytes();
     !bytes.is_empty()
         && bytes.len() <= 128
-        && bytes.iter().all(
-            |b| matches!(*b, b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'-' | b'_' | b'.'),
-        )
+        && bytes
+            .iter()
+            .all(|b| matches!(*b, b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'-' | b'_' | b'.'))
 }

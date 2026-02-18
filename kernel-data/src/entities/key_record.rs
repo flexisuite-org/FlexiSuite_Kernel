@@ -1,12 +1,13 @@
 use sea_orm::entity::prelude::*;
 use serde::Serialize;
+use std::fmt;
 
-#[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
+#[derive(Clone, PartialEq, Eq, DeriveEntityModel)]
 #[sea_orm(table_name = "key_record", schema_name = "flexi")]
 pub struct Model {
     #[sea_orm(primary_key, auto_increment = false)]
     pub kid: String,
-    pub key_type: String, // 'hmac', 'paseto_public', 'paseto_private'
+    pub key_type: String,  // 'hmac', 'paseto_public', 'paseto_private'
     pub algorithm: String, // 'HS256', 'Ed25519'
     #[sea_orm(column_type = "Blob", nullable)]
     pub secret_bytes: Option<Vec<u8>>,
@@ -18,6 +19,30 @@ pub struct Model {
     pub retired_at: Option<DateTimeWithTimeZone>,
     pub revoked_at: Option<DateTimeWithTimeZone>,
     pub expires_at: Option<DateTimeWithTimeZone>,
+}
+
+impl fmt::Debug for Model {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Model")
+            .field("kid", &self.kid)
+            .field("key_type", &self.key_type)
+            .field("algorithm", &self.algorithm)
+            .field(
+                "secret_bytes",
+                &self.secret_bytes.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field(
+                "public_bytes",
+                &self.public_bytes.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field("state", &self.state)
+            .field("created_at", &self.created_at)
+            .field("activated_at", &self.activated_at)
+            .field("retired_at", &self.retired_at)
+            .field("revoked_at", &self.revoked_at)
+            .field("expires_at", &self.expires_at)
+            .finish()
+    }
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

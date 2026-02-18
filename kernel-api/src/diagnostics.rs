@@ -9,8 +9,7 @@ use chrono::Utc;
 use kernel_core::auth::{KeyManager, TenantContext};
 use kernel_core::diagnostics::{DiagnosticContext, sanitizer::PIISanitizer};
 use kernel_data::{
-    DataError, TenantScoped,
-    TenantRepository,
+    DataError, TenantRepository, TenantScoped,
     connection::RawConnection,
     entities::{diagnostic_policy, diagnostic_report},
     with_tenant_tx,
@@ -25,11 +24,7 @@ const MAX_STRING_LEN: usize = 256;
 /// Maximum allowed length for DOM snapshot
 const MAX_DOM_SNAPSHOT_LEN: usize = 1024 * 1024; // 1MB
 
-fn validate_string_length(
-    value: &str,
-    field_name: &str,
-    max_len: usize,
-) -> Result<(), StatusCode> {
+fn validate_string_length(value: &str, field_name: &str, max_len: usize) -> Result<(), StatusCode> {
     if value.len() > max_len {
         tracing::warn!(
             field = %field_name,
@@ -63,10 +58,7 @@ pub struct UpdatePolicyRequest {
 #[serde(untagged)]
 enum DiagnosticPolicyResponse {
     Configured(diagnostic_policy::Model),
-    NotConfigured {
-        tenant_id: String,
-        enabled: bool,
-    },
+    NotConfigured { tenant_id: String, enabled: bool },
 }
 
 pub fn routes() -> Router {
@@ -81,7 +73,7 @@ async fn generate_token_or_500(
     db: &Arc<DatabaseConnection>,
     ctx: &TenantContext,
 ) -> Result<String, StatusCode> {
-    match KeyManager::generate_tenant_token(db, ctx.tenant_id().as_str()).await {
+    match KeyManager::generate_tenant_token(db, ctx.tenant_id()).await {
         Ok(token) => Ok(token),
         Err(e) => {
             tracing::error!("Failed to generate tenant token: {}", e);
@@ -137,33 +129,33 @@ async fn report_diagnostic(
         &ctx,
         &token,
         move |repo: &TenantScoped<RawConnection>| {
-        Box::pin(async move {
-            let policy = repo.get_diagnostic_policy().await?;
-            let enabled = policy.map(|p| p.enabled).unwrap_or(false);
+            Box::pin(async move {
+                let policy = repo.get_diagnostic_policy().await?;
+                let enabled = policy.map(|p| p.enabled).unwrap_or(false);
 
-            if !enabled {
-                return Ok(None);
-            }
+                if !enabled {
+                    return Ok(None);
+                }
 
-            let context_value = serde_json::to_value(payload.context).map_err(|e| {
-                DataError::SerializationError(format!(
-                    "failed to serialize diagnostic context: {e}"
-                ))
-            })?;
+                let context_value = serde_json::to_value(payload.context).map_err(|e| {
+                    DataError::SerializationError(format!(
+                        "failed to serialize diagnostic context: {e}"
+                    ))
+                })?;
 
-            let report_model = diagnostic_report::ActiveModel {
-                trace_id: ActiveValue::Set(trace_id.to_string()),
-                tenant_id: ActiveValue::NotSet,
-                error_code: ActiveValue::Set(payload.error_code),
-                context: ActiveValue::Set(context_value),
-                suggestion: ActiveValue::Set(payload.suggestion),
-                created_at: ActiveValue::Set(Utc::now().into()),
-            };
+                let report_model = diagnostic_report::ActiveModel {
+                    trace_id: ActiveValue::Set(trace_id.to_string()),
+                    tenant_id: ActiveValue::NotSet,
+                    error_code: ActiveValue::Set(payload.error_code),
+                    context: ActiveValue::Set(context_value),
+                    suggestion: ActiveValue::Set(payload.suggestion),
+                    created_at: ActiveValue::Set(Utc::now().into()),
+                };
 
-            let saved = repo.create_diagnostic_report(report_model).await?;
-            Ok(Some(saved))
-        })
-    },
+                let saved = repo.create_diagnostic_report(report_model).await?;
+                Ok(Some(saved))
+            })
+        },
     )
     .await;
 

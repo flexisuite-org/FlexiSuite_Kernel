@@ -1,15 +1,17 @@
 use chrono::{Duration, Utc};
+use kernel_data::auth_context::TenantId;
 use kernel_data::entities::key_record::{self, ActiveModel, Model};
 use kernel_data::entities::prelude::KeyRecord;
-use rand::{rngs::OsRng, RngCore};
+use rand::{RngCore, rngs::OsRng};
 use ring::{
     rand::SystemRandom,
     signature::{Ed25519KeyPair, KeyPair},
 };
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, Set,
+    ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, QuerySelect, Set,
     TransactionTrait,
 };
+use std::sync::{LazyLock, RwLock};
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -27,13 +29,33 @@ pub enum KeyManagerError {
 
 pub struct KeyManager;
 
+static ACTIVE_HMAC_KEY_CACHE: LazyLock<RwLock<Option<Model>>> = LazyLock::new(|| RwLock::new(None));
+
 impl KeyManager {
+    fn clear_active_hmac_cache() {
+        if let Ok(mut cache) = ACTIVE_HMAC_KEY_CACHE.write() {
+            *cache = None;
+        }
+    }
+
+    fn read_active_hmac_cache() -> Option<Model> {
+        ACTIVE_HMAC_KEY_CACHE
+            .read()
+            .ok()
+            .and_then(|cache| cache.clone())
+    }
+
+    fn write_active_hmac_cache(model: &Model) {
+        if model.key_type == "hmac" && model.state == "active" {
+            if let Ok(mut cache) = ACTIVE_HMAC_KEY_CACHE.write() {
+                *cache = Some(model.clone());
+            }
+        }
+    }
+
     /// Rotates keys for all supported types.
     pub async fn rotate_keys(db: &DatabaseConnection) -> Result<(), KeyManagerError> {
-        let key_types = vec![
-            ("hmac", "HS256"),
-            ("paseto_public", "Ed25519"),
-        ];
+        let key_types = vec![("hmac", "HS256"), ("paseto_public", "Ed25519")];
 
         for (k_type, alg) in key_types {
             Self::rotate_key_type(db, k_type, alg).await?;
@@ -53,6 +75,7 @@ impl KeyManager {
         let active_key = KeyRecord::find()
             .filter(key_record::Column::KeyType.eq(key_type))
             .filter(key_record::Column::State.eq("active"))
+            .lock_exclusive()
             .one(&txn)
             .await?;
 
@@ -60,7 +83,11 @@ impl KeyManager {
 
         if let Some(active) = active_key {
             // Check if rotation is needed (e.g., > 30 days)
-            let rotation_threshold = active.created_at + Duration::days(30);
+            let rotation_base = active
+                .activated_at
+                .clone()
+                .unwrap_or(active.created_at.clone());
+            let rotation_threshold = rotation_base + Duration::days(30);
             if now >= rotation_threshold {
                 // Rotate!
 
@@ -74,6 +101,7 @@ impl KeyManager {
                 let next_key = KeyRecord::find()
                     .filter(key_record::Column::KeyType.eq(key_type))
                     .filter(key_record::Column::State.eq("next"))
+                    .lock_exclusive()
                     .one(&txn)
                     .await?;
 
@@ -91,14 +119,15 @@ impl KeyManager {
                 Self::create_key(&txn, key_type, alg, "next").await?;
             } else {
                 // Ensure Next key exists
-                 let next_key = KeyRecord::find()
+                let next_key = KeyRecord::find()
                     .filter(key_record::Column::KeyType.eq(key_type))
                     .filter(key_record::Column::State.eq("next"))
+                    .lock_exclusive()
                     .one(&txn)
                     .await?;
 
                 if next_key.is_none() {
-                     Self::create_key(&txn, key_type, alg, "next").await?;
+                    Self::create_key(&txn, key_type, alg, "next").await?;
                 }
             }
         } else {
@@ -117,6 +146,9 @@ impl KeyManager {
             .await?;
 
         txn.commit().await?;
+        if key_type == "hmac" {
+            Self::clear_active_hmac_cache();
+        }
         Ok(())
     }
 
@@ -127,6 +159,12 @@ impl KeyManager {
         state: &str,
     ) -> Result<Model, KeyManagerError> {
         let kid = format!("{}-{}-{}", key_type, Utc::now().timestamp(), Uuid::now_v7());
+        // Token format uses ':' as a delimiter; kid must never contain ':'.
+        if kid.contains(':') {
+            return Err(KeyManagerError::KeyGenError(
+                "Generated key id contains invalid ':' delimiter".to_string(),
+            ));
+        }
 
         let (secret, public) = match key_type {
             "hmac" => {
@@ -146,7 +184,12 @@ impl KeyManager {
                 let pub_key = key_pair.public_key().as_ref().to_vec();
                 (Some(pkcs8_bytes.as_ref().to_vec()), Some(pub_key))
             }
-            _ => return Err(KeyManagerError::KeyGenError(format!("Unsupported key type: {}", key_type))),
+            _ => {
+                return Err(KeyManagerError::KeyGenError(format!(
+                    "Unsupported key type: {}",
+                    key_type
+                )));
+            }
         };
 
         let active_model = ActiveModel {
@@ -157,13 +200,20 @@ impl KeyManager {
             public_bytes: Set(public),
             state: Set(state.to_string()),
             created_at: Set(Utc::now().into()),
-            activated_at: Set(if state == "active" { Some(Utc::now().into()) } else { None }),
+            activated_at: Set(if state == "active" {
+                Some(Utc::now().into())
+            } else {
+                None
+            }),
             retired_at: Set(None),
             revoked_at: Set(None),
             expires_at: Set(None), // Can set hard expiry if needed
         };
 
         let res = active_model.insert(db).await?;
+        if key_type == "hmac" && state == "active" {
+            Self::write_active_hmac_cache(&res);
+        }
         Ok(res)
     }
 
@@ -172,20 +222,27 @@ impl KeyManager {
         db: &DatabaseConnection,
         key_type: &str,
     ) -> Result<Model, KeyManagerError> {
+        if key_type == "hmac" {
+            if let Some(cached) = Self::read_active_hmac_cache() {
+                return Ok(cached);
+            }
+        }
+
         let key = KeyRecord::find()
             .filter(key_record::Column::KeyType.eq(key_type))
             .filter(key_record::Column::State.eq("active"))
             .one(db)
             .await?;
 
-        key.ok_or_else(|| KeyManagerError::NoActiveKey(key_type.to_string()))
+        let key = key.ok_or_else(|| KeyManagerError::NoActiveKey(key_type.to_string()))?;
+        if key_type == "hmac" {
+            Self::write_active_hmac_cache(&key);
+        }
+        Ok(key)
     }
 
     /// Gets a specific key by KID (for verification).
-    pub async fn get_key(
-        db: &DatabaseConnection,
-        kid: &str,
-    ) -> Result<Model, KeyManagerError> {
+    pub async fn get_key(db: &DatabaseConnection, kid: &str) -> Result<Model, KeyManagerError> {
         KeyRecord::find_by_id(kid)
             .one(db)
             .await?
@@ -193,38 +250,49 @@ impl KeyManager {
     }
 
     /// Revokes a key immediately.
-    pub async fn revoke_key(
-        db: &DatabaseConnection,
-        kid: &str,
-    ) -> Result<(), KeyManagerError> {
+    pub async fn revoke_key(db: &DatabaseConnection, kid: &str) -> Result<(), KeyManagerError> {
         let key = KeyRecord::find_by_id(kid).one(db).await?;
         let key = key.ok_or_else(|| KeyManagerError::KeyNotFound(kid.to_string()))?;
+        let key_type = key.key_type.clone();
         let mut am: ActiveModel = key.into();
         am.state = Set("revoked".to_string());
         am.revoked_at = Set(Some(Utc::now().into()));
         am.update(db).await?;
+        if key_type == "hmac" {
+            Self::clear_active_hmac_cache();
+        }
         Ok(())
     }
 
-    /// Generates a tenant token using the active HMAC key.
+    /// Generates a tenant token using the active HMAC key for the given `TenantId`.
     pub async fn generate_tenant_token(
         db: &DatabaseConnection,
-        tenant_id: &str,
+        tenant_id: &TenantId,
     ) -> Result<String, KeyManagerError> {
         let active_key = Self::get_active_key(db, "hmac").await?;
-        let secret = active_key.secret_bytes.ok_or_else(|| KeyManagerError::KeyGenError("No secret bytes for HMAC key".to_string()))?;
+        let secret = active_key.secret_bytes.ok_or_else(|| {
+            KeyManagerError::KeyGenError("No secret bytes for HMAC key".to_string())
+        })?;
 
         let now = Utc::now().timestamp();
         let nonce = Uuid::now_v7().to_string();
         let ver = "v2";
         let kid = active_key.kid;
 
-        let msg = format!("{}:{}:{}:{}:{}", ver, kid, now, nonce, tenant_id);
+        let msg = format!("{}:{}:{}:{}:{}", ver, kid, now, nonce, tenant_id.as_str());
 
         let key = ring::hmac::Key::new(ring::hmac::HMAC_SHA256, &secret);
         let tag = ring::hmac::sign(&key, msg.as_bytes());
         let sig = hex::encode(tag.as_ref());
 
-        Ok(format!("{}:{}:{}:{}:{}:{}", ver, kid, now, nonce, tenant_id, sig))
+        Ok(format!(
+            "{}:{}:{}:{}:{}:{}",
+            ver,
+            kid,
+            now,
+            nonce,
+            tenant_id.as_str(),
+            sig
+        ))
     }
 }
