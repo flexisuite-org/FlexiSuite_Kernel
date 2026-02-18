@@ -27,7 +27,7 @@ fn main() -> Result<()> {
     let re_security_definer = Regex::new(r"(?i)SECURITY\s+DEFINER").unwrap();
     // Allow variations in spacing and newlines
     let re_search_path =
-        Regex::new(r"(?i)SET\s+((SESSION|LOCAL)\s+)?search_path\s*(=|TO)\s*flexi\s*,\s*pg_catalog\s*,\s*pg_temp").unwrap();
+        Regex::new(r"(?i)SET\s+(?:(?:SESSION|LOCAL)\s+)?search_path\s*(?:=|TO)\s*flexi\s*,\s*pg_catalog\s*,\s*pg_temp").unwrap();
     // Use (?s) to allow '.' to match newlines for multi-line REVOKE statements
     let re_revoke = Regex::new(r"(?si)REVOKE\s+.*?FROM\s+PUBLIC").unwrap();
     let re_kernel_mode = Regex::new(r"flexi\.kernel_mode").unwrap();
@@ -107,7 +107,7 @@ fn main() -> Result<()> {
                         let window = &content[start_search..end_search];
 
                         if !re_search_path.is_match(window) {
-                            eprintln!("{}:{}: SECURITY DEFINER found without 'SET search_path = flexi, pg_catalog, pg_temp' nearby", path.display(), line);
+                            eprintln!("{}:{}: SECURITY DEFINER found without a valid search_path reset nearby. Accepted forms: SET [SESSION|LOCAL] search_path {{=|TO}} flexi, pg_catalog, pg_temp", path.display(), line);
                             errors = true;
                         }
                     }
