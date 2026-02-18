@@ -5,12 +5,11 @@ use axum::{
     middleware,
     routing::post,
 };
-use tower::ServiceExt; // for oneshot
-use kernel_api::middleware::{MiddlewareConfig, MiddlewareState, idempotency_middleware};
 use kernel_api::auth::{TenantContext, TenantId, UserId};
+use kernel_api::middleware::{MiddlewareConfig, MiddlewareState, idempotency_middleware};
 use std::time::Duration;
 use tokio::task::JoinSet;
-
+use tower::ServiceExt; // for oneshot
 
 #[tokio::test]
 async fn test_idempotency_loop_limit() {
@@ -19,9 +18,12 @@ async fn test_idempotency_loop_limit() {
         idempotency_ttl: Duration::from_secs(60),
         // Large enough to avoid timeout, so we hit the loop limit instead
         inflight_wait_timeout: Duration::from_millis(1000),
+        require_redis: false,
         ..Default::default()
     };
-    let state = MiddlewareState::new(config);
+    let state = MiddlewareState::new(config)
+        .await
+        .expect("middleware state");
 
     // Mock handler that simulates FAST processing time but FAILS.
     // Failure causes the lock to be released (instead of Completed), allowing others to try acquire.
@@ -38,8 +40,8 @@ async fn test_idempotency_loop_limit() {
         .layer(Extension(state));
 
     let mut set = JoinSet::new();
-    let num_requests = 20; 
-    
+    let num_requests = 20;
+
     let tenant_ctx = TenantContext::new(
         TenantId::new("tenant-1").unwrap(),
         Some(UserId::new("user-1").unwrap()),

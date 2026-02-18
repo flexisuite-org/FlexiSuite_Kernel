@@ -2,9 +2,9 @@ use kernel_core::auth::{TenantContext, TenantId};
 use kernel_registry::error::RegistryError;
 use kernel_registry::model::{Dependencies, DistManifest, Kind, Route, Security};
 use kernel_registry::storage::RegistryStorage;
+use object_store::ObjectStore;
 use object_store::memory::InMemory;
 use object_store::path::Path;
-use object_store::ObjectStore;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -232,7 +232,10 @@ async fn test_get_manifest_detects_tampered_stored_json() {
         manifest.id,
         manifest.version
     ));
-    store.put(&tampered_path, tampered_bytes.into()).await.unwrap();
+    store
+        .put(&tampered_path, tampered_bytes.into())
+        .await
+        .unwrap();
 
     let result = registry.get_manifest(&manifest.id, &manifest.version).await;
     match result {
@@ -273,20 +276,27 @@ async fn test_manifest_digest_numeric_normalization() {
 
     // Both must use SAME ID/Version/etc for digest to match
     let mut manifest_int = test_manifest("app_numeric", "1.0.0");
-    manifest_int.configuration.insert("count".to_string(), serde_json::json!(1));
+    manifest_int
+        .configuration
+        .insert("count".to_string(), serde_json::json!(1));
 
     let mut manifest_float = test_manifest("app_numeric", "1.0.0");
-    manifest_float.configuration.insert("count".to_string(), serde_json::json!(1.0));
+    manifest_float
+        .configuration
+        .insert("count".to_string(), serde_json::json!(1.0));
 
     // Ensure our input assumption is correct: json!(1) != json!(1.0) usually in serde_json Value representation
     // (though partial_eq might say they are equal, their serialization might differ without normalization)
-    // Actually, serde_json::to_vec(json!(1)) -> "1", to_vec(json!(1.0)) -> "1.0". 
+    // Actually, serde_json::to_vec(json!(1)) -> "1", to_vec(json!(1.0)) -> "1.0".
     // We want to ensure the digests are identical.
 
     let (digest_int, _) = registry_a.save_manifest(&manifest_int).await.unwrap();
     let (digest_float, _) = registry_b.save_manifest(&manifest_float).await.unwrap();
 
-    assert_eq!(digest_int, digest_float, "Digests should match for 1 and 1.0");
+    assert_eq!(
+        digest_int, digest_float,
+        "Digests should match for 1 and 1.0"
+    );
 }
 
 #[tokio::test]
@@ -296,8 +306,12 @@ async fn test_manifest_digest_big_int_normalization() {
 
     // Test with i64::MAX and u64::MAX to ensure precision is kept
     let mut manifest_big = test_manifest("app_big_int", "1.0.0");
-    manifest_big.configuration.insert("big_i64".to_string(), serde_json::json!(i64::MAX));
-    manifest_big.configuration.insert("big_u64".to_string(), serde_json::json!(u64::MAX));
+    manifest_big
+        .configuration
+        .insert("big_i64".to_string(), serde_json::json!(i64::MAX));
+    manifest_big
+        .configuration
+        .insert("big_u64".to_string(), serde_json::json!(u64::MAX));
 
     let (digest, _) = registry_a.save_manifest(&manifest_big).await.unwrap();
     assert_eq!(digest.len(), 96);
@@ -321,7 +335,7 @@ async fn test_get_artifact_returns_artifact_not_found_for_missing_key() {
 async fn test_registry_key_validation_invalid_paths() {
     let store = Arc::new(InMemory::new());
     let registry = RegistryStorage::new(store, &test_tenant_ctx());
-    
+
     let invalid_keys = vec![
         "../traversal",
         "key\\backslash",
@@ -338,15 +352,15 @@ async fn test_registry_key_validation_invalid_paths() {
         // Test save_artifact
         let result = registry.save_artifact(key, b"data".as_slice().into()).await;
         match result {
-            Err(RegistryError::InvalidPath(_)) => {},
+            Err(RegistryError::InvalidPath(_)) => {}
             other => panic!("save_artifact: expected InvalidPath for {key}, got {other:?}"),
         }
-        
+
         // Test save_manifest (id)
         let manifest = test_manifest(key, "1.0.0");
         let result = registry.save_manifest(&manifest).await;
         match result {
-            Err(RegistryError::InvalidPath(_)) => {},
+            Err(RegistryError::InvalidPath(_)) => {}
             other => panic!("save_manifest: expected InvalidPath for {key} (id), got {other:?}"),
         }
     }
@@ -363,7 +377,7 @@ async fn test_save_manifest_rejects_whitespace_security_fields() {
     match result {
         Err(RegistryError::InvalidManifest(msg)) => {
             assert_eq!(msg, "security.manifest_signature must not be empty");
-        },
+        }
         other => panic!("expected InvalidManifest for whitespace signature, got {other:?}"),
     }
 
@@ -373,17 +387,19 @@ async fn test_save_manifest_rejects_whitespace_security_fields() {
     match result {
         Err(RegistryError::InvalidManifest(msg)) => {
             assert_eq!(msg, "security.manifest_signature_kid must not be empty");
-        },
+        }
         other => panic!("expected InvalidManifest for whitespace kid, got {other:?}"),
     }
-    
+
     let mut manifest = test_manifest("app_whitespace_trust", "1.0.0");
     manifest.security.trust_root_version = "   ".to_string();
     let result = registry.save_manifest(&manifest).await;
     match result {
         Err(RegistryError::InvalidManifest(msg)) => {
             assert_eq!(msg, "security.trust_root_version must not be empty");
-        },
-        other => panic!("expected InvalidManifest for whitespace trust_root_version, got {other:?}"),
+        }
+        other => {
+            panic!("expected InvalidManifest for whitespace trust_root_version, got {other:?}")
+        }
     }
 }
