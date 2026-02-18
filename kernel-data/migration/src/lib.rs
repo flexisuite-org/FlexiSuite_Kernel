@@ -18,3 +18,20 @@ impl MigratorTrait for Migrator {
         ]
     }
 }
+
+pub struct MigrationConnection<'a, C>(pub &'a C)
+where
+    C: sea_orm_migration::sea_orm::ConnectionTrait;
+
+impl<'a, C> MigrationConnection<'a, C>
+where
+    C: sea_orm_migration::sea_orm::ConnectionTrait,
+{
+    pub fn new(db: &'a C) -> Self {
+        Self(db)
+    }
+
+    pub async fn execute_unprepared(&self, sql: &str) -> Result<sea_orm_migration::sea_orm::ExecResult, sea_orm_migration::sea_orm::DbErr> {
+        self.0.execute_unprepared(sql).await
+    }
+}

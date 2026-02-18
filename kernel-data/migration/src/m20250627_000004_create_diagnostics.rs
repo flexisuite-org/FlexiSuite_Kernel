@@ -6,7 +6,7 @@ pub struct Migration;
 #[async_trait::async_trait]
 impl MigrationTrait for Migration {
     async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
-        let db = manager.get_connection();
+        let db = crate::MigrationConnection::new(manager.get_connection());
 
         // 1. Create diagnostic_policies table (flexi schema)
         db.execute_unprepared(
@@ -83,7 +83,7 @@ impl MigrationTrait for Migration {
     }
 
     async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
-        let db = manager.get_connection();
+        let db = crate::MigrationConnection::new(manager.get_connection());
 
         // Drop RLS policies before tables
         db.execute_unprepared(
