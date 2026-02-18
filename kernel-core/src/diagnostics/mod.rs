@@ -1,8 +1,8 @@
-use serde::{Deserialize, Serialize};
 use crate::auth::{TenantId, UserId};
-use uuid::Uuid;
 use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use uuid::Uuid;
 
 pub mod sanitizer;
 
@@ -30,7 +30,7 @@ pub struct DiagnosticReport {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DiagnosticContext {
     pub component_id: String,
-    pub props: Value, // PII Masked
+    pub props: Value,         // PII Masked
     pub dom_snapshot: String, // Sanitized & PII Scrubbed
     pub metrics: Option<Value>,
 }

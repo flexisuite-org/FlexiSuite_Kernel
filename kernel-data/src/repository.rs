@@ -8,8 +8,7 @@ use async_trait::async_trait;
 use kernel_core::kernel::{self, KernelError};
 use sea_orm::sea_query::{Expr, OnConflict};
 use sea_orm::{
-    ActiveModelTrait, ActiveValue, ColumnTrait, EntityTrait, QueryFilter,
-    QueryOrder, QuerySelect,
+    ActiveModelTrait, ActiveValue, ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect,
 };
 use uuid::Uuid;
 
@@ -63,10 +62,8 @@ pub trait TenantRepository: private::Sealed + Send + Sync {
     ) -> kernel::Result<Vec<entity_history::Model>>;
     async fn mark_entity_history_archived(&self, id: String) -> kernel::Result<()>;
     async fn mark_entity_histories_archived(&self, ids: Vec<String>) -> kernel::Result<()>;
-    async fn find_unarchived_audit_logs(
-        &self,
-        limit: u64,
-    ) -> kernel::Result<Vec<audit_log::Model>>;
+    async fn find_unarchived_audit_logs(&self, limit: u64)
+    -> kernel::Result<Vec<audit_log::Model>>;
     async fn mark_audit_log_archived(&self, id: String) -> kernel::Result<()>;
     async fn mark_audit_logs_archived(&self, ids: Vec<String>) -> kernel::Result<()>;
 }
