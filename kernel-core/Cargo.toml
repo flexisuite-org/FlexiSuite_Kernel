@@ -17,7 +17,7 @@ kernel-data = { path = "../kernel-data" }
 sea-orm = { version = "1.1.0", features = ["sqlx-postgres", "runtime-tokio-rustls", "macros"] }
 # TODO(security): Pinned to =0.1.43 to avoid upstream regression in 0.1.44 (10MB bloat due to included test-macros).
 # Tracking: https://github.com/tokio-rs/tracing/issues/3455
-# Internal Tracking: https://github.com/flexisuite-org/FlexiSuite_Kernel/issues/TODO
+# Internal Tracking: https://github.com/flexisuite-org/FlexiSuite_Kernel/issues/25
 tracing = "=0.1.43"
 async-trait = "0.1"
 regex = "1.12.3"
