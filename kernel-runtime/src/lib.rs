@@ -27,6 +27,7 @@ pub struct RuntimeOptions {
     pub cpu_time_limit: Duration,
     pub wall_clock_limit: Duration,
     pub permissions: Permissions,
+    pub max_output_size: Option<usize>,
 }
 
 impl Default for RuntimeOptions {
@@ -36,6 +37,7 @@ impl Default for RuntimeOptions {
             cpu_time_limit: Duration::from_secs(5),
             wall_clock_limit: Duration::from_secs(30),
             permissions: Permissions::default(),
+            max_output_size: Some(1 << 20),
         }
     }
 }
