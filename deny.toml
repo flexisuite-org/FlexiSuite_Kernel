@@ -1,0 +1,74 @@
+# cargo-deny configuration for FlexiSuite_Kernel
+# https://embarkstudios.github.io/cargo-deny/
+#
+# Run: cargo deny check
+# CI:  cargo deny --workspace check
+
+[graph]
+# Analyze the entire workspace
+all-features = false
+
+# ---------------------------------------------------------------------------
+# [advisories] — RUSTSEC advisory database
+# ---------------------------------------------------------------------------
+[advisories]
+# Warn on unmaintained crates; fail on vulnerabilities
+version = 2
+db-urls = ["https://github.com/rustsec/advisory-db"]
+yanked = "deny"
+
+# ---------------------------------------------------------------------------
+# [licenses] — License policy
+# ---------------------------------------------------------------------------
+[licenses]
+version = 2
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-DFS-2016",
+    "Zlib",
+    "CC0-1.0",
+    "OpenSSL",
+]
+# Confidence threshold for license detection
+confidence-threshold = 0.8
+
+# ---------------------------------------------------------------------------
+# [bans] — Banned / pinned crate policy
+# ---------------------------------------------------------------------------
+[bans]
+# Deny multiple versions of the same crate by default (keeps the dep tree lean)
+multiple-versions = "warn"
+wildcards = "deny"
+
+# ---------------------------------------------------------------------------
+# Temporary exact-version pins
+#
+# Each entry MUST reference the internal tracking issue so that the pin is
+# automatically re-evaluated when the issue is closed.
+#
+# tracing =0.1.43
+#   Reason : 0.1.44 introduced a ~10 MB binary size regression because
+#            test-macros were accidentally included in the release artifact.
+#   Upstream: https://github.com/tokio-rs/tracing/issues/3455
+#   Internal: https://github.com/flexisuite-org/FlexiSuite_Kernel/issues/25
+#   Action  : Remove this skip entry once tracing >=0.1.45 (or whichever
+#             version resolves the regression) is released and all four
+#             Cargo.toml pins are removed.
+# ---------------------------------------------------------------------------
+[[bans.skip]]
+name    = "tracing"
+version = "=0.1.43"
+reason  = "Pinned to avoid 0.1.44 binary-size regression; tracked in GH#25 / upstream tokio-rs/tracing#3455"
+
+# ---------------------------------------------------------------------------
+# [sources] — Allowed crate sources
+# ---------------------------------------------------------------------------
+[sources]
+unknown-registry = "deny"
+unknown-git      = "deny"
+allow-registry   = ["https://github.com/rust-lang/crates.io-index"]
