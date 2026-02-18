@@ -14,9 +14,8 @@ use kernel_data::{
     entities::{diagnostic_policy, diagnostic_report},
     with_tenant_tx,
 };
-use sea_orm::{ActiveValue, DatabaseConnection};
+use sea_orm::ActiveValue;
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
 use uuid::Uuid;
 
 /// Maximum allowed length for user-supplied string fields (error_code, trace_id, etc.)
@@ -69,12 +68,8 @@ pub fn routes() -> Router {
         .route("/policy", get(get_policy).put(update_policy))
 }
 
-async fn generate_token_or_500(
-    db: &Arc<DatabaseConnection>,
-    ctx: &TenantContext,
-) -> Result<String, StatusCode> {
-    let ctx_with_db = ctx.clone().with_db(db.clone());
-    match KeyManager::generate_tenant_token(&ctx_with_db, ctx.tenant_id()).await {
+async fn generate_token_or_500(ctx: &TenantContext) -> Result<String, StatusCode> {
+    match KeyManager::generate_tenant_token(ctx, ctx.tenant_id()).await {
         Ok(token) => Ok(token),
         Err(e) => {
             let status = match &e {
@@ -88,7 +83,6 @@ async fn generate_token_or_500(
 }
 
 async fn report_diagnostic(
-    Extension(db): Extension<Arc<DatabaseConnection>>,
     Extension(ctx): Extension<TenantContext>,
     Json(mut payload): Json<ReportDiagnosticRequest>,
 ) -> impl IntoResponse {
@@ -123,14 +117,21 @@ async fn report_diagnostic(
     };
 
     let trace_id = Uuid::now_v7();
-    let token = match generate_token_or_500(&db, &ctx).await {
+    let token = match generate_token_or_500(&ctx).await {
         Ok(token) => token,
         Err(status) => return status.into_response(),
+    };
+    let db = match ctx.db() {
+        Ok(db) => db,
+        Err(e) => {
+            tracing::error!(error = %e, "TenantContext missing database connection");
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
     };
 
     // 2. Check Policy & Save
     let result = with_tenant_tx(
-        &db,
+        db,
         &ctx,
         &token,
         move |repo: &TenantScoped<RawConnection>| {
@@ -183,7 +184,6 @@ async fn report_diagnostic(
 }
 
 async fn query_diagnostic(
-    Extension(db): Extension<Arc<DatabaseConnection>>,
     Extension(ctx): Extension<TenantContext>,
     Query(payload): Query<QueryDiagnosticRequest>,
 ) -> impl IntoResponse {
@@ -192,12 +192,19 @@ async fn query_diagnostic(
         return status.into_response();
     }
 
-    let token = match generate_token_or_500(&db, &ctx).await {
+    let token = match generate_token_or_500(&ctx).await {
         Ok(token) => token,
         Err(status) => return status.into_response(),
     };
+    let db = match ctx.db() {
+        Ok(db) => db,
+        Err(e) => {
+            tracing::error!(error = %e, "TenantContext missing database connection");
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    };
     let result = with_tenant_tx(
-        &db,
+        db,
         &ctx,
         &token,
         move |repo: &TenantScoped<RawConnection>| {
@@ -229,16 +236,20 @@ async fn get_health() -> impl IntoResponse {
         .into_response()
 }
 
-async fn get_policy(
-    Extension(db): Extension<Arc<DatabaseConnection>>,
-    Extension(ctx): Extension<TenantContext>,
-) -> impl IntoResponse {
-    let token = match generate_token_or_500(&db, &ctx).await {
+async fn get_policy(Extension(ctx): Extension<TenantContext>) -> impl IntoResponse {
+    let token = match generate_token_or_500(&ctx).await {
         Ok(token) => token,
         Err(status) => return status.into_response(),
     };
+    let db = match ctx.db() {
+        Ok(db) => db,
+        Err(e) => {
+            tracing::error!(error = %e, "TenantContext missing database connection");
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    };
     let result = with_tenant_tx(
-        &db,
+        db,
         &ctx,
         &token,
         move |repo: &TenantScoped<RawConnection>| {
@@ -262,7 +273,6 @@ async fn get_policy(
 }
 
 async fn update_policy(
-    Extension(_db): Extension<Arc<DatabaseConnection>>,
     Extension(_ctx): Extension<TenantContext>,
     Json(_payload): Json<UpdatePolicyRequest>,
 ) -> impl IntoResponse {

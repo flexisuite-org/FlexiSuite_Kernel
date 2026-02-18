@@ -2,7 +2,7 @@ use axum::{
     Json, Router,
     extract::{Extension, Path},
     http::{HeaderName, HeaderValue, StatusCode},
-    middleware::from_fn,
+    middleware::{from_fn, from_fn_with_state},
     routing::{get, post},
 };
 use sea_orm::DatabaseConnection;
@@ -59,14 +59,13 @@ pub fn build_app_with_state(
         // Outermost applied last: Auth -> Idempotency -> Quota
         .layer(from_fn(quota_middleware))
         .layer(from_fn(idempotency_middleware))
-        .layer(from_fn(auth_middleware));
+        .layer(from_fn_with_state(db.clone(), auth_middleware));
 
     (
         Router::new()
             .merge(public_router)
             .merge(protected_router)
-            .layer(Extension(state))
-            .layer(Extension(db)), // Inject DB connection
+            .layer(Extension(state)),
         cleanup_handle,
     )
 }
