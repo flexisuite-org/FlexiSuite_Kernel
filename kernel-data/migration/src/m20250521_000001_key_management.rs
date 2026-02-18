@@ -131,6 +131,19 @@ impl MigrationTrait for Migration {
             "#
         ).await?;
 
+        db.execute_unprepared(
+            r#"
+            REVOKE ALL ON FUNCTION flexi.authorize_tenant(text) FROM PUBLIC;
+            DO $$
+            BEGIN
+                IF EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = 'flexi') THEN
+                    GRANT EXECUTE ON FUNCTION flexi.authorize_tenant(text) TO flexi;
+                END IF;
+            END $$;
+            "#,
+        )
+        .await?;
+
         Ok(())
     }
 
