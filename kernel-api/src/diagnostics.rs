@@ -77,6 +77,19 @@ pub fn routes() -> Router {
         .route("/policy", get(get_policy).put(update_policy))
 }
 
+async fn generate_token_or_500(
+    db: &Arc<DatabaseConnection>,
+    ctx: &TenantContext,
+) -> Result<String, StatusCode> {
+    match KeyManager::generate_tenant_token(db, ctx.tenant_id().as_str()).await {
+        Ok(token) => Ok(token),
+        Err(e) => {
+            tracing::error!("Failed to generate tenant token: {}", e);
+            Err(StatusCode::INTERNAL_SERVER_ERROR)
+        }
+    }
+}
+
 async fn report_diagnostic(
     Extension(db): Extension<Arc<DatabaseConnection>>,
     Extension(ctx): Extension<TenantContext>,
@@ -113,12 +126,9 @@ async fn report_diagnostic(
     };
 
     let trace_id = Uuid::now_v7();
-    let token = match KeyManager::generate_tenant_token(&db, ctx.tenant_id().as_str()).await {
+    let token = match generate_token_or_500(&db, &ctx).await {
         Ok(token) => token,
-        Err(e) => {
-            tracing::error!("Failed to generate tenant token: {}", e);
-            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
-        }
+        Err(status) => return status.into_response(),
     };
 
     // 2. Check Policy & Save
@@ -185,12 +195,9 @@ async fn query_diagnostic(
         return status.into_response();
     }
 
-    let token = match KeyManager::generate_tenant_token(&db, ctx.tenant_id().as_str()).await {
+    let token = match generate_token_or_500(&db, &ctx).await {
         Ok(token) => token,
-        Err(e) => {
-            tracing::error!("Failed to generate tenant token: {}", e);
-            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
-        }
+        Err(status) => return status.into_response(),
     };
     let result = with_tenant_tx(
         &db,
@@ -229,12 +236,9 @@ async fn get_policy(
     Extension(db): Extension<Arc<DatabaseConnection>>,
     Extension(ctx): Extension<TenantContext>,
 ) -> impl IntoResponse {
-    let token = match KeyManager::generate_tenant_token(&db, ctx.tenant_id().as_str()).await {
+    let token = match generate_token_or_500(&db, &ctx).await {
         Ok(token) => token,
-        Err(e) => {
-            tracing::error!("Failed to generate tenant token: {}", e);
-            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
-        }
+        Err(status) => return status.into_response(),
     };
     let result = with_tenant_tx(
         &db,

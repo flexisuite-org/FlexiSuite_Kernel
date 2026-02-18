@@ -124,12 +124,14 @@ where
 }
 
 // Legacy exports for compatibility if needed (deprecated)
+#[deprecated(note = "Legacy migration shim; no-op - remove callers and use token-based authorization API")]
 pub fn init_hmac_secret() -> Result<(), String> {
     // No-op or return error as it's no longer used
     Ok(())
 }
 
 #[cfg(feature = "test-utils")]
+#[deprecated(note = "Legacy migration shim; no-op - remove callers and use test fixtures with KeyManager")]
 pub fn init_hmac_secret_for_test(_secret: impl Into<String>) -> Result<(), String> {
      // No-op
     Ok(())

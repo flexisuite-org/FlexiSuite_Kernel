@@ -1,111 +1,83 @@
 use std::fmt;
+use std::str::FromStr;
 use serde::de::{self, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
 
-#[derive(Clone, Debug, Serialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct TenantId(String);
+macro_rules! define_principal_id {
+    ($type_name:ident, $label:literal) => {
+        #[derive(Clone, Debug, Serialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+        pub struct $type_name(String);
 
-impl<'de> Deserialize<'de> for TenantId {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        struct TenantIdVisitor;
-
-        impl<'de> Visitor<'de> for TenantIdVisitor {
-            type Value = TenantId;
-
-            fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
-                formatter.write_str("a valid tenant_id string")
-            }
-
-            fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+        impl<'de> Deserialize<'de> for $type_name {
+            fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
             where
-                E: de::Error,
+                D: Deserializer<'de>,
             {
-                TenantId::new(value).map_err(de::Error::custom)
+                struct PrincipalVisitor;
+
+                impl<'de> Visitor<'de> for PrincipalVisitor {
+                    type Value = $type_name;
+
+                    fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+                        formatter.write_str(concat!("a valid ", $label, " string"))
+                    }
+
+                    fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+                    where
+                        E: de::Error,
+                    {
+                        $type_name::new(value).map_err(de::Error::custom)
+                    }
+                }
+
+                deserializer.deserialize_str(PrincipalVisitor)
             }
         }
 
-        deserializer.deserialize_str(TenantIdVisitor)
-    }
-}
-
-impl TenantId {
-    pub fn new(id: impl Into<String>) -> Result<Self, String> {
-        let s = id.into();
-        if is_valid_principal(&s) {
-            Ok(Self(s))
-        } else {
-            Err(format!("Invalid tenant_id format: {}", s))
-        }
-    }
-
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-
-    #[cfg(feature = "test-utils")]
-    pub fn new_unchecked(id: impl Into<String>) -> Self {
-        Self(id.into())
-    }
-}
-
-impl fmt::Display for TenantId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
-
-#[derive(Clone, Debug, Serialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct UserId(String);
-
-impl<'de> Deserialize<'de> for UserId {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        struct UserIdVisitor;
-
-        impl<'de> Visitor<'de> for UserIdVisitor {
-            type Value = UserId;
-
-            fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
-                formatter.write_str("a valid user_id string")
+        impl $type_name {
+            pub fn new(id: impl Into<String>) -> Result<Self, String> {
+                let s = id.into();
+                if is_valid_principal(&s) {
+                    Ok(Self(s))
+                } else {
+                    Err(format!("Invalid {} format: {}", $label, s))
+                }
             }
 
-            fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
-            where
-                E: de::Error,
-            {
-                UserId::new(value).map_err(de::Error::custom)
+            pub fn as_str(&self) -> &str {
+                &self.0
+            }
+
+            #[cfg(feature = "test-utils")]
+            pub fn new_unchecked(id: impl Into<String>) -> Self {
+                Self(id.into())
             }
         }
 
-        deserializer.deserialize_str(UserIdVisitor)
-    }
-}
-
-impl UserId {
-    pub fn new(id: impl Into<String>) -> Result<Self, String> {
-        let s = id.into();
-        if is_valid_principal(&s) {
-            Ok(Self(s))
-        } else {
-            Err(format!("Invalid user_id format: {}", s))
+        impl fmt::Display for $type_name {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                write!(f, "{}", self.0)
+            }
         }
-    }
 
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
+        impl AsRef<str> for $type_name {
+            fn as_ref(&self) -> &str {
+                self.as_str()
+            }
+        }
+
+        impl FromStr for $type_name {
+            type Err = String;
+
+            fn from_str(s: &str) -> Result<Self, Self::Err> {
+                Self::new(s)
+            }
+        }
+    };
 }
 
-impl fmt::Display for UserId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
+define_principal_id!(TenantId, "tenant_id");
+define_principal_id!(UserId, "user_id");
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TenantContext {

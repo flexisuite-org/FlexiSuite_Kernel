@@ -2,7 +2,6 @@ use kernel_core::auth::{KeyManager, TenantContext, TenantId, UserId};
 use kernel_data::connection::{with_tenant_tx, TenantScoped, RawConnection};
 use kernel_data::entities::{audit_log, entity_history, entity_record};
 use kernel_data::repository::TenantRepository;
-use kernel_data::DataError;
 use migration::MigratorTrait;
 use sea_orm::{
     ActiveValue, ColumnTrait, ConnectionTrait, Database, EntityTrait, QueryFilter, QueryOrder,
@@ -58,14 +57,14 @@ async fn test_audit_log_creation() {
     let user_id = UserId::new("user-audit").unwrap();
     let ctx = TenantContext::new(tenant_id.clone(), Some(user_id.clone()));
 
-    // Generate Token
-    let token = KeyManager::generate_tenant_token(&db, tenant_id.as_str()).await.expect("Failed to gen token");
-
     // 1. Create Entity -> Should create history
     let entity_id = Uuid::now_v7().to_string();
     let entity_id_clone = entity_id.clone();
+    let token_create = KeyManager::generate_tenant_token(&db, tenant_id.as_str())
+        .await
+        .expect("Failed to gen token for create");
 
-    with_tenant_tx(&db, &ctx, &token, |repo: &TenantScoped<RawConnection>| {
+    with_tenant_tx(&db, &ctx, &token_create, |repo: &TenantScoped<RawConnection>| {
         Box::pin(async move {
             let active_model = entity_record::ActiveModel {
                 id: ActiveValue::Set(entity_id_clone),
@@ -97,7 +96,10 @@ async fn test_audit_log_creation() {
 
     // 2. Update Entity -> Should create history
     let entity_id_clone = entity_id.clone();
-    with_tenant_tx(&db, &ctx, &token, |repo: &TenantScoped<RawConnection>| {
+    let token_update = KeyManager::generate_tenant_token(&db, tenant_id.as_str())
+        .await
+        .expect("Failed to gen token for update");
+    with_tenant_tx(&db, &ctx, &token_update, |repo: &TenantScoped<RawConnection>| {
         Box::pin(async move {
             let active_model = entity_record::ActiveModel {
                 id: ActiveValue::Set(entity_id_clone),
@@ -126,7 +128,10 @@ async fn test_audit_log_creation() {
     );
 
     // 3. Log Audit
-    with_tenant_tx(&db, &ctx, &token, |repo: &TenantScoped<RawConnection>| {
+    let token_audit = KeyManager::generate_tenant_token(&db, tenant_id.as_str())
+        .await
+        .expect("Failed to gen token for audit");
+    with_tenant_tx(&db, &ctx, &token_audit, |repo: &TenantScoped<RawConnection>| {
         Box::pin(async move {
             repo.log_audit(
                 "test.action".to_string(),
