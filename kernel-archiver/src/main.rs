@@ -116,8 +116,10 @@ async fn main() -> Result<()> {
             }
             _ = interval.tick(), if !shutdown_requested => {
                 info!("Starting archive cycle...");
-                run_archive_cycle(&db, &s3_client, &config).await;
-                info!("Archive cycle completed.");
+                match run_archive_cycle(&db, &s3_client, &config).await {
+                    Ok(()) => info!("Archive cycle completed."),
+                    Err(e) => error!("Archive cycle failed: {}", e),
+                }
             }
         }
 
@@ -241,7 +243,7 @@ fn parse_object_lock_config() -> Result<Option<ObjectLockConfig>> {
     Ok(Some(ObjectLockConfig { mode, retain_days: days }))
 }
 
-async fn run_archive_cycle(db: &DatabaseConnection, s3: &Client, config: &AppConfig) {
+async fn run_archive_cycle(db: &DatabaseConnection, s3: &Client, config: &AppConfig) -> Result<()> {
     for tenant_id in &config.tenant_ids {
         let ctx = TenantContext::new(tenant_id.clone(), None);
         let bucket = config.s3_bucket.clone();
@@ -281,7 +283,7 @@ async fn run_archive_cycle(db: &DatabaseConnection, s3: &Client, config: &AppCon
                 lock_config.as_ref(),
                 &tenant_id,
             )
-            .await,
+            .await?,
             audit_log_ids: archive_items(
                 "audit log",
                 "audit-logs",
@@ -291,7 +293,7 @@ async fn run_archive_cycle(db: &DatabaseConnection, s3: &Client, config: &AppCon
                 lock_config.as_ref(),
                 &tenant_id,
             )
-            .await,
+            .await?,
         };
 
         if mark_plan.entity_history_ids.is_empty() && mark_plan.audit_log_ids.is_empty() {
@@ -320,6 +322,8 @@ async fn run_archive_cycle(db: &DatabaseConnection, s3: &Client, config: &AppCon
             );
         }
     }
+
+    Ok(())
 }
 
 async fn archive_items<T>(
@@ -330,7 +334,7 @@ async fn archive_items<T>(
     bucket: &str,
     lock_config: Option<&ObjectLockConfig>,
     expected_tenant_id: &str,
-) -> Vec<String>
+) -> Result<Vec<String>>
 where
     T: ArchivableItem + serde::Serialize,
 {
@@ -344,11 +348,10 @@ where
         let item_tenant = item.archive_tenant_id();
 
         if item_tenant != expected_tenant_id {
-            error!(
-                "Skipping archiving item {} (kind: {}) because tenant_id mismatch. Expected: {}, Found: {}",
+            return Err(anyhow!(
+                "Tenant mismatch while archiving item {} (kind: {}). Expected tenant_id={}, found tenant_id={}",
                 id, record_kind, expected_tenant_id, item_tenant
-            );
-            continue;
+            ));
         }
 
         let key = item.archive_key(key_prefix);
@@ -390,7 +393,7 @@ where
         }
     }
 
-    archived_ids
+    Ok(archived_ids)
 }
 
 fn build_gzip_payload(json: &str) -> Result<(ByteStream, String)> {
