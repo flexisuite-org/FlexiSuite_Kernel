@@ -247,6 +247,7 @@ async fn test_idempotency_conflict_scope_and_action_lookup() {
 async fn test_idempotency_key_validation() {
     let app = setup_app().await;
 
+    // 1. Invalid Key Format
     let too_long = "k".repeat(129);
     let req = build_idempotent_post(&too_long, "payload");
     let res = app.clone().oneshot(req).await.unwrap();
@@ -254,11 +255,43 @@ async fn test_idempotency_key_validation() {
     #[cfg(debug_assertions)]
     {
         assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+        let body_bytes = to_bytes(res.into_body(), usize::MAX).await.unwrap();
+        let body_json: Value = serde_json::from_slice(&body_bytes).unwrap();
+        assert_eq!(body_json["error"], "Invalid Idempotency-Key format");
     }
 
     #[cfg(not(debug_assertions))]
     {
         assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    // 2. Missing Key
+    let mut req_builder = Request::builder().uri("/test").method("POST");
+    #[cfg(debug_assertions)]
+    {
+        req_builder = req_builder.header("X-Tenant-Id", "tenant-1");
+    }
+    #[cfg(not(debug_assertions))]
+    {
+        req_builder = req_builder.header("Authorization", "Bearer invalid");
+    }
+    let req_missing = req_builder.body(Body::from("payload")).unwrap();
+    let res_missing = app.clone().oneshot(req_missing).await.unwrap();
+
+    #[cfg(debug_assertions)]
+    {
+        assert_eq!(res_missing.status(), StatusCode::BAD_REQUEST);
+        let body_bytes = to_bytes(res_missing.into_body(), usize::MAX).await.unwrap();
+        let body_json: Value = serde_json::from_slice(&body_bytes).unwrap();
+        assert_eq!(
+            body_json["error"],
+            "Missing Idempotency-Key for write operation"
+        );
+    }
+
+    #[cfg(not(debug_assertions))]
+    {
+        assert_eq!(res_missing.status(), StatusCode::UNAUTHORIZED);
     }
 }
 

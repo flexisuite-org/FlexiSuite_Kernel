@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 use axum::{
+    Json,
     body::{Body, to_bytes},
     http::{
         HeaderMap, HeaderName, HeaderValue, Method, Request, StatusCode, header::CONTENT_LENGTH,
@@ -1506,6 +1507,11 @@ fn sanitize_redis_error(error_text: &str, redis_url: &str) -> String {
     error_text.replace(redis_url, &redact_redis_url(redis_url))
 }
 
+#[derive(Serialize)]
+struct IdempotencyError {
+    error: String,
+}
+
 pub async fn record_action(
     state: &MiddlewareState,
     tenant_id: kernel_core::auth::TenantId,
@@ -1527,10 +1533,7 @@ pub async fn get_action(
 }
 
 #[instrument(skip_all, fields(tenant_id, method, path))]
-pub async fn idempotency_middleware(
-    req: Request<Body>,
-    next: Next,
-) -> Result<Response, StatusCode> {
+pub async fn idempotency_middleware(req: Request<Body>, next: Next) -> Result<Response, Response> {
     let (parts, body) = req.into_parts();
     let method = parts.method.clone();
 
@@ -1540,12 +1543,24 @@ pub async fn idempotency_middleware(
                 Ok(k) => k,
                 Err(_) => {
                     warn!("Invalid Idempotency-Key encoding");
-                    return Err(StatusCode::BAD_REQUEST);
+                    return Err((
+                        StatusCode::BAD_REQUEST,
+                        Json(IdempotencyError {
+                            error: "Invalid Idempotency-Key encoding".to_string(),
+                        }),
+                    )
+                        .into_response());
                 }
             };
             if validate_idempotency_key(key).is_err() {
                 warn!(key = %key, "Invalid Idempotency-Key format");
-                return Err(StatusCode::BAD_REQUEST);
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    Json(IdempotencyError {
+                        error: "Invalid Idempotency-Key format".to_string(),
+                    }),
+                )
+                    .into_response());
             }
             key.to_string()
         }
@@ -1556,7 +1571,13 @@ pub async fn idempotency_middleware(
                 || method == Method::PATCH
             {
                 warn!(method = %method, "Missing Idempotency-Key for write operation");
-                return Err(StatusCode::BAD_REQUEST);
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    Json(IdempotencyError {
+                        error: "Missing Idempotency-Key for write operation".to_string(),
+                    }),
+                )
+                    .into_response());
             }
             return Ok(next.run(Request::from_parts(parts, body)).await);
         }
@@ -1565,7 +1586,7 @@ pub async fn idempotency_middleware(
     let tenant_ctx = parts
         .extensions
         .get::<TenantContext>()
-        .ok_or(StatusCode::UNAUTHORIZED)?;
+        .ok_or(StatusCode::UNAUTHORIZED.into_response())?;
 
     tracing::Span::current().record("tenant_id", &tenant_ctx.tenant_id().to_string());
     tracing::Span::current().record("method", method.as_str());
@@ -1591,7 +1612,7 @@ pub async fn idempotency_middleware(
         .extensions
         .get::<MiddlewareState>()
         .cloned()
-        .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+        .ok_or(StatusCode::INTERNAL_SERVER_ERROR.into_response())?;
 
     let body_bytes = match to_bytes(body, state.config.max_body_size).await {
         Ok(b) => b,
@@ -1600,7 +1621,13 @@ pub async fn idempotency_middleware(
                 "Request body exceeded max_body_size ({})",
                 state.config.max_body_size
             );
-            return Err(StatusCode::BAD_REQUEST);
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(IdempotencyError {
+                    error: "Request body exceeded max_body_size".to_string(),
+                }),
+            )
+                .into_response());
         }
     };
 
@@ -1649,7 +1676,7 @@ pub async fn idempotency_middleware(
                             key = %idempotency_key,
                             "Idempotency conflict detected (Completed)"
                         );
-                        return Err(StatusCode::CONFLICT);
+                        return Err(StatusCode::CONFLICT.into_response());
                     }
                     info!(key = %idempotency_key, "Replaying idempotent response");
                     return Ok(build_replay_response(&record));
@@ -1664,7 +1691,7 @@ pub async fn idempotency_middleware(
                             key = %idempotency_key,
                             "Idempotency conflict detected (InFlight)"
                         );
-                        return Err(StatusCode::CONFLICT);
+                        return Err(StatusCode::CONFLICT.into_response());
                     }
 
                     let notified = notify.notified();
@@ -1697,7 +1724,7 @@ pub async fn idempotency_middleware(
             },
             Err(IdempotencyStoreError::BackendUnavailable) => {
                 error!("Idempotency store unavailable during acquire");
-                return Err(StatusCode::SERVICE_UNAVAILABLE);
+                return Err(StatusCode::SERVICE_UNAVAILABLE.into_response());
             }
         }
     };
