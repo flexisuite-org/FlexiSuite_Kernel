@@ -113,9 +113,9 @@ impl Default for MiddlewareConfig {
                         tracing::warn!(
                             key = %key,
                             value = %v,
-                            "Invalid boolean environment variable; failing closed (false)"
+                            "Invalid boolean environment variable, using default"
                         );
-                        false
+                        default_val
                     }
                 },
                 Err(_) => default_val,
