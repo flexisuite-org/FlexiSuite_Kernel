@@ -12,6 +12,16 @@ use wasmtime_wasi::p2::pipe::{MemoryInputPipe, MemoryOutputPipe};
 pub struct WasmSandbox {
     engine: Engine,
     options: RuntimeOptions,
+    watchdog: Option<(Arc<AtomicBool>, std::thread::JoinHandle<()>)>,
+}
+
+impl Drop for WasmSandbox {
+    fn drop(&mut self) {
+        if let Some((cancel, handle)) = self.watchdog.take() {
+            cancel.store(true, Ordering::SeqCst);
+            let _ = handle.join();
+        }
+    }
 }
 
 impl WasmSandbox {
@@ -23,7 +33,11 @@ impl WasmSandbox {
 
         let engine = Engine::new(&config).map_err(|e| SandboxError::InitError(e.to_string()))?;
 
-        Ok(Self { engine, options })
+        Ok(Self {
+            engine,
+            options,
+            watchdog: None,
+        })
     }
 }
 
@@ -50,7 +64,10 @@ fn map_wasm_error(error: anyhow::Error) -> SandboxError {
     // String mapping fallback for wasmtime 41.0.3 diagnostics when no Trap is available.
     if message.contains("allocation too large") || message.contains("exceeded memory limits") {
         SandboxError::MemoryLimitExceeded
-    } else if message.contains("memory out of bounds") {
+    } else if message.contains("memory out of bounds")
+        || message.contains("index out of bounds")
+        || message.contains("offset out of bounds")
+    {
         SandboxError::RuntimeError(message)
     } else {
         SandboxError::RuntimeError(message)
@@ -68,6 +85,11 @@ impl SandboxRuntime for WasmSandbox {
             return Err(SandboxError::PermissionDenied(
                 "permissions.network_allowlist is not enforced yet".to_string(),
             ));
+        }
+
+        if let Some((cancel, handle)) = self.watchdog.take() {
+            cancel.store(true, Ordering::SeqCst);
+            let _ = handle.join();
         }
 
         let mut linker = Linker::new(&self.engine);
@@ -132,9 +154,10 @@ impl SandboxRuntime for WasmSandbox {
                 engine_clone.increment_epoch();
             }
         });
-        let mut watchdog = Some((cancel_watchdog.clone(), watchdog_handle));
-        let mut stop_watchdog = || {
-            if let Some((cancel, handle)) = watchdog.take() {
+        self.watchdog = Some((cancel_watchdog, watchdog_handle));
+
+        let stop_watchdog = |s: &mut Self| {
+            if let Some((cancel, handle)) = s.watchdog.take() {
                 cancel.store(true, Ordering::SeqCst);
                 let _ = handle.join();
             }
@@ -148,11 +171,11 @@ impl SandboxRuntime for WasmSandbox {
             {
                 Ok(Ok(module)) => module,
                 Ok(Err(e)) => {
-                    stop_watchdog();
+                    stop_watchdog(self);
                     return Err(map_wasm_error(e.into()));
                 }
                 Err(e) => {
-                    stop_watchdog();
+                    stop_watchdog(self);
                     return Err(SandboxError::RuntimeError(e.to_string()));
                 }
             };
@@ -160,7 +183,7 @@ impl SandboxRuntime for WasmSandbox {
         let instance = match linker.instantiate_async(&mut store, &module).await {
             Ok(instance) => instance,
             Err(e) => {
-                stop_watchdog();
+                stop_watchdog(self);
                 return Err(map_wasm_error(e));
             }
         };
@@ -168,7 +191,7 @@ impl SandboxRuntime for WasmSandbox {
         let start = match instance.get_typed_func::<(), ()>(&mut store, "_start") {
             Ok(start) => start,
             Err(e) => {
-                stop_watchdog();
+                stop_watchdog(self);
                 return Err(map_wasm_error(e));
             }
         };
@@ -178,7 +201,7 @@ impl SandboxRuntime for WasmSandbox {
         match execution.await {
             Ok(_) => {}
             Err(e) => {
-                stop_watchdog();
+                stop_watchdog(self);
                 if let Some(max_stdout) = max_stdout {
                     let message = e.to_string();
                     if message.contains("write beyond capacity of MemoryOutputPipe") {
@@ -198,7 +221,7 @@ impl SandboxRuntime for WasmSandbox {
             }
         }
 
-        stop_watchdog();
+        stop_watchdog(self);
 
         let stdout_bytes = store.data().stdout.contents();
         if let Some(max_stdout) = max_stdout
