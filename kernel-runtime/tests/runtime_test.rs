@@ -119,7 +119,10 @@ async fn test_deno_invalid_memory_limit_is_init_error() {
         Err(SandboxError::InitError(e)) => {
             assert!(e.contains("below the minimum Deno/V8 heap limit"));
         }
-        other => panic!("Expected InitError for invalid memory limit, got: {:?}", other),
+        other => panic!(
+            "Expected InitError for invalid memory limit, got: {:?}",
+            other
+        ),
     }
 }
 
@@ -381,7 +384,7 @@ async fn test_wasm_non_json_stdout_returns_string() {
     let mut runtime = WasmSandbox::new(options).unwrap();
     let input = serde_json::Value::Null;
     let output = runtime.execute(wat, input).await.unwrap();
-    assert_eq!(output, serde_json::json!("hello wasm\n"));
+    assert_eq!(output, serde_json::json!("hello wasm"));
 }
 
 #[tokio::test]
@@ -418,7 +421,7 @@ async fn test_wasm_invalid_stdout_utf8() {
 }
 
 #[tokio::test]
-async fn test_wasm_network_allowlist_rejection() {
+async fn test_wasm_network_allowlist_allows_execution_when_unused() {
     let mut options = RuntimeOptions::default();
     options.permissions.network_allowlist = vec!["https://example.com".to_string()];
 
@@ -431,21 +434,25 @@ async fn test_wasm_network_allowlist_rejection() {
     )
     "#;
     let input = serde_json::Value::Null;
-    match wasm_runtime.execute(wat, input).await {
-        Err(SandboxError::PermissionDenied(_)) => {}
-        other => panic!("Expected PermissionDenied for Wasm, got: {:?}", other),
-    }
+    let result = wasm_runtime.execute(wat, input).await;
+    assert!(
+        result.is_ok(),
+        "Expected execution to succeed when network is unused, got: {:?}",
+        result
+    );
 }
 
 #[tokio::test]
-async fn test_deno_network_allowlist_rejection() {
+async fn test_deno_network_allowlist_allows_execution_when_unused() {
     let mut options = RuntimeOptions::default();
     options.permissions.network_allowlist = vec!["https://example.com".to_string()];
 
     let mut deno_runtime = DenoSandbox::new(options);
     let input = serde_json::Value::Null;
-    match deno_runtime.execute("1 + 1", input).await {
-        Err(SandboxError::PermissionDenied(_)) => {}
-        other => panic!("Expected PermissionDenied for Deno, got: {:?}", other),
-    }
+    let result = deno_runtime.execute("1 + 1", input).await;
+    assert!(
+        result.is_ok(),
+        "Expected execution to succeed when network is unused, got: {:?}",
+        result
+    );
 }

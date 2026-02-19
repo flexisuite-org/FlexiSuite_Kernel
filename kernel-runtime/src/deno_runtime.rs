@@ -1,14 +1,18 @@
 use crate::{RuntimeOptions, SandboxError, SandboxRuntime};
 use async_trait::async_trait;
 use deno_core::{JsRuntime, OpState, RuntimeOptions as DenoOptions, op2, v8};
+use deno_error::JsErrorBox;
 #[cfg(unix)]
 use libc::{clock_gettime, pthread_getcpuclockid, pthread_self, timespec};
+use reqwest::{Client, Method};
+use std::collections::HashMap;
 use std::io::{Error, ErrorKind};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::JoinHandle;
 use std::time::Duration;
 use tokio::sync::Semaphore;
+use url::Url;
 
 pub struct DenoSandbox {
     options: RuntimeOptions,
@@ -68,6 +72,106 @@ struct OutputConfig {
     max_output_size: Option<usize>,
 }
 
+#[derive(Clone)]
+struct NetworkConfig {
+    allowlist: Vec<String>,
+}
+
+fn check_url(url_str: &str, allowlist: &[String]) -> Result<Url, JsErrorBox> {
+    crate::check_url(url_str, allowlist).map_err(|e| {
+        if e.contains("not allowed") {
+            JsErrorBox::generic(e)
+        } else {
+            JsErrorBox::new("InvalidInput", e)
+        }
+    })
+}
+
+#[derive(serde::Deserialize)]
+struct FetchOptions {
+    method: Option<String>,
+    headers: Option<HashMap<String, String>>,
+    body: Option<String>,
+}
+
+#[derive(serde::Serialize)]
+struct FetchResponse {
+    status: u16,
+    status_text: String,
+    headers: HashMap<String, String>,
+    body: String,
+}
+
+#[op2]
+#[serde]
+pub async fn op_fetch(
+    state: std::rc::Rc<std::cell::RefCell<OpState>>,
+    #[string] url_str: String,
+    #[serde] options: Option<FetchOptions>,
+) -> Result<FetchResponse, JsErrorBox> {
+    let (client, allowlist) = {
+        let state = state.borrow();
+        (
+            state.borrow::<Client>().clone(),
+            state.borrow::<NetworkConfig>().allowlist.clone(),
+        )
+    };
+
+    // Initial URL check to catch IP literals and early failures
+    let url = check_url(&url_str, &allowlist)?;
+
+    let method = if let Some(ref opts) = options {
+        opts.method
+            .as_deref()
+            .unwrap_or("GET")
+            .parse::<Method>()
+            .map_err(|e| JsErrorBox::new("InvalidInput", e.to_string()))?
+    } else {
+        Method::GET
+    };
+
+    let mut builder = client.request(method, url);
+
+    if let Some(opts) = options {
+        if let Some(headers) = opts.headers {
+            for (k, v) in headers {
+                builder = builder.header(k, v);
+            }
+        }
+        if let Some(body) = opts.body {
+            builder = builder.body(body);
+        }
+    }
+
+    let response = builder
+        .send()
+        .await
+        .map_err(|e| JsErrorBox::generic(e.to_string()))?;
+
+    let status = response.status().as_u16();
+    let status_text = response
+        .status()
+        .canonical_reason()
+        .unwrap_or("")
+        .to_string();
+    let headers: HashMap<String, String> = response
+        .headers()
+        .iter()
+        .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("").to_string()))
+        .collect();
+    let body = response
+        .text()
+        .await
+        .map_err(|e| JsErrorBox::generic(e.to_string()))?;
+
+    Ok(FetchResponse {
+        status,
+        status_text,
+        headers,
+        body,
+    })
+}
+
 #[op2(fast)]
 pub fn op_set_output(state: &mut OpState, #[string] json: String) -> Result<(), Error> {
     if let Some(max_output_size) = state
@@ -99,7 +203,7 @@ pub fn op_set_output(state: &mut OpState, #[string] json: String) -> Result<(), 
     Ok(())
 }
 
-deno_core::extension!(sandbox_ext, ops = [op_set_output],);
+deno_core::extension!(sandbox_ext, ops = [op_set_output, op_fetch],);
 
 #[cfg(unix)]
 fn current_thread_cpu_clock_id() -> Result<libc::clockid_t, SandboxError> {
@@ -107,12 +211,10 @@ fn current_thread_cpu_clock_id() -> Result<libc::clockid_t, SandboxError> {
     // SAFETY: pthread_self returns the current thread handle, and clock_id is valid writable memory.
     let rc = unsafe { pthread_getcpuclockid(pthread_self(), &mut clock_id) };
     if rc != 0 {
-        return Err(SandboxError::RuntimeError(
-            format!(
-                "failed to resolve current thread CPU clock: {}",
-                std::io::Error::from_raw_os_error(rc)
-            ),
-        ));
+        return Err(SandboxError::RuntimeError(format!(
+            "failed to resolve current thread CPU clock: {}",
+            std::io::Error::from_raw_os_error(rc)
+        )));
     }
     Ok(clock_id)
 }
@@ -123,12 +225,10 @@ fn thread_cpu_time(clock_id: libc::clockid_t) -> Result<Duration, SandboxError> 
     // SAFETY: ts points to valid writable memory; clock_id was obtained via pthread_getcpuclockid.
     let rc = unsafe { clock_gettime(clock_id, ts.as_mut_ptr()) };
     if rc != 0 {
-        return Err(SandboxError::RuntimeError(
-            format!(
-                "failed to read thread CPU usage: {}",
-                std::io::Error::last_os_error()
-            ),
-        ));
+        return Err(SandboxError::RuntimeError(format!(
+            "failed to read thread CPU usage: {}",
+            std::io::Error::last_os_error()
+        )));
     }
 
     // SAFETY: rc == 0 means ts is fully initialized by clock_gettime.
@@ -138,7 +238,8 @@ fn thread_cpu_time(clock_id: libc::clockid_t) -> Result<Duration, SandboxError> 
             "thread CPU clock returned negative timestamp".to_string(),
         ));
     }
-    Ok(Duration::from_secs(ts.tv_sec as u64).saturating_add(Duration::from_nanos(ts.tv_nsec as u64)))
+    Ok(Duration::from_secs(ts.tv_sec as u64)
+        .saturating_add(Duration::from_nanos(ts.tv_nsec as u64)))
 }
 
 #[async_trait]
@@ -167,18 +268,14 @@ impl SandboxRuntime for DenoSandbox {
             }
         }
 
-        if !self.options.permissions.network_allowlist.is_empty() {
-            return Err(SandboxError::PermissionDenied(
-                "permissions.network_allowlist is not enforced yet".to_string(),
-            ));
-        }
-
         let exec_permit = self
             .exec_limiter
             .clone()
             .acquire_owned()
             .await
-            .map_err(|_| SandboxError::InitError("Deno execution semaphore is closed".to_string()))?;
+            .map_err(|_| {
+                SandboxError::InitError("Deno execution semaphore is closed".to_string())
+            })?;
 
         let options = self.options.clone();
         let code = code.to_string();
@@ -217,9 +314,26 @@ impl SandboxRuntime for DenoSandbox {
                     create_params: Some(create_params),
                     ..Default::default()
                 });
-                js_runtime.op_state().borrow_mut().put(OutputConfig {
-                    max_output_size: Some(options.max_output_size.unwrap_or(DEFAULT_MAX_OUTPUT_SIZE)),
-                });
+
+                let resolver = Arc::new(crate::AllowlistResolver::new(
+                    options.permissions.network_allowlist.clone(),
+                ));
+                let client = Client::builder()
+                    .dns_resolver(resolver)
+                    .build()
+                    .map_err(|e| SandboxError::InitError(e.to_string()))?;
+
+                {
+                    let op_state_rc = js_runtime.op_state();
+                    let mut op_state = op_state_rc.borrow_mut();
+                    op_state.put(OutputConfig {
+                        max_output_size: Some(options.max_output_size.unwrap_or(DEFAULT_MAX_OUTPUT_SIZE)),
+                    });
+                    op_state.put(NetworkConfig {
+                        allowlist: options.permissions.network_allowlist.clone(),
+                    });
+                    op_state.put(client);
+                }
 
                 let isolate_handle = js_runtime.v8_isolate().thread_safe_handle();
                 let wall_clock_limit = options.wall_clock_limit;
@@ -297,7 +411,31 @@ impl SandboxRuntime for DenoSandbox {
 
                 let input_json = serde_json::to_string(&input)
                     .map_err(|e| SandboxError::RuntimeError(format!("failed to serialize input: {e}")))?;
-                let setup_code = format!("globalThis.INPUT = {};", input_json);
+                let setup_code = format!(
+                    r#"
+                    globalThis.INPUT = {};
+                    globalThis.Headers = class Headers {{
+                        constructor(init) {{
+                            this.map = new Map(Object.entries(init || {{}}));
+                        }}
+                        get(name) {{ return this.map.get(name); }}
+                        has(name) {{ return this.map.has(name); }}
+                        forEach(callback) {{ this.map.forEach(callback); }}
+                    }};
+                    globalThis.fetch = async function(url, options) {{
+                        const response = await Deno.core.ops.op_fetch(url, options);
+                        return {{
+                            ok: response.status >= 200 && response.status < 300,
+                            status: response.status,
+                            statusText: response.status_text,
+                            headers: new Headers(response.headers),
+                            text: async () => response.body,
+                            json: async () => JSON.parse(response.body),
+                        }};
+                    }};
+                    "#,
+                    input_json
+                );
                 js_runtime
                     .execute_script("setup", setup_code)
                     .map_err(|e| SandboxError::RuntimeError(e.to_string()))?;

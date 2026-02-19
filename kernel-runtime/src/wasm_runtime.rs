@@ -53,10 +53,18 @@ impl WasmSandbox {
     }
 }
 
+struct SyncWasi(pub WasiP1Ctx);
+// SAFETY: WasiP1Ctx contains Box<dyn StdinStream> which is !Sync by trait definition,
+// but we only inject MemoryInputPipe/MemoryOutputPipe which are Sync.
+// Also, Store is !Sync, ensuring single-threaded access to Ctx.
+unsafe impl Sync for SyncWasi {}
+
 struct Ctx {
-    wasi: WasiP1Ctx,
+    wasi: SyncWasi,
     limits: StoreLimits,
     stdout: MemoryOutputPipe,
+    client: reqwest::Client,
+    allowlist: Vec<String>,
 }
 
 fn map_wasm_error(error: anyhow::Error) -> SandboxError {
@@ -91,18 +99,132 @@ impl SandboxRuntime for WasmSandbox {
         code: &str,
         input: serde_json::Value,
     ) -> Result<serde_json::Value, SandboxError> {
-        if !self.options.permissions.network_allowlist.is_empty() {
-            return Err(SandboxError::PermissionDenied(
-                "permissions.network_allowlist is not enforced yet".to_string(),
-            ));
-        }
-
         self.stop_watchdog();
         let started_at = Instant::now();
 
         let mut linker = Linker::new(&self.engine);
 
-        wasmtime_wasi::p1::add_to_linker_async(&mut linker, |ctx: &mut Ctx| &mut ctx.wasi)
+        linker
+            .func_wrap_async(
+                "env",
+                "flexi_fetch",
+                |mut caller: wasmtime::Caller<'_, Ctx>,
+                 (
+                    url_ptr,
+                    url_len,
+                    method_ptr,
+                    method_len,
+                    headers_ptr,
+                    headers_len,
+                    body_ptr,
+                    body_len,
+                    out_ptr,
+                    out_max_len,
+                ): (i32, i32, i32, i32, i32, i32, i32, i32, i32, i32)| {
+                    Box::new(async move {
+                        let mem = match caller.get_export("memory") {
+                            Some(wasmtime::Extern::Memory(m)) => m,
+                            _ => return Ok(-1),
+                        };
+
+                        let read_string = |ptr: i32, len: i32| -> Result<String, i32> {
+                            if len < 0 {
+                                return Err(-10);
+                            }
+                            let mut buf = vec![0u8; len as usize];
+                            if mem.read(&caller, ptr as usize, &mut buf).is_err() {
+                                return Err(-2);
+                            }
+                            String::from_utf8(buf).map_err(|_| -3)
+                        };
+
+                        let url_str = match read_string(url_ptr, url_len) {
+                            Ok(s) => s,
+                            Err(e) => return Ok(e),
+                        };
+
+                        let method_str = match read_string(method_ptr, method_len) {
+                            Ok(s) => s,
+                            Err(e) => return Ok(e),
+                        };
+
+                        let headers_str = match read_string(headers_ptr, headers_len) {
+                            Ok(s) => s,
+                            Err(e) => return Ok(e),
+                        };
+
+                        let body_str = match read_string(body_ptr, body_len) {
+                            Ok(s) => s,
+                            Err(e) => return Ok(e),
+                        };
+
+                        let client = caller.data().client.clone();
+                        let allowlist = caller.data().allowlist.clone();
+
+                        // Initial check to block IP literals if not explicitly allowed
+                        let url = match crate::check_url(&url_str, &allowlist) {
+                            Ok(u) => u,
+                            Err(_) => return Ok(-4),
+                        };
+
+                        let method = match method_str.parse::<reqwest::Method>() {
+                            Ok(m) => m,
+                            Err(_) => return Ok(-11),
+                        };
+
+                        let mut builder = client.request(method, url);
+
+                        if !headers_str.is_empty() {
+                            let headers: std::collections::HashMap<String, String> =
+                                match serde_json::from_str(&headers_str) {
+                                    Ok(h) => h,
+                                    Err(_) => return Ok(-12),
+                                };
+                            for (k, v) in headers {
+                                builder = builder.header(k, v);
+                            }
+                        }
+
+                        if !body_str.is_empty() {
+                            builder = builder.body(body_str);
+                        }
+
+                        let resp = match builder.send().await {
+                            Ok(r) => r,
+                            Err(_) => return Ok(-6),
+                        };
+
+                        let status = resp.status().as_u16();
+                        let body = match resp.text().await {
+                            Ok(t) => t,
+                            Err(_) => return Ok(-7),
+                        };
+
+                        let json_resp = serde_json::json!({
+                            "status": status,
+                            "body": body
+                        });
+                        let json_str = json_resp.to_string();
+                        let json_bytes = json_str.as_bytes();
+
+                        if json_bytes.len() > out_max_len as usize {
+                            return Ok(-8);
+                        }
+
+                        if mem
+                            .write(&mut caller, out_ptr as usize, json_bytes)
+                            .is_err()
+                        {
+                            return Ok(-9);
+                        }
+
+                        Ok(json_bytes.len() as i32)
+                    })
+                },
+            )
+            .map_err(|e| SandboxError::InitError(e.to_string()))?;
+
+        wasmtime_wasi::p1::add_to_linker_async(&mut linker, |ctx: &mut Ctx| &mut ctx.wasi.0)
             .map_err(|e| SandboxError::InitError(e.to_string()))?;
 
         let effective_max_stdout = self.options.max_output_size.unwrap_or(DEFAULT_MAX_STDOUT);
@@ -120,12 +242,22 @@ impl SandboxRuntime for WasmSandbox {
             .trap_on_grow_failure(true)
             .build();
 
+        let resolver = Arc::new(crate::AllowlistResolver::new(
+            self.options.permissions.network_allowlist.clone(),
+        ));
+        let client = reqwest::Client::builder()
+            .dns_resolver(resolver)
+            .build()
+            .map_err(|e| SandboxError::InitError(e.to_string()))?;
+
         let mut store = Store::new(
             &self.engine,
             Ctx {
-                wasi,
+                wasi: SyncWasi(wasi),
                 limits,
                 stdout,
+                client,
+                allowlist: self.options.permissions.network_allowlist.clone(),
             },
         );
         store.limiter(|state| &mut state.limits);
@@ -180,12 +312,14 @@ impl SandboxRuntime for WasmSandbox {
         // Keep permit for the entire compile phase to avoid admitting unbounded
         // concurrent compiles while this task is active.
         let _compile_permit = compile_permit;
-        let module = match tokio::task::spawn_blocking(move || Module::new(&compile_engine, compile_code)).await
-        {
-            Ok(Ok(module)) => module,
-            Ok(Err(e)) => return Err(map_wasm_error(e)),
-            Err(e) => return Err(SandboxError::RuntimeError(e.to_string())),
-        };
+        let module =
+            match tokio::task::spawn_blocking(move || Module::new(&compile_engine, compile_code))
+                .await
+            {
+                Ok(Ok(module)) => module,
+                Ok(Err(e)) => return Err(map_wasm_error(e)),
+                Err(e) => return Err(SandboxError::RuntimeError(e.to_string())),
+            };
 
         if started_at.elapsed() > self.options.wall_clock_limit {
             return Err(SandboxError::Timeout);
