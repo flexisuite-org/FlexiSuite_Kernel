@@ -4,93 +4,166 @@ mod tests {
         BreakGlassContext, KeyStatus, Manifest, TrustedKey, VerificationResult, verify_break_glass,
         verify_manifest,
     };
+    use ed25519_dalek::{SigningKey, Signer};
+    use rand::rngs::OsRng;
 
     #[test]
     fn test_manifest_signature_trust_root() {
+        let mut csprng = OsRng;
+        let signing_key_active = SigningKey::generate(&mut csprng);
+        let verifying_key_active = signing_key_active.verifying_key();
+        let pub_key_active = hex::encode(verifying_key_active.to_bytes());
+
+        let signing_key_revoked = SigningKey::generate(&mut csprng);
+        let verifying_key_revoked = signing_key_revoked.verifying_key();
+        let pub_key_revoked = hex::encode(verifying_key_revoked.to_bytes());
+
+        // Digest to sign
+        let digest_123 = "sha256-123";
+        let signature_123_active = hex::encode(signing_key_active.sign(digest_123.as_bytes()).to_bytes());
+        let signature_123_revoked = hex::encode(signing_key_revoked.sign(digest_123.as_bytes()).to_bytes());
+
         let manifest_revoked = Manifest {
             id: "pkg-a".to_string(),
-            digest: "sha256-123".to_string(),
-            signature: "sig".to_string(),
+            digest: digest_123.to_string(),
+            signature: signature_123_revoked,
             kid: "revoked".to_string(),
         };
 
+        let digest_456 = "sha256-456";
+        let signature_456_active = hex::encode(signing_key_active.sign(digest_456.as_bytes()).to_bytes());
         let manifest_ok = Manifest {
             id: "pkg-b".to_string(),
-            digest: "sha256-456".to_string(),
-            signature: "sig".to_string(),
+            digest: digest_456.to_string(),
+            signature: signature_456_active,
             kid: "active".to_string(),
         };
 
         // Mock time
         let now = 100000;
         let retired_at_ok = now - 50; // 50s ago (within 86400s)
-
         let retired_at_fail = now - 90000; // 90000s ago (> 86400)
 
         // Trusted Keys
         let key_active = TrustedKey {
             kid: "active".to_string(),
+            alg: "Ed25519".to_string(),
+            public_key: pub_key_active.clone(),
             status: KeyStatus::Active,
             retired_at: None,
+            not_before: None,
+            not_after: None,
         };
         let key_revoked = TrustedKey {
             kid: "revoked".to_string(),
+            alg: "Ed25519".to_string(),
+            public_key: pub_key_revoked.clone(),
             status: KeyStatus::Revoked,
             retired_at: None,
+            not_before: None,
+            not_after: None,
         };
         let key_retired_ok = TrustedKey {
             kid: "active".to_string(),
+            alg: "Ed25519".to_string(),
+            public_key: pub_key_active.clone(), // Same key but retired
             status: KeyStatus::Retired,
             retired_at: Some(retired_at_ok),
+            not_before: None,
+            not_after: None,
         };
         let key_retired_fail = TrustedKey {
             kid: "active".to_string(),
+            alg: "Ed25519".to_string(),
+            public_key: pub_key_active.clone(),
             status: KeyStatus::Retired,
             retired_at: Some(retired_at_fail),
+            not_before: None,
+            not_after: None,
         };
         let key_next = TrustedKey {
             kid: "active".to_string(),
+            alg: "Ed25519".to_string(),
+            public_key: pub_key_active.clone(),
             status: KeyStatus::Next,
             retired_at: None,
+            not_before: None,
+            not_after: None,
         };
 
+        // Revoked Key -> KeyRevoked
         assert!(matches!(
-            verify_manifest(&manifest_revoked, &key_revoked, "sha256-123", now),
+            verify_manifest(&manifest_revoked, &key_revoked, digest_123, now),
             VerificationResult::KeyRevoked
         ));
 
         // Test Digest Mismatch (Contract: Mandatory check)
+        // Even if signature is valid for "sha256-456", if expected digest is different, fail digest match.
+        // manifest_ok has digest "sha256-456".
         assert!(matches!(
             verify_manifest(&manifest_ok, &key_active, "sha256-WRONG", now),
             VerificationResult::DigestMismatch
         ));
+
+        // Success case
         assert!(matches!(
             verify_manifest(&manifest_ok, &key_active, "sha256-456", now),
             VerificationResult::Ok
         ));
 
+        // Test SHA-384
+        let digest_abc = "sha384-abc";
+        let signature_abc_active = hex::encode(signing_key_active.sign(digest_abc.as_bytes()).to_bytes());
         let manifest_sha384 = Manifest {
             id: "pkg-c".to_string(),
-            digest: "sha384-abc".to_string(),
-            signature: "sig".to_string(),
+            digest: digest_abc.to_string(),
+            signature: signature_abc_active,
             kid: "active".to_string(),
         };
 
         // Verifying dash prefix support
         assert!(matches!(
-            verify_manifest(&manifest_sha384, &key_active, "sha384-abc", now),
+            verify_manifest(&manifest_sha384, &key_active, digest_abc, now),
             VerificationResult::Ok
         ));
 
         // Test Key Mismatch
+        let signing_key_wrong = SigningKey::generate(&mut csprng);
+        let pub_key_wrong = hex::encode(signing_key_wrong.verifying_key().to_bytes());
         let key_wrong = TrustedKey {
             kid: "wrong".to_string(),
+            alg: "Ed25519".to_string(),
+            public_key: pub_key_wrong,
             status: KeyStatus::Active,
             retired_at: None,
+            not_before: None,
+            not_after: None,
         };
         assert!(matches!(
             verify_manifest(&manifest_ok, &key_wrong, "sha256-456", now),
             VerificationResult::KeyMismatch
+        ));
+
+        // Test Invalid Signature (Tampered Digest)
+        // Manifest says digest="sha256-456". Signature is for "sha256-456".
+        // If we modify manifest.signature manually to invalid:
+        let mut manifest_tampered = manifest_ok.clone();
+        manifest_tampered.signature = "deadbeef".to_string(); // Invalid hex signature or just garbage
+        // Or valid hex but invalid signature
+        assert!(matches!(
+            verify_manifest(&manifest_tampered, &key_active, "sha256-456", now),
+            VerificationResult::SignatureInvalid
+        ));
+
+        // Test Valid Signature but Wrong Key (Public key doesn't match private key used)
+        let signing_key_other = SigningKey::generate(&mut csprng);
+        let signature_other = hex::encode(signing_key_other.sign(digest_456.as_bytes()).to_bytes());
+        let mut manifest_wrong_sig = manifest_ok.clone();
+        manifest_wrong_sig.signature = signature_other;
+
+        assert!(matches!(
+            verify_manifest(&manifest_wrong_sig, &key_active, "sha256-456", now),
+            VerificationResult::SignatureInvalid
         ));
 
         // Test Retired logic
@@ -110,6 +183,22 @@ mod tests {
         assert!(matches!(
             verify_manifest(&manifest_ok, &key_next, "sha256-456", now),
             VerificationResult::Ok
+        ));
+
+        // Test Key Not Yet Valid
+        let mut key_future = key_active.clone(); // Removed duplicate definition
+        key_future.not_before = Some(now + 100);
+        assert!(matches!(
+            verify_manifest(&manifest_ok, &key_future, "sha256-456", now),
+            VerificationResult::KeyNotYetValid
+        ));
+
+        // Test Key Expired
+        let mut key_expired = key_active.clone(); // Removed duplicate definition
+        key_expired.not_after = Some(now - 100);
+        assert!(matches!(
+            verify_manifest(&manifest_ok, &key_expired, "sha256-456", now),
+            VerificationResult::KeyExpired
         ));
     }
 

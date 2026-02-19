@@ -1,31 +1,28 @@
 use crate::error::RegistryError;
 use crate::model::{Dependencies, DistManifest, Kind, Route};
+use crate::trust::{FileTrustProvider, TrustProvider};
 use bytes::Bytes;
 use kernel_core::auth::TenantContext;
+use kernel_core::supplychain::{verify_manifest, Manifest, VerificationResult};
 use object_store::ObjectStore;
 use object_store::path::Path;
 use serde::Serialize;
 use sha2::{Digest, Sha384};
 use std::collections::BTreeMap;
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::{error, info, instrument, warn};
 
 pub struct RegistryStorage {
     store: Arc<dyn ObjectStore>,
     prefix: String,
     tenant_id: String,
+    trust_provider: Arc<dyn TrustProvider>,
 }
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 /// Digest payload for `manifest_payload_digest`.
-///
-/// Hash stability depends on the serde serialization shape of this payload and
-/// all nested types referenced here (`Route`, `Dependencies`, `Kind`).
-/// Changing serde attributes (for example `rename_all`, field/variant renames,
-/// or ordering-affecting schema changes) can silently change computed digests.
-/// Treat such serde-shape changes as breaking: update stored manifests, add
-/// migration steps, and add digest regression tests.
 struct ManifestDigestPayload<'a> {
     schema_version: &'a str,
     id: &'a str,
@@ -41,11 +38,39 @@ struct ManifestDigestPayload<'a> {
 
 impl RegistryStorage {
     pub fn new(store: Arc<dyn ObjectStore>, tenant_ctx: &TenantContext) -> Self {
+        // Default to loading from ops/trust/manifest_trust_root.json
+        let mut trust_path = std::path::PathBuf::from("ops/trust/manifest_trust_root.json");
+
+        if !trust_path.exists() {
+             let cwd = std::env::current_dir().unwrap_or_default();
+             let abs = cwd.join(&trust_path);
+             eprintln!("CRITICAL: Trust root missing at {:?}. CWD: {:?}. Abs: {:?}", trust_path, cwd, abs);
+             // Verify if we are inside kernel-registry
+             if cwd.ends_with("kernel-registry") {
+                 let fallback = std::path::PathBuf::from("../ops/trust/manifest_trust_root.json");
+                 if fallback.exists() {
+                     eprintln!("Running inside kernel-registry, using fallback {:?}", fallback);
+                     trust_path = fallback;
+                 }
+             }
+        }
+
+        // Try to load. If fail, we panic with detail.
+        let trust_provider = FileTrustProvider::new(trust_path.clone())
+            .expect(&format!("Failed to load trust root from {:?}. Security critical component missing.", trust_path));
+
         Self {
             store,
             prefix: format!("tenants/{}/", tenant_ctx.tenant_id().as_str()),
             tenant_id: tenant_ctx.tenant_id().to_string(),
+            trust_provider: Arc::new(trust_provider),
         }
+    }
+
+    /// Builder-style method to override trust provider (for testing)
+    pub fn with_trust_provider(mut self, provider: Arc<dyn TrustProvider>) -> Self {
+        self.trust_provider = provider;
+        self
     }
 
     fn validate_key(key: &str) -> Result<(), RegistryError> {
@@ -96,14 +121,6 @@ impl RegistryStorage {
         ))
     }
 
-    /// Computes a digest from the JSON serialization of `ManifestDigestPayload`.
-    ///
-    /// Maintenance note: digest stability is tied to serde configuration of
-    /// nested payload types (`Route`, `Dependencies`, `Kind`) and this payload's
-    /// own serde shape. Any serde change (including `rename_all`, field/variant
-    /// renames, or ordering-affecting schema edits) must be treated as breaking:
-    /// update stored manifests, add migration steps, and add digest regression
-    /// tests.
     fn manifest_payload_digest(manifest: &DistManifest) -> Result<String, RegistryError> {
         let payload = ManifestDigestPayload {
             schema_version: &manifest.schema_version,
@@ -118,14 +135,13 @@ impl RegistryStorage {
             configuration: &manifest.configuration,
         };
 
-        // Normalize numeric values to ensure digest stability (1.0 vs 1)
         let payload_value = serde_json::to_value(&payload)?;
         let normalized = Self::normalize_value(payload_value);
         let payload_bytes = serde_json::to_vec(&normalized)?;
 
         let mut hasher = Sha384::new();
         hasher.update(payload_bytes);
-        Ok(hex::encode(hasher.finalize()))
+        Ok(format!("sha384-{}", hex::encode(hasher.finalize())))
     }
 
     fn normalize_value(v: serde_json::Value) -> serde_json::Value {
@@ -145,10 +161,7 @@ impl RegistryStorage {
                     return Value::from(u);
                 }
                 if let Some(f) = n.as_f64() {
-                    // Check if the float is effectively an integer
                     if f.fract() == 0.0 {
-                        // Prefer integer representation if it fits in i64/u64
-                        // Perform lossless round-trip check to avoid silent saturation
                         if f >= (i64::MIN as f64) && f < (i64::MAX as f64) {
                             let i = f as i64;
                             if (i as f64) == f {
@@ -169,7 +182,6 @@ impl RegistryStorage {
         }
     }
 
-    /// Saves binary data and returns the SHA-384 digest (hex string).
     #[instrument(skip(self, data), fields(tenant = %self.tenant_id, artifact = %key))]
     pub async fn save_artifact(&self, key: &str, data: Bytes) -> Result<String, RegistryError> {
         Self::validate_key(key)?;
@@ -187,7 +199,6 @@ impl RegistryStorage {
         Ok(digest)
     }
 
-    /// Retrieves binary data. If expected_digest is provided, verifies SHA-384.
     #[instrument(skip(self), fields(tenant = %self.tenant_id, artifact = %key))]
     pub async fn get_artifact(
         &self,
@@ -226,8 +237,6 @@ impl RegistryStorage {
         Ok(data)
     }
 
-    /// Saves a DistManifest to `manifests/{id}/{version}/manifest.json`.
-    /// Returns the SHA-384 digest and persisted manifest with manifest_digest set.
     #[instrument(skip(self, manifest), fields(tenant = %self.tenant_id, manifest.id = %manifest.id, manifest.version = %manifest.version))]
     pub async fn save_manifest(
         &self,
@@ -257,6 +266,42 @@ impl RegistryStorage {
         // manifest_digest is computed from the manifest with the entire
         // security section excluded from the hashed payload.
         let computed_digest = Self::manifest_payload_digest(manifest)?;
+
+        // Validate Security
+        let trusted_key = self
+            .trust_provider
+            .get_key(&manifest.security.manifest_signature_kid)?;
+
+        let core_manifest = Manifest {
+            id: manifest.id.clone(),
+            digest: computed_digest.clone(),
+            signature: manifest.security.manifest_signature.clone(),
+            kid: manifest.security.manifest_signature_kid.clone(),
+        };
+
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+
+        match verify_manifest(
+            &core_manifest,
+            &trusted_key,
+            &computed_digest, // Should match manifest_digest but we check computed one
+            now,
+        ) {
+            VerificationResult::Ok => {
+                info!("Manifest signature verified successfully");
+            }
+            err => {
+                error!(event = "MANIFEST_SIGNATURE_INVALID", reason = ?err, kid = %trusted_key.kid, "Signature verification failed");
+                return Err(RegistryError::InvalidManifest(format!(
+                    "Signature verification failed: {:?}",
+                    err
+                )));
+            }
+        }
+
         let mut persisted = manifest.clone();
         persisted.security.manifest_digest = computed_digest.clone();
 
@@ -272,7 +317,6 @@ impl RegistryStorage {
         Ok((computed_digest, persisted))
     }
 
-    /// Retrieves a DistManifest from `manifests/{id}/{version}/manifest.json`.
     #[instrument(skip(self), fields(tenant = %self.tenant_id, manifest.id = %id, manifest.version = %version))]
     pub async fn get_manifest(
         &self,
