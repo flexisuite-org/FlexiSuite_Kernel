@@ -236,13 +236,21 @@ impl SandboxRuntime for WasmSandbox {
             )));
         }
         let output = String::from_utf8(stdout_bytes.to_vec()).map_err(|e| {
+            let total_len = stdout_bytes.len();
+            let truncated = total_len > 256;
+            let hex_preview: String = stdout_bytes
+                .iter()
+                .take(256)
+                .map(|b| format!("{:02x}", b))
+                .collect();
+
             SandboxError::RuntimeError(format!(
-                "stdout contains invalid UTF-8: {}. Raw bytes (hex): {}",
+                "stdout contains invalid UTF-8: {}. Raw bytes (hex, total {} bytes{}): {}{}",
                 e,
-                stdout_bytes
-                    .iter()
-                    .map(|b| format!("{:02x}", b))
-                    .collect::<String>()
+                total_len,
+                if truncated { ", truncated" } else { "" },
+                hex_preview,
+                if truncated { "..." } else { "" }
             ))
         })?;
         Ok(serde_json::Value::String(output))

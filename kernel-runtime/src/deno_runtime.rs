@@ -1,6 +1,7 @@
 use crate::{RuntimeOptions, SandboxError, SandboxRuntime};
 use async_trait::async_trait;
 use deno_core::{JsRuntime, OpState, RuntimeOptions as DenoOptions, op2, v8};
+#[cfg(unix)]
 use libc::{clock_gettime, pthread_getcpuclockid, pthread_self, timespec};
 use std::io::{Error, ErrorKind};
 use std::sync::Arc;
@@ -91,6 +92,7 @@ pub fn op_set_output(state: &mut OpState, #[string] json: String) -> Result<(), 
 
 deno_core::extension!(sandbox_ext, ops = [op_set_output],);
 
+#[cfg(unix)]
 fn current_thread_cpu_clock_id() -> Result<libc::clockid_t, SandboxError> {
     let mut clock_id: libc::clockid_t = 0;
     // SAFETY: pthread_self returns the current thread handle, and clock_id is valid writable memory.
@@ -106,6 +108,7 @@ fn current_thread_cpu_clock_id() -> Result<libc::clockid_t, SandboxError> {
     Ok(clock_id)
 }
 
+#[cfg(unix)]
 fn thread_cpu_time(clock_id: libc::clockid_t) -> Result<Duration, SandboxError> {
     let mut ts = std::mem::MaybeUninit::<timespec>::uninit();
     // SAFETY: ts points to valid writable memory; clock_id was obtained via pthread_getcpuclockid.
@@ -215,34 +218,43 @@ impl SandboxRuntime for DenoSandbox {
                     }
                 }));
 
-                let cpu_cancel = cancelled.clone();
-                let cpu_timeout_flag = is_cpu_timeout.clone();
-                let cpu_clock_failed_flag = is_cpu_clock_failed.clone();
-                let cpu_isolate_handle = isolate_handle.clone();
-                let cpu_clock_id = current_thread_cpu_clock_id()?;
-                let cpu_start = thread_cpu_time(cpu_clock_id)?;
-                watchdogs.spawn(std::thread::spawn(move || {
-                    let sleep_slice = Duration::from_millis(10);
-                    while !cpu_cancel.load(Ordering::SeqCst) {
-                        match thread_cpu_time(cpu_clock_id) {
-                            Ok(now) if now.saturating_sub(cpu_start) >= cpu_time_limit => {
-                                cpu_timeout_flag.store(true, Ordering::SeqCst);
-                                cpu_isolate_handle.terminate_execution();
+                #[cfg(unix)]
+                {
+                    let cpu_cancel = cancelled.clone();
+                    let cpu_timeout_flag = is_cpu_timeout.clone();
+                    let cpu_clock_failed_flag = is_cpu_clock_failed.clone();
+                    let cpu_isolate_handle = isolate_handle.clone();
+                    let cpu_clock_id = current_thread_cpu_clock_id()?;
+                    let cpu_start = thread_cpu_time(cpu_clock_id)?;
+                    watchdogs.spawn(std::thread::spawn(move || {
+                        let sleep_slice = Duration::from_millis(10);
+                        while !cpu_cancel.load(Ordering::SeqCst) {
+                            match thread_cpu_time(cpu_clock_id) {
+                                Ok(now) if now.saturating_sub(cpu_start) >= cpu_time_limit => {
+                                    cpu_timeout_flag.store(true, Ordering::SeqCst);
+                                    cpu_isolate_handle.terminate_execution();
+                                    return;
+                                }
+                                Ok(_) => {}
+                                Err(_) => {
+                                    cpu_clock_failed_flag.store(true, Ordering::SeqCst);
+                                    cpu_isolate_handle.terminate_execution();
+                                    return;
+                                }
+                            }
+                            if cpu_cancel.load(Ordering::SeqCst) {
                                 return;
                             }
-                            Ok(_) => {}
-                            Err(_) => {
-                                cpu_clock_failed_flag.store(true, Ordering::SeqCst);
-                                cpu_isolate_handle.terminate_execution();
-                                return;
-                            }
+                            std::thread::sleep(sleep_slice);
                         }
-                        if cpu_cancel.load(Ordering::SeqCst) {
-                            return;
-                        }
-                        std::thread::sleep(sleep_slice);
-                    }
-                }));
+                    }));
+                }
+                #[cfg(not(unix))]
+                {
+                    // CPU limiting is not supported on non-Unix platforms.
+                    // Since we want production-grade robustness (Rule 1), we warn that it's disabled.
+                    eprintln!("Warning: CPU time limiting is not supported on this platform.");
+                }
 
                 let input_json = serde_json::to_string(&input).expect("serialize input JSON must not fail");
                 let setup_code = format!("globalThis.INPUT = {};", input_json);
