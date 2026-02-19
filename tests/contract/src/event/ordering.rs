@@ -53,3 +53,36 @@ async fn test_event_ordering_entity() {
     assert_eq!(events[1].order_mode.seq(), Some(2));
     assert_eq!(events[2].order_mode.seq(), Some(3));
 }
+
+#[tokio::test]
+async fn test_compare_event_order_cross_mode() {
+    let tenant_id = TenantId::new("t1").unwrap();
+    let entity_id = Uuid::now_v7();
+    
+    let entity_event = EventEnvelope {
+        event_id: Uuid::now_v7(),
+        tenant_id: tenant_id.clone(),
+        order_mode: OrderMode::Entity {
+            entity_id,
+            seq: Some(1),
+        },
+        payload: json!({}),
+        created_at: Utc::now(),
+        event_type: "test".to_string(),
+    };
+
+    let causality_event = EventEnvelope {
+        event_id: Uuid::now_v7(),
+        tenant_id: tenant_id.clone(),
+        order_mode: OrderMode::Causality {
+            key: "key1".to_string(),
+            seq: Some(1),
+        },
+        payload: json!({}),
+        created_at: Utc::now(),
+        event_type: "test".to_string(),
+    };
+
+    assert_eq!(compare_event_order(&entity_event, &causality_event), None);
+    assert_eq!(compare_event_order(&causality_event, &entity_event), None);
+}
