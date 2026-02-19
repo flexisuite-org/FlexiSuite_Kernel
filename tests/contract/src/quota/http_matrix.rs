@@ -50,7 +50,7 @@ mod tests {
     }
 
     #[test]
-    fn test_quota_retry_after_boundaries() {
+    fn test_retry_after_contract() {
         // Case 1: Zero value (Retry immediately / minimal delay)
         let v_zero = QuotaViolation {
             layer: QuotaLayer::ApiRateLimit,
