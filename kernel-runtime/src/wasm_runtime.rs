@@ -4,6 +4,7 @@ use async_trait::async_trait;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
+use tokio::sync::Semaphore;
 use wasmtime::{Config, Engine, Linker, Module, Store, StoreLimits, StoreLimitsBuilder, Trap};
 use wasmtime_wasi::WasiCtxBuilder;
 use wasmtime_wasi::p1::WasiP1Ctx;
@@ -13,6 +14,7 @@ pub struct WasmSandbox {
     engine: Engine,
     options: RuntimeOptions,
     watchdog: Option<(Arc<AtomicBool>, std::thread::JoinHandle<()>)>,
+    compile_limiter: Arc<Semaphore>,
 }
 
 const DEFAULT_MAX_STDOUT: usize = 1 << 20; // 1MB default hard cap
@@ -38,11 +40,16 @@ impl WasmSandbox {
         config.epoch_interruption(true);
 
         let engine = Engine::new(&config).map_err(|e| SandboxError::InitError(e.to_string()))?;
+        let compile_permits = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(2)
+            .clamp(2, 8);
 
         Ok(Self {
             engine,
             options,
             watchdog: None,
+            compile_limiter: Arc::new(Semaphore::new(compile_permits)),
         })
     }
 }
@@ -136,6 +143,30 @@ impl SandboxRuntime for WasmSandbox {
         store.set_epoch_deadline(1);
         store.epoch_deadline_trap();
 
+        let compile_queue_budget = self
+            .options
+            .wall_clock_limit
+            .checked_sub(started_at.elapsed())
+            .unwrap_or(Duration::ZERO);
+        if compile_queue_budget.is_zero() {
+            return Err(SandboxError::Timeout);
+        }
+
+        let compile_permit = match tokio::time::timeout(
+            compile_queue_budget,
+            self.compile_limiter.clone().acquire_owned(),
+        )
+        .await
+        {
+            Ok(Ok(permit)) => permit,
+            Ok(Err(_)) => {
+                return Err(SandboxError::InitError(
+                    "Wasm compile semaphore is closed".to_string(),
+                ));
+            }
+            Err(_) => return Err(SandboxError::Timeout),
+        };
+
         let compile_budget = self
             .options
             .wall_clock_limit
@@ -147,15 +178,17 @@ impl SandboxRuntime for WasmSandbox {
 
         let compile_engine = self.engine.clone();
         let compile_code = code.to_string();
-        // Do not return early on compile timeout while leaving a blocking compile thread running.
-        // We always await compile completion, then apply wall-clock budget checks.
+        // Keep permit for the entire compile phase to avoid admitting unbounded
+        // concurrent compiles while this task is active.
+        let _compile_permit = compile_permit;
         let module = match tokio::task::spawn_blocking(move || Module::new(&compile_engine, compile_code)).await
         {
             Ok(Ok(module)) => module,
-            Ok(Err(e)) => return Err(map_wasm_error(e.into())),
+            Ok(Err(e)) => return Err(map_wasm_error(e)),
             Err(e) => return Err(SandboxError::RuntimeError(e.to_string())),
         };
-        if started_at.elapsed() >= self.options.wall_clock_limit {
+
+        if started_at.elapsed() > self.options.wall_clock_limit {
             return Err(SandboxError::Timeout);
         }
 
@@ -211,10 +244,10 @@ impl SandboxRuntime for WasmSandbox {
             Err(e) => {
                 self.stop_watchdog();
                 let mapped = map_wasm_error(e);
-                if matches!(mapped, SandboxError::RuntimeError(_)) {
-                    if is_wall_timeout.load(Ordering::SeqCst) {
-                        return Err(SandboxError::Timeout);
-                    }
+                if matches!(mapped, SandboxError::RuntimeError(_))
+                    && is_wall_timeout.load(Ordering::SeqCst)
+                {
+                    return Err(SandboxError::Timeout);
                 }
                 return Err(mapped);
             }
@@ -247,6 +280,15 @@ impl SandboxRuntime for WasmSandbox {
                 if truncated { "..." } else { "" }
             ))
         })?;
-        Ok(serde_json::Value::String(output))
+
+        let trimmed = output.trim();
+        if trimmed.is_empty() {
+            return Ok(serde_json::Value::Null);
+        }
+
+        match serde_json::from_str::<serde_json::Value>(trimmed) {
+            Ok(json) => Ok(json),
+            Err(_) => Ok(serde_json::Value::String(output)),
+        }
     }
 }
