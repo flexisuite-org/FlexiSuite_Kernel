@@ -831,6 +831,7 @@ Kernelはエラー発生時や診断要求に対し、以下の構造化デー�
 - Transactional Outbox
 - Retry / DLQ
 - 順序保証 (固定シャードルーティング + `entity_seq` / `causality_seq` + 単一Consumer)
+- 運用設定ガイド: `docs/event_outbox_redis_producer.md`
 - **前提**: Phase 3（EntityRecord — イベントの対象）
 
 ### Phase 5: Component System

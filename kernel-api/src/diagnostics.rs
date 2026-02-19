@@ -6,17 +6,16 @@ use axum::{
     routing::{get, post},
 };
 use chrono::Utc;
-use kernel_core::auth::TenantContext;
+use kernel_core::auth::{KeyManager, KeyManagerError, TenantContext};
 use kernel_core::diagnostics::{DiagnosticContext, sanitizer::PIISanitizer};
-use kernel_core::kernel::KernelError;
 use kernel_data::{
-    TenantRepository,
+    DataError, TenantRepository, TenantScoped,
+    connection::RawConnection,
     entities::{diagnostic_policy, diagnostic_report},
     with_tenant_tx,
 };
-use sea_orm::{ActiveValue, DatabaseConnection};
+use sea_orm::ActiveValue;
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
 use uuid::Uuid;
 
 /// Maximum allowed length for user-supplied string fields (error_code, trace_id, etc.)
@@ -69,8 +68,21 @@ pub fn routes() -> Router {
         .route("/policy", get(get_policy).put(update_policy))
 }
 
+async fn generate_token_or_500(ctx: &TenantContext) -> Result<String, StatusCode> {
+    match KeyManager::generate_tenant_token(ctx, ctx.tenant_id()).await {
+        Ok(token) => Ok(token),
+        Err(e) => {
+            let status = match &e {
+                KeyManagerError::NoActiveKey(_) => StatusCode::SERVICE_UNAVAILABLE,
+                _ => StatusCode::INTERNAL_SERVER_ERROR,
+            };
+            tracing::error!(error = %e, status = %status, "Failed to generate tenant token");
+            Err(status)
+        }
+    }
+}
+
 async fn report_diagnostic(
-    Extension(db): Extension<Arc<DatabaseConnection>>,
     Extension(ctx): Extension<TenantContext>,
     Json(mut payload): Json<ReportDiagnosticRequest>,
 ) -> impl IntoResponse {
@@ -105,34 +117,52 @@ async fn report_diagnostic(
     };
 
     let trace_id = Uuid::now_v7();
+    let token = match generate_token_or_500(&ctx).await {
+        Ok(token) => token,
+        Err(status) => return status.into_response(),
+    };
+    let db = match ctx.db() {
+        Ok(db) => db,
+        Err(e) => {
+            tracing::error!(error = %e, "TenantContext missing database connection");
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    };
 
     // 2. Check Policy & Save
-    let result = with_tenant_tx(&db, &ctx, move |repo| {
-        Box::pin(async move {
-            let policy = repo.get_diagnostic_policy().await?;
-            let enabled = policy.map(|p| p.enabled).unwrap_or(false);
+    let result = with_tenant_tx(
+        db,
+        &ctx,
+        &token,
+        move |repo: &TenantScoped<RawConnection>| {
+            Box::pin(async move {
+                let policy = repo.get_diagnostic_policy().await?;
+                let enabled = policy.map(|p| p.enabled).unwrap_or(false);
 
-            if !enabled {
-                return Ok(None);
-            }
+                if !enabled {
+                    return Ok(None);
+                }
 
-            let context_value = serde_json::to_value(payload.context).map_err(|e| {
-                KernelError::ValidationError(format!("failed to serialize diagnostic context: {e}"))
-            })?;
+                let context_value = serde_json::to_value(payload.context).map_err(|e| {
+                    DataError::SerializationError(format!(
+                        "failed to serialize diagnostic context: {e}"
+                    ))
+                })?;
 
-            let report_model = diagnostic_report::ActiveModel {
-                trace_id: ActiveValue::Set(trace_id.to_string()),
-                tenant_id: ActiveValue::NotSet,
-                error_code: ActiveValue::Set(payload.error_code),
-                context: ActiveValue::Set(context_value),
-                suggestion: ActiveValue::Set(payload.suggestion),
-                created_at: ActiveValue::Set(Utc::now().into()),
-            };
+                let report_model = diagnostic_report::ActiveModel {
+                    trace_id: ActiveValue::Set(trace_id.to_string()),
+                    tenant_id: ActiveValue::NotSet,
+                    error_code: ActiveValue::Set(payload.error_code),
+                    context: ActiveValue::Set(context_value),
+                    suggestion: ActiveValue::Set(payload.suggestion),
+                    created_at: ActiveValue::Set(Utc::now().into()),
+                };
 
-            let saved = repo.create_diagnostic_report(report_model).await?;
-            Ok(Some(saved))
-        })
-    })
+                let saved = repo.create_diagnostic_report(report_model).await?;
+                Ok(Some(saved))
+            })
+        },
+    )
     .await;
 
     match result {
@@ -154,7 +184,6 @@ async fn report_diagnostic(
 }
 
 async fn query_diagnostic(
-    Extension(db): Extension<Arc<DatabaseConnection>>,
     Extension(ctx): Extension<TenantContext>,
     Query(payload): Query<QueryDiagnosticRequest>,
 ) -> impl IntoResponse {
@@ -163,9 +192,25 @@ async fn query_diagnostic(
         return status.into_response();
     }
 
-    let result = with_tenant_tx(&db, &ctx, move |repo| {
-        Box::pin(async move { repo.get_diagnostic_report(&payload.trace_id).await })
-    })
+    let token = match generate_token_or_500(&ctx).await {
+        Ok(token) => token,
+        Err(status) => return status.into_response(),
+    };
+    let db = match ctx.db() {
+        Ok(db) => db,
+        Err(e) => {
+            tracing::error!(error = %e, "TenantContext missing database connection");
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    };
+    let result = with_tenant_tx(
+        db,
+        &ctx,
+        &token,
+        move |repo: &TenantScoped<RawConnection>| {
+            Box::pin(async move { repo.get_diagnostic_report(&payload.trace_id).await })
+        },
+    )
     .await;
 
     match result {
@@ -191,13 +236,26 @@ async fn get_health() -> impl IntoResponse {
         .into_response()
 }
 
-async fn get_policy(
-    Extension(db): Extension<Arc<DatabaseConnection>>,
-    Extension(ctx): Extension<TenantContext>,
-) -> impl IntoResponse {
-    let result = with_tenant_tx(&db, &ctx, move |repo| {
-        Box::pin(async move { repo.get_diagnostic_policy().await })
-    })
+async fn get_policy(Extension(ctx): Extension<TenantContext>) -> impl IntoResponse {
+    let token = match generate_token_or_500(&ctx).await {
+        Ok(token) => token,
+        Err(status) => return status.into_response(),
+    };
+    let db = match ctx.db() {
+        Ok(db) => db,
+        Err(e) => {
+            tracing::error!(error = %e, "TenantContext missing database connection");
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    };
+    let result = with_tenant_tx(
+        db,
+        &ctx,
+        &token,
+        move |repo: &TenantScoped<RawConnection>| {
+            Box::pin(async move { repo.get_diagnostic_policy().await })
+        },
+    )
     .await;
 
     match result {
@@ -215,7 +273,6 @@ async fn get_policy(
 }
 
 async fn update_policy(
-    Extension(_db): Extension<Arc<DatabaseConnection>>,
     Extension(_ctx): Extension<TenantContext>,
     Json(_payload): Json<UpdatePolicyRequest>,
 ) -> impl IntoResponse {

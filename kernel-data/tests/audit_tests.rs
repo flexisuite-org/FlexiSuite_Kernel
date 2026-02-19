@@ -1,5 +1,7 @@
-use kernel_core::auth::{TenantContext, TenantId, UserId};
-use kernel_data::connection::with_tenant_tx;
+use kernel_data::auth_context::{TenantContext, TenantId, UserId};
+mod common;
+use common::auth::TestAuth;
+use kernel_data::connection::{RawConnection, TenantScoped, with_tenant_tx};
 use kernel_data::entities::{audit_log, entity_history, entity_record};
 use kernel_data::repository::TenantRepository;
 use migration::MigratorTrait;
@@ -10,7 +12,9 @@ use testcontainers::{RunnableImage, clients};
 use testcontainers_modules::postgres::Postgres;
 use uuid::Uuid;
 
-const TEST_HMAC_SECRET: &str = "test_secret_for_audit_tests_shared";
+// NOTE: This module intentionally performs direct SeaORM read-back queries for test verification.
+// TODO: Keep production DB access strictly within TenantScoped/TenantContext APIs; do not copy these patterns outside tests.
+const TEST_INTERNAL_SECRET: &str = "test_internal_secret_for_audit";
 
 fn expected_actor_id(tenant_id: &TenantId, user_id: &UserId) -> String {
     let scoped = format!("{}:{}", tenant_id.as_str(), user_id.as_str());
@@ -31,11 +35,6 @@ async fn test_audit_log_creation() {
         .await
         .expect("Failed to connect to DB");
 
-    // Init Secret
-    if let Err(_) = kernel_data::init_hmac_secret_for_test(TEST_HMAC_SECRET) {
-        // Ignore if already set
-    }
-
     // Role
     db.execute_unprepared("DO $$ BEGIN IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = 'flexi') THEN CREATE ROLE flexi; END IF; END $$;").await.expect("Failed to create role");
 
@@ -44,13 +43,10 @@ async fn test_audit_log_creation() {
         .await
         .expect("Failed to run migrations");
 
-    // Secret in DB
-    // SAFETY: TEST_HMAC_SECRET is a compile-time constant used only in tests.
-    // This manual escaping is acceptable here, but must not be copied to production SQL construction.
-    let escaped_secret = TEST_HMAC_SECRET.replace('\'', "''");
+    // Set Internal Secret
     db.execute_unprepared(&format!(
         "ALTER ROLE postgres SET flexi.hmac_secret = '{}'",
-        escaped_secret
+        TEST_INTERNAL_SECRET.replace("'", "''")
     ))
     .await
     .expect("Failed to set secret");
@@ -60,6 +56,9 @@ async fn test_audit_log_creation() {
         .await
         .expect("Reconnect failed");
 
+    // Init Keys
+    TestAuth::init_keys(&db).await.expect("Failed to init keys");
+
     // Tenant Context
     let tenant_id = TenantId::new("audit-tenant").unwrap();
     let user_id = UserId::new("user-audit").unwrap();
@@ -68,23 +67,31 @@ async fn test_audit_log_creation() {
     // 1. Create Entity -> Should create history
     let entity_id = Uuid::now_v7().to_string();
     let entity_id_clone = entity_id.clone();
+    let token_create = TestAuth::generate_tenant_token(&db, &tenant_id)
+        .await
+        .expect("Failed to gen token for create");
 
-    with_tenant_tx(&db, &ctx, |repo| {
-        Box::pin(async move {
-            let active_model = entity_record::ActiveModel {
-                id: ActiveValue::Set(entity_id_clone),
-                entity_type: ActiveValue::Set("test-audit".to_string()),
-                content: ActiveValue::Set(serde_json::json!({"val": 1})),
-                ..Default::default()
-            };
-            repo.create_entity(active_model).await?;
-            Ok(())
-        })
-    })
+    with_tenant_tx(
+        &db,
+        &ctx,
+        &token_create,
+        |repo: &TenantScoped<RawConnection>| {
+            Box::pin(async move {
+                let active_model = entity_record::ActiveModel {
+                    id: ActiveValue::Set(entity_id_clone),
+                    entity_type: ActiveValue::Set("test-audit".to_string()),
+                    content: ActiveValue::Set(serde_json::json!({"val": 1})),
+                    ..Default::default()
+                };
+                repo.create_entity(active_model).await?;
+                Ok(())
+            })
+        },
+    )
     .await
     .expect("Create entity failed");
 
-    // Verify History
+    // Verification-only direct query. Never use unscoped direct queries in production code.
     let histories = entity_history::Entity::find()
         .filter(entity_history::Column::EntityId.eq(entity_id.clone()))
         .all(&db)
@@ -101,20 +108,26 @@ async fn test_audit_log_creation() {
 
     // 2. Update Entity -> Should create history
     let entity_id_clone = entity_id.clone();
-    with_tenant_tx(&db, &ctx, |repo| {
+    let token_update = TestAuth::generate_tenant_token(&db, &tenant_id)
+        .await
+        .expect("Failed to gen token for update");
+    with_tenant_tx(&db, &ctx, &token_update, |repo| {
         Box::pin(async move {
             let active_model = entity_record::ActiveModel {
-                id: ActiveValue::Set(entity_id_clone),
+                id: ActiveValue::Set(entity_id_clone.clone()),
                 content: ActiveValue::Set(serde_json::json!({"val": 2})),
+                version: ActiveValue::Set(1),
                 ..Default::default()
             };
-            repo.update_entity(active_model).await?;
+            repo.update_entity(&entity_id_clone, active_model).await?;
             Ok(())
         })
     })
     .await
     .expect("Update entity failed");
 
+
+    // Verification-only direct query. Never use unscoped direct queries in production code.
     let histories = entity_history::Entity::find()
         .filter(entity_history::Column::EntityId.eq(entity_id.clone()))
         .order_by_asc(entity_history::Column::Version)
@@ -130,20 +143,29 @@ async fn test_audit_log_creation() {
     );
 
     // 3. Log Audit
-    with_tenant_tx(&db, &ctx, |repo| {
-        Box::pin(async move {
-            repo.log_audit(
-                "test.action".to_string(),
-                "resource:1".to_string(),
-                serde_json::json!({"details": "foo"}),
-            )
-            .await?;
-            Ok(())
-        })
-    })
+    let token_audit = TestAuth::generate_tenant_token(&db, &tenant_id)
+        .await
+        .expect("Failed to gen token for audit");
+    with_tenant_tx(
+        &db,
+        &ctx,
+        &token_audit,
+        |repo: &TenantScoped<RawConnection>| {
+            Box::pin(async move {
+                repo.log_audit(
+                    "test.action".to_string(),
+                    "resource:1".to_string(),
+                    serde_json::json!({"details": "foo"}),
+                )
+                .await?;
+                Ok(())
+            })
+        },
+    )
     .await
     .expect("Log audit failed");
 
+    // Verification-only direct query. Never use unscoped direct queries in production code.
     let logs = audit_log::Entity::find()
         .filter(audit_log::Column::TenantId.eq(tenant_id.to_string()))
         .all(&db)
@@ -157,15 +179,25 @@ async fn test_audit_log_creation() {
 
     // 4. Cross-tenant isolation checks
     let other_tenant_id = TenantId::new("audit-tenant-other").unwrap();
-    let other_ctx = TenantContext::new(other_tenant_id.clone(), Some(user_id.clone()));
+    let other_user_id = UserId::new("user-audit-other").unwrap();
+    let other_ctx = TenantContext::new(other_tenant_id.clone(), Some(other_user_id.clone()));
+    let other_token = TestAuth::generate_tenant_token(&db, &other_tenant_id)
+        .await
+        .expect("Failed to gen token other");
+
     let entity_id_clone = entity_id.clone();
-    with_tenant_tx(&db, &other_ctx, |repo| {
-        Box::pin(async move {
-            let entity = repo.get_entity(&entity_id_clone).await?;
-            assert!(entity.is_none(), "Cross-tenant entity should be invisible");
-            Ok(())
-        })
-    })
+    with_tenant_tx(
+        &db,
+        &other_ctx,
+        &other_token,
+        |repo: &TenantScoped<RawConnection>| {
+            Box::pin(async move {
+                let entity = repo.get_entity(&entity_id_clone).await?;
+                assert!(entity.is_none(), "Cross-tenant entity should be invisible");
+                Ok(())
+            })
+        },
+    )
     .await
     .expect("Cross-tenant get_entity failed");
 

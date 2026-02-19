@@ -6,10 +6,13 @@ rust-version = "1.88"
 
 [dependencies]
 tokio = { version = "1.32", features = ["full"] }
-tracing = "0.1.44"
-kernel-core = { path = "../kernel-core" }
+# TODO(security): Pinned to =0.1.43 to avoid upstream regression in 0.1.44 (10MB bloat due to included test-macros).
+# Tracking: https://github.com/tokio-rs/tracing/issues/3455
+# Internal Tracking: https://github.com/flexisuite-org/FlexiSuite_Kernel/issues/25
+tracing = "=0.1.43"
+# kernel-core = { path = "../kernel-core" } # Removed to break cycle
 
-sea-orm = { version = "1.1.0", features = ["sqlx-postgres", "runtime-tokio-rustls", "macros"] }
+sea-orm = { version = "1.1.19", features = ["sqlx-postgres", "runtime-tokio-rustls", "macros"] }
 async-trait = "0.1"
 thiserror = "1.0"
 serde = { version = "1.0", features = ["derive"] }
@@ -25,13 +28,12 @@ twox-hash = "2.1.2"
 
 [dev-dependencies]
 migration = { path = "./migration" }
-sea-orm-migration = "1.1.0"
+sea-orm-migration = "1.1.19"
 tokio = { version = "1", features = ["full"] }
 testcontainers = "0.15"
 testcontainers-modules = { version = "0.3", features = ["postgres"] }
-
-# Enable test-utils on kernel-core for tests
-kernel-core = { path = "../kernel-core", features = ["test-utils"] }
+# test-only dependency for integration tests
+# kernel-core = { path = "../kernel-core" } # Removed to break cycle
 # Enable test-utils on self for tests
 kernel-data = { path = ".", features = ["test-utils"] }
 

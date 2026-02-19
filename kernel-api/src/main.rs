@@ -1,5 +1,6 @@
 use kernel_api::build_app;
 use kernel_api::middleware::MiddlewareConfig;
+use kernel_core::auth::KeyManager;
 use sea_orm::{ConnectOptions, Database};
 use std::net::SocketAddr;
 use std::time::Duration;
@@ -21,11 +22,6 @@ async fn main() {
         std::process::exit(1);
     }
 
-    if let Err(msg) = kernel_data::init_hmac_secret() {
-        eprintln!("kernel-api startup error (data): {msg}");
-        std::process::exit(1);
-    }
-
     // Initialize Database
     let db_url = std::env::var("DATABASE_URL").unwrap_or_else(|e| {
         eprintln!("DATABASE_URL must be set: {e}");
@@ -38,13 +34,24 @@ async fn main() {
         .acquire_timeout(Duration::from_secs(30))
         .sqlx_logging(false);
 
-    let db = Database::connect(opt).await.unwrap_or_else(|e| {
+    let db = std::sync::Arc::new(Database::connect(opt).await.unwrap_or_else(|e| {
         eprintln!("Failed to connect to database: {e}");
         std::process::exit(1);
-    });
+    }));
+
+    use kernel_data::auth_context::{SystemTenantContext, TenantContext};
+    let init_ctx = TenantContext::from(SystemTenantContext).with_db(db.clone());
+    KeyManager::rotate_keys(&init_ctx)
+        .await
+        .unwrap_or_else(|e| {
+            eprintln!(
+                "Failed to initialize key rotation state: {e}. If this is due to missing key-management migrations, run migrations for key_record or perform a preflight migration check."
+            );
+            std::process::exit(1);
+        });
 
     let config = MiddlewareConfig::default();
-    let (app, _cleanup_handle) = build_app(config, db).await.unwrap_or_else(|e| {
+    let (app, _cleanup_handle) = build_app(config, db.clone()).await.unwrap_or_else(|e| {
         eprintln!("kernel-api startup error (middleware): {e}");
         std::process::exit(1);
     });
