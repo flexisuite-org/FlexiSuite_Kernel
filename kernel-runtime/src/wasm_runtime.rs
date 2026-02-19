@@ -287,7 +287,7 @@ impl SandboxRuntime for WasmSandbox {
 
         match serde_json::from_str::<serde_json::Value>(trimmed) {
             Ok(json) => Ok(json),
-            Err(_) => Ok(serde_json::Value::String(output)),
+            Err(_) => Ok(serde_json::Value::String(trimmed.to_string())),
         }
     }
 }
