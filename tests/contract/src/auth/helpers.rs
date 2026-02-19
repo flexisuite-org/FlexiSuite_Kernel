@@ -1,7 +1,8 @@
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::{Duration, SecondsFormat, Utc};
 use kernel_api::auth::{
-    init_auth_config_with_public_key_and_revoked_kids, init_auth_config_with_public_key_b64url,
+    init_auth_config_with_public_key_and_revoked_kids_and_legacy_mode,
+    init_auth_config_with_public_key_b64url,
 };
 use rusty_paseto::core::{Key, PasetoAsymmetricPrivateKey};
 use rusty_paseto::prelude::*;
@@ -16,11 +17,15 @@ pub fn setup() {
     let (_, pub_b64) = get_test_keypair();
     AUTH_INIT.get_or_init(|| {
         let _ = tracing_subscriber::fmt().with_test_writer().try_init();
-        if let Err(e1) = init_auth_config_with_public_key_and_revoked_kids(&pub_b64, &["revoked"]) {
+        if let Err(e1) = init_auth_config_with_public_key_and_revoked_kids_and_legacy_mode(
+            &pub_b64,
+            &["revoked"],
+            false,
+        ) {
             match init_auth_config_with_public_key_b64url(&pub_b64) {
                 Ok(_) => {
                     tracing::warn!(
-                        "init_auth_config_with_public_key_and_revoked_kids failed (e: {}), but fallback to init_auth_config_with_public_key_b64url succeeded",
+                        "init_auth_config_with_public_key_and_revoked_kids_and_legacy_mode failed (e: {}), but fallback to init_auth_config_with_public_key_b64url succeeded",
                         e1
                     );
                 }
