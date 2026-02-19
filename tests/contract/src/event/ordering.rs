@@ -45,9 +45,7 @@ async fn test_event_ordering_entity() {
         .collect::<Vec<_>>();
 
     // Use partial_cmp-aware sorting with a deterministic tiebreaker (event_id for incomparable)
-    events.sort_by(|a, b| {
-        compare_event_order(a, b).unwrap_or_else(|| a.event_id.cmp(&b.event_id))
-    });
+    events.sort_by(|a, b| compare_event_order(a, b).unwrap_or_else(|| a.event_id.cmp(&b.event_id)));
 
     assert_eq!(events[0].order_mode.seq(), Some(1));
     assert_eq!(events[1].order_mode.seq(), Some(2));
@@ -58,7 +56,7 @@ async fn test_event_ordering_entity() {
 async fn test_compare_event_order_cross_mode() {
     let tenant_id = TenantId::new("t1").unwrap();
     let entity_id = Uuid::now_v7();
-    
+
     let entity_event = EventEnvelope {
         event_id: Uuid::now_v7(),
         tenant_id: tenant_id.clone(),
