@@ -10,7 +10,7 @@ use chrono::DateTime;
 use rusty_paseto::prelude::*;
 use sea_orm::DatabaseConnection;
 use serde::Deserialize;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -108,15 +108,13 @@ use std::sync::OnceLock;
 static PASETO_PUBLIC_KEY: OnceLock<Vec<u8>> = OnceLock::new();
 static PASETO_KEYSET: OnceLock<PasetoKeyset> = OnceLock::new();
 
-/// [NOT-IMPLEMENTED] Multi-key support: PasetoKeyset models multiple KID categories
-/// but verify_paseto_v4_public_token always uses the single static PASETO_PUBLIC_KEY today.
-/// True per-KID key selection/rotation is not yet implemented.
 #[derive(Debug)]
 struct PasetoKeyset {
     active_kid: String,
     next_kids: HashSet<String>,
     retired_kids: HashSet<String>,
     revoked_kids: HashSet<String>,
+    public_keys: HashMap<String, Vec<u8>>,
     allow_legacy_no_kid: bool,
 }
 
@@ -127,24 +125,142 @@ impl PasetoKeyset {
             next_kids: HashSet::new(),
             retired_kids: HashSet::new(),
             revoked_kids: HashSet::new(),
-            allow_legacy_no_kid: true,
+            public_keys: HashMap::new(),
+            allow_legacy_no_kid: false,
         }
     }
 
-    fn from_env() -> Self {
+    fn from_env(default_public_key: &[u8]) -> Result<Self, String> {
         let active_kid =
             std::env::var("FLEXI_PASETO_V4_ACTIVE_KID").unwrap_or_else(|_| "active".to_string());
         let next_kids = parse_kid_csv_env("FLEXI_PASETO_V4_NEXT_KIDS");
         let retired_kids = parse_kid_csv_env("FLEXI_PASETO_V4_RETIRED_KIDS");
         let revoked_kids = parse_kid_csv_env("FLEXI_PASETO_V4_REVOKED_KIDS");
-        let allow_legacy_no_kid = parse_bool_env("FLEXI_PASETO_V4_ALLOW_LEGACY_NO_KID", true);
-        Self {
+        let allow_legacy_no_kid = parse_bool_env("FLEXI_PASETO_V4_ALLOW_LEGACY_NO_KID", false);
+        let mut keyset = Self {
             active_kid,
             next_kids,
             retired_kids,
             revoked_kids,
+            public_keys: HashMap::new(),
             allow_legacy_no_kid,
+        };
+        keyset
+            .public_keys
+            .insert(keyset.active_kid.clone(), default_public_key.to_vec());
+        keyset.load_per_kid_public_keys_from_env()?;
+        Ok(keyset)
+    }
+
+    fn load_per_kid_public_keys_from_env(&mut self) -> Result<(), String> {
+        let mut load_key_for_kid = |kid: &str, required: bool| -> Result<(), String> {
+            let env_key = kid_public_key_env_var_name(kid);
+            match std::env::var(&env_key) {
+                Ok(value) => {
+                    let decoded = decode_public_key_b64url(&value, &env_key)?;
+                    self.public_keys.insert(kid.to_string(), decoded);
+                    Ok(())
+                }
+                Err(_) if required => Err(format!(
+                    "{env_key} is required when kid '{kid}' is listed in FLEXI_PASETO_V4_NEXT_KIDS or FLEXI_PASETO_V4_RETIRED_KIDS"
+                )),
+                Err(_) => Ok(()),
+            }
+        };
+
+        let require_explicit_active_key = self.active_kid != "active";
+        load_key_for_kid(&self.active_kid, require_explicit_active_key)?;
+        for kid in self.next_kids.iter().chain(self.retired_kids.iter()) {
+            load_key_for_kid(kid, true)?;
         }
+        Ok(())
+    }
+
+    fn public_key_for_kid(&self, kid: &str) -> Option<&[u8]> {
+        self.public_keys.get(kid).map(Vec::as_slice)
+    }
+
+    fn with_default_public_key(mut self, key: Vec<u8>) -> Self {
+        self.public_keys.insert(self.active_kid.clone(), key);
+        self
+    }
+
+    fn validate_key_material(&self) -> Result<(), String> {
+        let mut normalized_owner: HashMap<String, &str> = HashMap::new();
+        for kid in std::iter::once(self.active_kid.as_str())
+            .chain(self.next_kids.iter().map(String::as_str))
+            .chain(self.retired_kids.iter().map(String::as_str))
+        {
+            let normalized = normalize_kid_for_env(kid);
+            if let Some(existing) = normalized_owner.insert(normalized.clone(), kid) {
+                if existing != kid {
+                    return Err(format!(
+                        "kid normalization collision: '{existing}' and '{kid}' map to FLEXI_PASETO_V4_PUBLIC_KEY_B64URL_{normalized}"
+                    ));
+                }
+            }
+        }
+
+        if self.active_kid.trim().is_empty() {
+            return Err("FLEXI_PASETO_V4_ACTIVE_KID must not be empty".to_string());
+        }
+        if self.revoked_kids.contains(&self.active_kid) {
+            return Err(
+                "active kid must not be listed in FLEXI_PASETO_V4_REVOKED_KIDS".to_string(),
+            );
+        }
+        if self.next_kids.contains(&self.active_kid) || self.retired_kids.contains(&self.active_kid)
+        {
+            return Err(
+                "active kid must not be included in FLEXI_PASETO_V4_NEXT_KIDS or FLEXI_PASETO_V4_RETIRED_KIDS"
+                    .to_string(),
+            );
+        }
+        if self
+            .next_kids
+            .iter()
+            .any(|kid| self.retired_kids.contains(kid))
+        {
+            return Err(
+                "same kid must not appear in both FLEXI_PASETO_V4_NEXT_KIDS and FLEXI_PASETO_V4_RETIRED_KIDS"
+                    .to_string(),
+            );
+        }
+        if self
+            .revoked_kids
+            .iter()
+            .any(|kid| self.next_kids.contains(kid))
+        {
+            return Err(
+                "same kid must not appear in both FLEXI_PASETO_V4_REVOKED_KIDS and FLEXI_PASETO_V4_NEXT_KIDS"
+                    .to_string(),
+            );
+        }
+        if self
+            .revoked_kids
+            .iter()
+            .any(|kid| self.retired_kids.contains(kid))
+        {
+            return Err(
+                "same kid must not appear in both FLEXI_PASETO_V4_REVOKED_KIDS and FLEXI_PASETO_V4_RETIRED_KIDS"
+                    .to_string(),
+            );
+        }
+        if self.public_keys.is_empty() {
+            return Err("Auth keyset must include at least one public key".to_string());
+        }
+        for (kid, key) in &self.public_keys {
+            if key.len() != 32 {
+                return Err(format!(
+                    "Public key for kid '{kid}' must be 32-byte Ed25519 public key"
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn is_legacy_without_kid_allowed(&self) -> bool {
+        self.allow_legacy_no_kid && self.revoked_kids.is_empty()
     }
 
     fn validate_token_kid(&self, kid: &str) -> Result<(), AuthError> {
@@ -163,9 +279,11 @@ impl PasetoKeyset {
 }
 
 pub fn init_auth_config() -> Result<(), String> {
-    let key = std::env::var("FLEXI_PASETO_V4_PUBLIC_KEY_B64URL")
+    let key_b64 = std::env::var("FLEXI_PASETO_V4_PUBLIC_KEY_B64URL")
         .map_err(|_| "FLEXI_PASETO_V4_PUBLIC_KEY_B64URL is not set".to_string())?;
-    init_auth_config_with_public_key_and_keyset(&key, PasetoKeyset::from_env())
+    let decoded = decode_public_key_b64url(&key_b64, "FLEXI_PASETO_V4_PUBLIC_KEY_B64URL")?;
+    let keyset = PasetoKeyset::from_env(&decoded)?;
+    init_auth_config_with_decoded_public_key_and_keyset(decoded, keyset)
 }
 
 pub fn init_auth_config_with_public_key_b64url(key: &str) -> Result<(), String> {
@@ -176,7 +294,7 @@ pub fn init_auth_config_with_public_key_and_revoked_kids(
     key: &str,
     revoked_kids: &[&str],
 ) -> Result<(), String> {
-    init_auth_config_with_public_key_and_revoked_kids_and_legacy_mode(key, revoked_kids, true)
+    init_auth_config_with_public_key_and_revoked_kids_and_legacy_mode(key, revoked_kids, false)
 }
 
 pub fn init_auth_config_with_public_key_and_revoked_kids_and_legacy_mode(
@@ -184,27 +302,31 @@ pub fn init_auth_config_with_public_key_and_revoked_kids_and_legacy_mode(
     revoked_kids: &[&str],
     allow_legacy_no_kid: bool,
 ) -> Result<(), String> {
+    let keyset = keyset_for_revoked_kids(revoked_kids, allow_legacy_no_kid);
+    init_auth_config_with_public_key_and_keyset(key, keyset)
+}
+
+fn keyset_for_revoked_kids(revoked_kids: &[&str], allow_legacy_no_kid: bool) -> PasetoKeyset {
     let mut keyset = PasetoKeyset::default_for_single_key();
     keyset.revoked_kids = revoked_kids.iter().map(|v| (*v).to_string()).collect();
     keyset.allow_legacy_no_kid = allow_legacy_no_kid;
-    init_auth_config_with_public_key_and_keyset(key, keyset)
+    keyset
 }
 
 fn init_auth_config_with_public_key_and_keyset(
     key: &str,
     keyset: PasetoKeyset,
 ) -> Result<(), String> {
-    let decoded = URL_SAFE_NO_PAD.decode(key).map_err(|_| {
-        "FLEXI_PASETO_V4_PUBLIC_KEY_B64URL must be base64url (no padding)".to_string()
-    })?;
+    let decoded = decode_public_key_b64url(key, "FLEXI_PASETO_V4_PUBLIC_KEY_B64URL")?;
+    let keyset = keyset.with_default_public_key(decoded.clone());
+    init_auth_config_with_decoded_public_key_and_keyset(decoded, keyset)
+}
 
-    if decoded.len() != 32 {
-        return Err(
-            "FLEXI_PASETO_V4_PUBLIC_KEY_B64URL must decode to 32-byte Ed25519 public key"
-                .to_string(),
-        );
-    }
-
+fn init_auth_config_with_decoded_public_key_and_keyset(
+    decoded: Vec<u8>,
+    keyset: PasetoKeyset,
+) -> Result<(), String> {
+    keyset.validate_key_material()?;
     PASETO_PUBLIC_KEY
         .set(decoded)
         .map_err(|_| "Auth config already initialized".to_string())?;
@@ -214,53 +336,44 @@ fn init_auth_config_with_public_key_and_keyset(
 }
 
 /// Verifies a PASETO v4.public token from the auth header after extracting and validating footer.kid.
-/// Note: Only one Ed25519 key (PASETO_PUBLIC_KEY) is used for verification today.
 fn verify_paseto_v4_public_from_env(auth_header: &str) -> Result<TenantContext, AuthError> {
     let token = extract_bearer_token(auth_header).ok_or(AuthError::Unauthorized)?;
-    let public_key = PASETO_PUBLIC_KEY.get().ok_or(AuthError::Unauthorized)?;
+    let default_public_key = PASETO_PUBLIC_KEY.get().ok_or(AuthError::Unauthorized)?;
     let keyset = PASETO_KEYSET.get().ok_or(AuthError::Unauthorized)?;
 
     if has_legacy_paseto_layout(token) {
-        if !keyset.allow_legacy_no_kid {
+        if !keyset.is_legacy_without_kid_allowed() {
+            if keyset.allow_legacy_no_kid && !keyset.revoked_kids.is_empty() {
+                tracing::warn!("Legacy token mode is disabled while revoked kids are configured");
+            }
             tracing::warn!("PASETO footer.kid is required but missing");
             return Err(AuthError::Unauthorized);
         }
-        return verify_paseto_v4_public_token(token, public_key, None).map_err(|e| {
+        return verify_paseto_v4_public_token(token, default_public_key, None).map_err(|e| {
             tracing::warn!("PASETO signature or claim validation failed");
             e
         });
     }
 
-    let res = extract_footer_kid(token);
-    match res {
-        Ok((kid, footer_raw)) => {
-            keyset.validate_token_kid(&kid).map_err(|e| {
-                tracing::warn!(kid = %kid, "PASETO kid rejected");
-                e
-            })?;
-
-            verify_paseto_v4_public_token(token, public_key, Some(&footer_raw)).map_err(|e| {
-                tracing::warn!("PASETO signature or claim validation failed");
-                e
-            })
-        }
-        Err(_) if keyset.allow_legacy_no_kid => {
-            tracing::info!("PASETO footer.kid extraction failed, falling back to legacy mode");
-            verify_paseto_v4_public_token(token, public_key, None).map_err(|e| {
-                tracing::warn!("PASETO signature or claim validation failed in legacy mode");
-                e
-            })
-        }
-        Err(e) => {
-            tracing::warn!("PASETO footer missing or invalid, and legacy mode disabled");
-            Err(e)
-        }
-    }
+    let (kid, footer_raw) = extract_footer_kid(token).map_err(|e| {
+        tracing::warn!("PASETO footer missing or invalid");
+        e
+    })?;
+    keyset.validate_token_kid(&kid).map_err(|e| {
+        tracing::warn!(kid = %kid, "PASETO kid rejected");
+        e
+    })?;
+    let key_for_kid = keyset.public_key_for_kid(&kid).ok_or_else(|| {
+        tracing::warn!(kid = %kid, "No public key configured for kid");
+        AuthError::Unauthorized
+    })?;
+    verify_paseto_v4_public_token(token, key_for_kid, Some(&footer_raw)).map_err(|e| {
+        tracing::warn!("PASETO signature or claim validation failed");
+        e
+    })
 }
 
 /// Verifies a PASETO v4.public token using the provided public key.
-/// Note: Only one Ed25519 key (PASETO_PUBLIC_KEY) is used for verification today.
-/// Multi-key verification mapping footer.kid to specific keys is not yet implemented.
 fn verify_paseto_v4_public_token(
     token: &str,
     public_key_bytes: &[u8],
@@ -364,14 +477,43 @@ fn parse_bool_env(key: &str, default: bool) -> bool {
                     tracing::warn!(
                         key = %key,
                         value = %raw,
-                        "Invalid boolean environment variable; failing closed (false)"
+                        "Invalid boolean environment variable; using default"
                     );
-                    false
+                    default
                 }
             }
         }
         Err(_) => default,
     }
+}
+
+fn decode_public_key_b64url(raw: &str, env_key: &str) -> Result<Vec<u8>, String> {
+    let decoded = URL_SAFE_NO_PAD
+        .decode(raw)
+        .map_err(|_| format!("{env_key} must be base64url (no padding) encoded"))?;
+    if decoded.len() != 32 {
+        return Err(format!(
+            "{env_key} must decode to 32-byte Ed25519 public key"
+        ));
+    }
+    Ok(decoded)
+}
+
+fn kid_public_key_env_var_name(kid: &str) -> String {
+    let normalized = normalize_kid_for_env(kid);
+    format!("FLEXI_PASETO_V4_PUBLIC_KEY_B64URL_{normalized}")
+}
+
+fn normalize_kid_for_env(kid: &str) -> String {
+    kid.chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() {
+                ch.to_ascii_uppercase()
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>()
 }
 
 fn has_legacy_paseto_layout(token: &str) -> bool {
@@ -412,6 +554,18 @@ fn extract_footer_kid(token: &str) -> Result<(String, String), AuthError> {
 mod tests {
     use super::*;
     use kernel_core::auth::is_valid_principal;
+    use std::sync::{Mutex, OnceLock as TestOnceLock};
+
+    static ENV_TEST_LOCK: TestOnceLock<Mutex<()>> = TestOnceLock::new();
+
+    fn with_env_test_lock<F: FnOnce()>(f: F) {
+        let guard = ENV_TEST_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .expect("ENV_TEST_LOCK poisoned");
+        f();
+        drop(guard);
+    }
 
     #[test]
     fn extract_bearer_token_accepts_case_insensitive_scheme() {
@@ -507,25 +661,27 @@ mod tests {
 
     #[test]
     fn test_parse_kid_csv_env() {
-        temp_env::with_vars(
-            [
-                ("KIDS_EMPTY", Some("")),
-                ("KIDS_SINGLE", Some("k1")),
-                ("KIDS_MULTI", Some(" k1, k2 ,k3,, ")),
-            ],
-            || {
-                assert!(parse_kid_csv_env("KIDS_EMPTY").is_empty());
-                let single = parse_kid_csv_env("KIDS_SINGLE");
-                assert_eq!(single.len(), 1);
-                assert!(single.contains("k1"));
+        with_env_test_lock(|| {
+            temp_env::with_vars(
+                [
+                    ("KIDS_EMPTY", Some("")),
+                    ("KIDS_SINGLE", Some("k1")),
+                    ("KIDS_MULTI", Some(" k1, k2 ,k3,, ")),
+                ],
+                || {
+                    assert!(parse_kid_csv_env("KIDS_EMPTY").is_empty());
+                    let single = parse_kid_csv_env("KIDS_SINGLE");
+                    assert_eq!(single.len(), 1);
+                    assert!(single.contains("k1"));
 
-                let multi = parse_kid_csv_env("KIDS_MULTI");
-                assert_eq!(multi.len(), 3);
-                assert!(multi.contains("k1"));
-                assert!(multi.contains("k2"));
-                assert!(multi.contains("k3"));
-            },
-        );
+                    let multi = parse_kid_csv_env("KIDS_MULTI");
+                    assert_eq!(multi.len(), 3);
+                    assert!(multi.contains("k1"));
+                    assert!(multi.contains("k2"));
+                    assert!(multi.contains("k3"));
+                },
+            );
+        });
     }
 
     #[test]
@@ -533,38 +689,120 @@ mod tests {
         // Successful default
         let default = PasetoKeyset::default_for_single_key();
         assert_eq!(default.active_kid, "active");
+        assert!(!default.allow_legacy_no_kid);
 
         // From env
-        temp_env::with_vars(
-            [
-                ("FLEXI_PASETO_V4_ACTIVE_KID", Some("env-active")),
-                ("FLEXI_PASETO_V4_REVOKED_KIDS", Some("r1,r2")),
-            ],
-            || {
-                let keyset = PasetoKeyset::from_env();
-                assert_eq!(keyset.active_kid, "env-active");
-                assert!(keyset.revoked_kids.contains("r1"));
-                assert!(keyset.revoked_kids.contains("r2"));
-                assert!(keyset.allow_legacy_no_kid);
-            },
-        );
+        let key_b64 = URL_SAFE_NO_PAD.encode([7_u8; 32]);
+        let next_b64 = URL_SAFE_NO_PAD.encode([9_u8; 32]);
+        with_env_test_lock(|| {
+            temp_env::with_vars(
+                [
+                    ("FLEXI_PASETO_V4_ACTIVE_KID", Some("env-active")),
+                    ("FLEXI_PASETO_V4_REVOKED_KIDS", Some("r1,r2")),
+                    ("FLEXI_PASETO_V4_NEXT_KIDS", Some("next-a")),
+                    (
+                        "FLEXI_PASETO_V4_PUBLIC_KEY_B64URL_ENV_ACTIVE",
+                        Some(&key_b64),
+                    ),
+                    ("FLEXI_PASETO_V4_PUBLIC_KEY_B64URL_NEXT_A", Some(&next_b64)),
+                ],
+                || {
+                    let default_key = [1_u8; 32];
+                    let keyset = PasetoKeyset::from_env(&default_key).unwrap();
+                    assert_eq!(keyset.active_kid, "env-active");
+                    assert!(keyset.revoked_kids.contains("r1"));
+                    assert!(keyset.revoked_kids.contains("r2"));
+                    assert!(!keyset.allow_legacy_no_kid);
+                    assert_eq!(keyset.public_key_for_kid("env-active").unwrap(), [7_u8; 32]);
+                    assert_eq!(keyset.public_key_for_kid("next-a").unwrap(), [9_u8; 32]);
+                },
+            );
+        });
+    }
+
+    #[test]
+    fn test_paseto_keyset_initialization_requires_kid_key_for_next() {
+        with_env_test_lock(|| {
+            temp_env::with_vars([("FLEXI_PASETO_V4_NEXT_KIDS", Some("next-a"))], || {
+                let keyset = PasetoKeyset::from_env(&[1_u8; 32]);
+                assert!(keyset.is_err());
+            });
+        });
+    }
+
+    #[test]
+    fn test_paseto_keyset_initialization_requires_explicit_active_key_when_customized() {
+        with_env_test_lock(|| {
+            temp_env::with_vars(
+                [("FLEXI_PASETO_V4_ACTIVE_KID", Some("custom-active"))],
+                || {
+                    let keyset = PasetoKeyset::from_env(&[1_u8; 32]);
+                    assert!(keyset.is_err());
+                },
+            );
+        });
+    }
+
+    #[test]
+    fn test_paseto_keyset_validation_rejects_overlapping_kid_sets() {
+        let mut keyset = PasetoKeyset::default_for_single_key();
+        keyset
+            .public_keys
+            .insert(keyset.active_kid.clone(), vec![1_u8; 32]);
+        keyset.revoked_kids.insert("active".to_string());
+        assert!(keyset.validate_key_material().is_err());
+
+        let mut keyset = PasetoKeyset::default_for_single_key();
+        keyset
+            .public_keys
+            .insert(keyset.active_kid.clone(), vec![1_u8; 32]);
+        keyset.next_kids.insert("k1".to_string());
+        keyset.retired_kids.insert("k1".to_string());
+        assert!(keyset.validate_key_material().is_err());
+    }
+
+    #[test]
+    fn test_paseto_keyset_validation_rejects_kid_normalization_collision() {
+        let mut keyset = PasetoKeyset::default_for_single_key();
+        keyset.active_kid = "a-b".to_string();
+        keyset.next_kids.insert("a_b".to_string());
+        keyset.public_keys.insert("a-b".to_string(), vec![1_u8; 32]);
+        keyset.public_keys.insert("a_b".to_string(), vec![2_u8; 32]);
+        assert!(keyset.validate_key_material().is_err());
+    }
+
+    #[test]
+    fn test_legacy_without_kid_blocked_when_revocation_exists() {
+        let mut keyset = PasetoKeyset::default_for_single_key();
+        keyset.revoked_kids.insert("revoked".to_string());
+        assert!(!keyset.is_legacy_without_kid_allowed());
     }
 
     #[test]
     fn test_parse_bool_env() {
-        temp_env::with_vars(
-            [
-                ("BOOL_TRUE", Some("true")),
-                ("BOOL_FALSE", Some("0")),
-                ("BOOL_INVALID", Some("wat")),
-            ],
-            || {
-                assert!(parse_bool_env("BOOL_TRUE", false));
-                assert!(!parse_bool_env("BOOL_FALSE", true));
-                // Fail-closed: returns false on invalid input, NOT the provided default
-                assert!(!parse_bool_env("BOOL_INVALID", true));
-                assert!(!parse_bool_env("BOOL_MISSING", false));
-            },
-        );
+        with_env_test_lock(|| {
+            temp_env::with_vars(
+                [
+                    ("BOOL_TRUE", Some("true")),
+                    ("BOOL_FALSE", Some("0")),
+                    ("BOOL_INVALID", Some("wat")),
+                ],
+                || {
+                    assert!(parse_bool_env("BOOL_TRUE", false));
+                    assert!(!parse_bool_env("BOOL_FALSE", true));
+                    // Invalid input falls back to the provided default.
+                    assert!(parse_bool_env("BOOL_INVALID", true));
+                    assert!(!parse_bool_env("BOOL_MISSING", false));
+                },
+            );
+        });
+    }
+
+    #[test]
+    fn test_keyset_for_revoked_kids_disables_legacy_mode_by_default_api_contract() {
+        let keyset = keyset_for_revoked_kids(&["revoked"], false);
+        assert!(keyset.revoked_kids.contains("revoked"));
+        assert!(!keyset.allow_legacy_no_kid);
+        assert!(!keyset.is_legacy_without_kid_allowed());
     }
 }

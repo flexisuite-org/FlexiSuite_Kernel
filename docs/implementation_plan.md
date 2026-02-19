@@ -820,6 +820,7 @@ Kernelはエラー発生時や診断要求に対し、以下の構造化デー�
 - `kernel-api`: 認証エンドポイント、TenantContext middleware
 - **運用安全策（前倒し）**:
   - 手動鍵更新手順（Runbook）とローテーション演習
+  - PASETO `kid` 鍵運用Runbook: `docs/auth_paseto_kid_runbook.md`
   - `SECURITY DEFINER` テンプレートのSQLリンタ導入（CI fail-close）
 - **前提**: Phase 1（型定義・DB接続）
 

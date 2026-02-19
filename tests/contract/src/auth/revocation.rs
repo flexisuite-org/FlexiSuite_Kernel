@@ -49,4 +49,21 @@ async fn test_key_revocation_slo() {
         "Revoked key must be rejected (got {})",
         res.status()
     );
+
+    // Case 3: Legacy (no kid) while revoked_kids configured -> FAIL
+    let token_legacy = generate_token_with_kid(true, None);
+    let req = Request::builder()
+        .uri("/test")
+        .method("POST")
+        .header("Authorization", format!("Bearer {}", token_legacy))
+        .header("Idempotency-Key", "rev-key-3")
+        .body(Body::empty())
+        .unwrap();
+    let res = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(
+        res.status(),
+        StatusCode::UNAUTHORIZED,
+        "Legacy token must be rejected when revoked_kids are configured (got {})",
+        res.status()
+    );
 }
