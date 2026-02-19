@@ -24,7 +24,7 @@ Phase 6: Contract Test Implementation の実装と検証が完了しました。
 ```text
 test idempotency::canonical_request_target::tests::test_idempotency_query_order_conflict_guard ... ok
 test idempotency::canonical_request_target::tests::test_idempotency_canonical_request_target ... ok
-test quota::http_matrix::tests::test_quota_retry_after_boundaries ... ok
+test quota::http_matrix::tests::test_retry_after_contract ... ok
 test quota::http_matrix::tests::test_quota_http_matrix ... ok
 test supplychain::manifest_checks::tests::test_manifest_break_glass_scope_and_ttl ... ok
 test supplychain::manifest_checks::tests::test_manifest_signature_trust_root ... ok
