@@ -57,32 +57,63 @@ mod tests {
             retry_after_s: 0,
         };
         let h_zero = v_zero.headers();
-        assert_eq!(h_zero[0].1, "0");
+        assert_eq!(
+            h_zero.get(0).expect("Retry-After header must be present").1,
+            "0"
+        );
 
         // Case 2: Large value (Generic layer) -> Cap at 1 year
         let v_large = QuotaViolation {
             layer: QuotaLayer::ApiRateLimit,
             retry_after_s: 999_999_999,
         };
-        assert_eq!(v_large.headers()[0].1, "31536000");
+        assert_eq!(
+            v_large
+                .headers()
+                .get(0)
+                .expect("Retry-After header must be present")
+                .1,
+            "31536000"
+        );
 
         // Case 3: SystemHardLimit boundary -> 1-30s clip
         let v_sys_low = QuotaViolation {
             layer: QuotaLayer::SystemHardLimit,
             retry_after_s: 0,
         };
-        assert_eq!(v_sys_low.headers()[0].1, "1");
+        assert_eq!(
+            v_sys_low
+                .headers()
+                .get(0)
+                .expect("Retry-After header must be present")
+                .1,
+            "1"
+        );
 
         let v_sys_high = QuotaViolation {
             layer: QuotaLayer::SystemHardLimit,
             retry_after_s: 100,
         };
-        assert_eq!(v_sys_high.headers()[0].1, "30");
+        assert_eq!(
+            v_sys_high
+                .headers()
+                .get(0)
+                .expect("Retry-After header must be present")
+                .1,
+            "30"
+        );
 
         let v_sys_ok = QuotaViolation {
             layer: QuotaLayer::SystemHardLimit,
             retry_after_s: 15,
         };
-        assert_eq!(v_sys_ok.headers()[0].1, "15");
+        assert_eq!(
+            v_sys_ok
+                .headers()
+                .get(0)
+                .expect("Retry-After header must be present")
+                .1,
+            "15"
+        );
     }
 }
