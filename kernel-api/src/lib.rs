@@ -24,6 +24,7 @@ use crate::middleware::{
 pub mod auth;
 pub mod diagnostics;
 pub mod health;
+pub mod metrics;
 pub mod middleware;
 pub mod profile;
 pub mod error;
@@ -53,11 +54,13 @@ pub fn build_app_with_state(
     state: MiddlewareState,
     db: Arc<DatabaseConnection>,
 ) -> (Router, JoinHandle<()>) {
+    metrics::init_metrics();
     let cleanup_handle = state.start_cleanup_task();
 
     let public_router = Router::new()
         .route("/health/liveness", get(health::liveness))
-        .route("/health/readiness", get(health::readiness));
+        .route("/health/readiness", get(health::readiness))
+        .route("/metrics", get(metrics::metrics_handler));
 
     let protected_router = Router::new()
         .route("/test", post(write_test).put(write_test))
@@ -129,6 +132,9 @@ pub async fn write_test(
         ActionStatus::Completed,
     )
     .await;
+
+    // Simulate sandbox duration for metrics
+    metrics::record_sandbox_duration(0.05);
 
     let body = TestWriteResponse {
         action_id: action_id.clone(),
