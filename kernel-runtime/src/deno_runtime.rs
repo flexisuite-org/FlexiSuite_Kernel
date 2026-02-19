@@ -1,7 +1,7 @@
 use crate::{RuntimeOptions, SandboxError, SandboxRuntime};
 use async_trait::async_trait;
 use deno_core::{JsRuntime, OpState, RuntimeOptions as DenoOptions, op2, v8};
-use std::io::Write;
+use std::io::{Error, ErrorKind};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -28,52 +28,31 @@ struct OutputConfig {
     max_output_size: Option<usize>,
 }
 
-struct SizeLimitedWriter {
-    written: usize,
-    limit: usize,
-}
-
-impl Write for SizeLimitedWriter {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        let next = self.written.saturating_add(buf.len());
-        if next > self.limit {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!(
-                    "output size limit exceeded (max: {} bytes, got: {}+ bytes)",
-                    self.limit, self.limit
-                ),
-            ));
-        }
-        self.written = next;
-        Ok(buf.len())
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
-#[op2]
+#[op2(fast)]
 pub fn op_set_output(
     state: &mut OpState,
-    #[serde] value: serde_json::Value,
-) -> Result<(), std::io::Error> {
+    #[string] json: String,
+) -> Result<(), Error> {
     if let Some(max_output_size) = state
         .try_borrow::<OutputConfig>()
         .and_then(|cfg| cfg.max_output_size)
     {
-        let mut writer = SizeLimitedWriter {
-            written: 0,
-            limit: max_output_size,
-        };
-        serde_json::to_writer(&mut writer, &value).map_err(|err| {
-            if let Some(io_err) = err.io_error_kind() {
-                return std::io::Error::new(io_err, err.to_string());
-            }
-            std::io::Error::new(std::io::ErrorKind::InvalidData, err.to_string())
-        })?;
+        if json.len() > max_output_size {
+            return Err(Error::new(
+                ErrorKind::InvalidData,
+                format!(
+                    "output size limit exceeded (max: {} bytes, got: {} bytes)",
+                    max_output_size,
+                    json.len()
+                ),
+            ));
+        }
     }
+
+    let value: serde_json::Value = serde_json::from_str(&json).map_err(|e| {
+        eprintln!("Failed to parse sandbox output JSON: {e}. Raw: {json}");
+        Error::new(ErrorKind::InvalidData, e)
+    })?;
 
     state.put(OutputState { value });
     Ok(())
@@ -194,10 +173,10 @@ impl SandboxRuntime for DenoSandbox {
                         try {{
                             const result = eval({});
                             const resolved = await Promise.resolve(result);
-                            Deno.core.ops.op_set_output(resolved === undefined ? null : resolved);
+                            Deno.core.ops.op_set_output(JSON.stringify(resolved === undefined ? null : resolved));
                         }} catch (error) {{
                             const message = error instanceof Error ? error.message : String(error);
-                            Deno.core.ops.op_set_output({{ "__sandbox_error__": message }});
+                            Deno.core.ops.op_set_output(JSON.stringify({{ "__sandbox_error__": message }}));
                             throw error;
                         }}
                     }})()
