@@ -64,13 +64,11 @@ fn map_wasm_error(error: anyhow::Error) -> SandboxError {
 
     let message = error.to_string();
     // String mapping fallback for wasmtime 41.0.3 diagnostics when no Trap is available.
-    if message.contains("allocation too large") || message.contains("exceeded memory limits") {
-        SandboxError::MemoryLimitExceeded
-    } else if message.contains("memory out of bounds")
-        || message.contains("index out of bounds")
-        || message.contains("offset out of bounds")
+    if message.contains("allocation too large")
+        || message.contains("exceeded memory limits")
+        || message.contains("growing memory")
     {
-        SandboxError::RuntimeError(message)
+        SandboxError::MemoryLimitExceeded
     } else {
         SandboxError::RuntimeError(message)
     }
@@ -111,6 +109,7 @@ impl SandboxRuntime for WasmSandbox {
 
         let limits = StoreLimitsBuilder::new()
             .memory_size(self.options.memory_limit)
+            .trap_on_grow_failure(true)
             .build();
 
         let mut store = Store::new(
@@ -202,14 +201,6 @@ impl SandboxRuntime for WasmSandbox {
             Ok(_) => {}
             Err(e) => {
                 stop_watchdog(self);
-                if let Some(msg) = e.downcast_ref::<Trap>().map(|t| t.to_string()).or_else(|| Some(e.to_string())) {
-                    if msg.contains("write beyond capacity of MemoryOutputPipe") {
-                        return Err(SandboxError::RuntimeError(format!(
-                            "stdout limit exceeded (max: {} bytes). Output may be truncated.",
-                            effective_max_stdout
-                        )));
-                    }
-                }
                 let mapped = map_wasm_error(e);
                 if matches!(mapped, SandboxError::RuntimeError(_)) {
                     if is_wall_timeout.load(Ordering::SeqCst) {
