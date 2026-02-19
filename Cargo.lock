@@ -1313,6 +1313,7 @@ dependencies = [
  "base64 0.22.1",
  "chrono",
  "ed25519-dalek",
+ "hex",
  "http 1.4.0",
  "kernel-api",
  "kernel-core",
@@ -3208,6 +3209,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "chrono",
+ "ed25519-dalek",
  "form_urlencoded",
  "hex",
  "kernel-data",
@@ -3253,9 +3255,11 @@ name = "kernel-registry"
 version = "0.1.0"
 dependencies = [
  "bytes",
+ "ed25519-dalek",
  "hex",
  "kernel-core",
  "object_store",
+ "rand 0.8.5",
  "serde",
  "serde_json",
  "sha2",

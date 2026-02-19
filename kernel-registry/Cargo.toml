@@ -19,3 +19,5 @@ tracing = "=0.1.43"
 [dev-dependencies]
 tokio = { version = "1", features = ["full"] }
 tempfile = "3"
+ed25519-dalek = { version = "2.1", features = ["std", "pem", "rand_core"] }
+rand = "0.8"

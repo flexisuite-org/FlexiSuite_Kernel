@@ -1,3 +1,5 @@
+use ed25519_dalek::{Verifier, VerifyingKey, Signature};
+
 #[derive(Debug, Clone)]
 pub struct Manifest {
     pub id: String,
@@ -6,7 +8,7 @@ pub struct Manifest {
     pub kid: String,
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Clone)]
 pub enum KeyStatus {
     Active,
     Next,
@@ -21,6 +23,8 @@ pub enum VerificationResult {
     SignatureInvalid,
     KeyRevoked,
     KeyRetiredOutOfWindow,
+    KeyNotYetValid,
+    KeyExpired,
     BreakGlassExpired,
     BreakGlassScopeMismatch,
     BreakGlassDisabled,
@@ -35,13 +39,18 @@ pub struct BreakGlassContext {
     pub expiry_ts: u64,
 }
 
+#[derive(Debug, Clone)]
 pub struct TrustedKey {
     pub kid: String,
+    pub alg: String,
+    pub public_key: String,
     pub status: KeyStatus,
     pub retired_at: Option<u64>,
+    pub not_before: Option<u64>,
+    pub not_after: Option<u64>,
 }
 
-/// Mock verification with time-aware context
+/// Verify manifest signature and key status.
 pub fn verify_manifest(
     manifest: &Manifest,
     trusted_key: &TrustedKey,
@@ -92,12 +101,53 @@ pub fn verify_manifest(
         KeyStatus::Active => {}
     }
 
-    // 3. Signature Verification (Mock)
-    if manifest.signature == "invalid" {
+    // 2c. Validity Period Check
+    if let Some(nbf) = trusted_key.not_before {
+        if now < nbf {
+            return VerificationResult::KeyNotYetValid;
+        }
+    }
+    if let Some(exp) = trusted_key.not_after {
+        if now > exp {
+            return VerificationResult::KeyExpired;
+        }
+    }
+
+    // 3. Signature Verification (Real)
+    let signature_bytes = match hex::decode(&manifest.signature) {
+        Ok(bytes) => bytes,
+        Err(_) => return VerificationResult::SignatureInvalid,
+    };
+
+    if signature_bytes.len() != Signature::to_bytes(&Signature::from_bytes(&[0u8; 64])).len() {
         return VerificationResult::SignatureInvalid;
     }
 
-    VerificationResult::Ok
+    let signature = match Signature::from_slice(&signature_bytes) {
+        Ok(sig) => sig,
+        Err(_) => return VerificationResult::SignatureInvalid,
+    };
+
+    let pub_key_bytes = match hex::decode(&trusted_key.public_key) {
+        Ok(bytes) => bytes,
+        Err(_) => return VerificationResult::SignatureInvalid, // Invalid public key format
+    };
+
+    let pub_key_arr: [u8; 32] = match pub_key_bytes.try_into() {
+        Ok(arr) => arr,
+        Err(_) => return VerificationResult::SignatureInvalid, // Invalid key length
+    };
+
+    let verifying_key = match VerifyingKey::from_bytes(&pub_key_arr) {
+        Ok(vk) => vk,
+        Err(_) => return VerificationResult::SignatureInvalid,
+    };
+
+    // Verify signature over the UTF-8 bytes of the digest string
+    match verifying_key.verify(manifest.digest.as_bytes(), &signature) {
+        Ok(_) => VerificationResult::Ok,
+        Err(_) => VerificationResult::SignatureInvalid,
+    }
 }
 
 pub fn verify_break_glass(
