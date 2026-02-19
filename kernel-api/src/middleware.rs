@@ -2017,6 +2017,13 @@ pub fn violation_to_status(v: &QuotaViolation) -> StatusCode {
 }
 
 pub fn violation_to_response(v: &QuotaViolation, request_id: Option<String>) -> Response {
+    let violation_type = match v.layer {
+        QuotaLayer::SystemHardLimit => "system_hard_limit",
+        QuotaLayer::CircuitBreaker => "circuit_breaker",
+        QuotaLayer::TenantBudget => "tenant_budget",
+        QuotaLayer::ApiRateLimit => "api_rate_limit",
+    };
+    crate::metrics::record_quota_reject(violation_type);
     let status = violation_to_status(v);
     let message = match status {
         StatusCode::TOO_MANY_REQUESTS => "Rate limit exceeded",
@@ -2039,12 +2046,6 @@ pub fn violation_to_response(v: &QuotaViolation, request_id: Option<String>) -> 
     #[cfg(any(test, feature = "test-utils"))]
     {
         // For tests, we might want to inspect specific violation details via headers
-        let violation_type = match v.layer {
-            QuotaLayer::SystemHardLimit => "system_hard_limit",
-            QuotaLayer::CircuitBreaker => "circuit_breaker",
-            QuotaLayer::TenantBudget => "tenant_budget",
-            QuotaLayer::ApiRateLimit => "api_rate_limit",
-        };
         headers.insert(
             "X-Violation-Type",
             HeaderValue::from_str(violation_type).unwrap_or(HeaderValue::from_static("unknown")),
