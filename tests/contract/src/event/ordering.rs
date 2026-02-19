@@ -45,8 +45,10 @@ async fn test_event_ordering_entity() {
         })
         .collect::<Vec<_>>();
 
-    // Use partial_cmp-aware sorting with a deterministic tiebreaker (Ordering::Equal for incomparable)
-    events.sort_by(|a, b| compare_event_order(a, b).unwrap_or(Ordering::Equal));
+    // Use partial_cmp-aware sorting with a deterministic tiebreaker (event_id for incomparable)
+    events.sort_by(|a, b| {
+        compare_event_order(a, b).unwrap_or_else(|| a.event_id.cmp(&b.event_id))
+    });
 
     assert_eq!(events[0].order_mode.seq(), Some(1));
     assert_eq!(events[1].order_mode.seq(), Some(2));

@@ -200,6 +200,8 @@ fn init_auth_config_with_public_key_and_keyset(
         .map_err(|_| "Auth keyset already initialized".to_string())
 }
 
+/// Verifies a PASETO v4.public token from the auth header after extracting and validating footer.kid.
+/// Note: Only one Ed25519 key (PASETO_PUBLIC_KEY) is used for verification today.
 fn verify_paseto_v4_public_from_env(auth_header: &str) -> Result<TenantContext, AuthError> {
     let token = extract_bearer_token(auth_header).ok_or(AuthError::Unauthorized)?;
     let public_key = PASETO_PUBLIC_KEY.get().ok_or(AuthError::Unauthorized)?;
