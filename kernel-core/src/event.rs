@@ -26,16 +26,20 @@ pub fn validate_order_mode_transition(
         // Assert logically consistent keys in development
         match (existing_mode, next) {
             (OrderMode::Entity { entity_id: e1, .. }, OrderMode::Entity { entity_id: e2, .. }) => {
-                debug_assert_eq!(
-                    e1, e2,
-                    "validate_order_mode_transition called with different entity_ids"
-                );
+                if e1 != e2 {
+                    return Err(EventError::Producer(format!(
+                        "mismatched entity_id during order_mode transition: {} != {}",
+                        e1, e2
+                    )));
+                }
             }
             (OrderMode::Causality { key: k1, .. }, OrderMode::Causality { key: k2, .. }) => {
-                debug_assert_eq!(
-                    k1, k2,
-                    "validate_order_mode_transition called with different causality keys"
-                );
+                if k1 != k2 {
+                    return Err(EventError::Producer(format!(
+                        "mismatched causality key during order_mode transition: {} != {}",
+                        k1, k2
+                    )));
+                }
             }
             _ => {}
         }
@@ -105,14 +109,12 @@ pub fn progress_gap_recovery(
     state: GapRecoveryState,
     outbox_has_missing_seq: bool,
 ) -> GapRecoveryState {
-    if state == GapRecoveryState::Normal {
+    if state == GapRecoveryState::Normal && outbox_has_missing_seq {
         debug_assert!(
-            !outbox_has_missing_seq,
-            "progress_gap_recovery(Normal) called with outbox_has_missing_seq=true; callers must set GapDetected state first"
+            false,
+            "progress_gap_recovery(Normal) called with outbox_has_missing_seq=true; callers should set GapDetected state first"
         );
-        if outbox_has_missing_seq {
-            return GapRecoveryState::Normal;
-        }
+        return GapRecoveryState::GapDetected;
     }
 
     match (state, outbox_has_missing_seq) {
@@ -152,23 +154,17 @@ mod tests {
         assert!(validate_stream_key(":orders:0", &tenant_id).is_err());
 
         // Special characters in TenantId
-        // Allowed chars: alphanumeric, _, - (based on typical TenantId rules, assuming here)
         let special_tenant = TenantId::new("tenant-a_1").expect("Valid special tenant ID");
         assert!(validate_stream_key("tenant-a_1:orders:0", &special_tenant).is_ok());
         assert!(validate_stream_key("tenant-a:orders:0", &special_tenant).is_err());
 
-        // Invalid TenantId creation (if TenantId::new validates)
-        // Assuming TenantId::new rejects some chars, we test that implicit contract.
-        // If TenantId allows anything, we skip this specific rejection test or adapt it.
-        // Let's assume typical restrictions. If TenantId allows everything, this might fail,
-        // so we'll just check if it fails to create or if it works, validate_stream_key handles it.
-        if let Ok(weird_tenant) = TenantId::new("tenant/a") {
-            // If "tenant/a" is valid, then "tenant/a:..." should work
-            assert!(validate_stream_key("tenant/a:stream:0", &weird_tenant).is_ok());
-        } else {
-            // If it failed to create, that's also a passed "boundary test" for TenantId
-            // but validate_stream_key test can't run on it.
-        }
+        // Deterministic rejection of invalid characters
+        assert!(TenantId::new("tenant/a").is_err());
+        assert!(validate_stream_key(
+            "tenant-a:stream:0",
+            &TenantId::new("tenant-a").unwrap()
+        )
+        .is_ok());
     }
 
     #[test]
