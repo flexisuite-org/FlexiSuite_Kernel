@@ -88,4 +88,26 @@ impl TestAuth {
             sig
         ))
     }
+
+    /// Revokes the currently active HMAC key.
+    /// Used for testing REQ-KEY-REVOCATION-SLO.
+    pub async fn revoke_active_hmac_key(
+        db: &DatabaseConnection,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        use sea_orm::{ActiveValue, ColumnTrait, QueryFilter};
+
+        let key_model = key_record::Entity::find()
+            .filter(key_record::Column::KeyType.eq(KeyType::Hmac))
+            .filter(key_record::Column::State.eq(KeyState::Active))
+            .one(db)
+            .await?
+            .ok_or("No active HMAC key found to revoke")?;
+
+        let mut key_active: key_record::ActiveModel = key_model.into();
+        key_active.state = ActiveValue::Set(KeyState::Revoked);
+        key_active.revoked_at = ActiveValue::Set(Some(Utc::now().into()));
+        key_active.update(db).await?;
+
+        Ok(())
+    }
 }
