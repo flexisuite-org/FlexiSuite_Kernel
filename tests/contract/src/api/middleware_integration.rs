@@ -21,16 +21,15 @@ use sea_orm::{DatabaseBackend, MockDatabase};
 use serde_json::Value;
 use tower::ServiceExt;
 
-async fn setup_app() -> axum::Router {
+pub async fn setup_app() -> axum::Router {
     setup_app_with_config(MiddlewareConfig::default(), None).await
 }
 
-async fn setup_app_with_config(
+pub async fn setup_app_with_config(
     mut config: MiddlewareConfig,
     store: Option<Arc<dyn IdempotencyStore>>,
 ) -> axum::Router {
     config.require_redis = false;
-
     let state = if let Some(s) = store {
         MiddlewareState::with_store(
             config,

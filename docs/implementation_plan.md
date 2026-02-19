@@ -36,6 +36,8 @@
 | `REQ-SIDELOADING-WARNING` | Developer Mode時の非Verified導入に警告・同意・隔離維持を強制する | 4.3 |
 | `REQ-SLO-ENV-PROFILE` | SLO計測環境を固定プロファイルで再現可能にする | 7 |
 | `REQ-DR-REHEARSAL` | DRはCIではなく定期演習でRPO/RTO実測を継続する | 9 (Phase 8) |
+| `REQ-EVENT-GAP-001` | 欠番検知はアウトボックス/コンシューマ層（Redis Streams等）で非連続なseqを観測した際に行う | 5.5 |
+| `REQ-EVENT-GAP-002` | `progress_gap_recovery` がFSMを駆動し、検出されたGapを解消する | 5.5 |
 
 ---
 
@@ -531,6 +533,10 @@ RETURNING last_seq;
 
 ### 5.5 Gap Recovery Protocol (欠番回復)
 `ordering_seq`（`entity_seq` または `causality_seq`）に欠番が検出された場合、無期限ブロックを防ぐ回復プロトコルを定義する。
+
+- **REQ-EVENT-GAP-001**: Gap detection occurs via the outbox/consumer layer when a non-contiguous sequence ID is observed.
+- **REQ-EVENT-GAP-002**: `progress_gap_recovery` drives the FSM to resolve detected gaps.
+
 1. **タイムアウト**: 欠番検出後 **30秒** 待機しても到着しない場合、回復フェーズに入る **(MUST)**。
 2. **補償読み取りとOutbox保持期間**:
    - `outbox` テーブルのイベント保持期間は、通常イベントは **7日間**、監査・課金等の重要イベントは **90日間** と**しなければならない (MUST)**。保持期間を超えたイベントはアーカイブストレージへ移動し、オンデマンドで復元可能な状態に**すべきである (SHOULD)**。
@@ -814,6 +820,7 @@ Kernelはエラー発生時や診断要求に対し、以下の構造化デー�
 - `kernel-api`: 認証エンドポイント、TenantContext middleware
 - **運用安全策（前倒し）**:
   - 手動鍵更新手順（Runbook）とローテーション演習
+  - PASETO `kid` 鍵運用Runbook: `docs/auth_paseto_kid_runbook.md`
   - `SECURITY DEFINER` テンプレートのSQLリンタ導入（CI fail-close）
 - **前提**: Phase 1（型定義・DB接続）
 
