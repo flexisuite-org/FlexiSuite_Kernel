@@ -79,7 +79,7 @@ pub fn generate_token_with_kid(valid: bool, kid: Option<&str>) -> String {
     let nbf_str = nbf.to_rfc3339_opts(SecondsFormat::Secs, true);
     let iat_str = now.to_rfc3339_opts(SecondsFormat::Secs, true);
 
-    let footer = kid.map(|k| format!(r#"{{"kid":"{k}"}}"#));
+    let footer = kid.map(|k| serde_json::json!({ "kid": k }).to_string());
     let mut builder = PasetoBuilder::<V4, Public>::default();
 
     builder.set_claim(CustomClaim::try_from(("tenant_id", "tenant_001")).unwrap());

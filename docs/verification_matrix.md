@@ -28,6 +28,8 @@
 | `REQ-SIDELOADING-WARNING` | PR-Blocking | `ci:e2e-sideloading-warning` | Developer Mode時の警告・同意フロー欠落 |
 | `REQ-SLO-ENV-PROFILE` | PR-Blocking + Nightly | `ci:lint-slo-profile`, `nightly:test-slo-smoke` | `ops/slo_profile.yaml` 未一致でSLO判定 |
 | `REQ-DR-REHEARSAL` | PR-Blocking + Drill | `ci:lint-drill-readiness`, 月次ステージング/四半期本番相当演習 | Readiness欠落、RPO/RTO未達、演習記録欠落 |
+| `REQ-EVENT-GAP-001` | PR-Blocking | `ci:test-contract`（gap recovery suite） | Gap検出不備、欠番検知漏れ |
+| `REQ-EVENT-GAP-002` | PR-Blocking | `ci:test-contract`（gap recovery suite） | FSM遷移不備、回復不能時の書き込み停止不履行 |
 
 ## 1. 静的検証 (PR-Blocking: Build/Static Analysis)
 
