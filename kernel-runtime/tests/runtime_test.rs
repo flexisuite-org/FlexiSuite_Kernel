@@ -1,3 +1,5 @@
+#![allow(clippy::field_reassign_with_default)]
+
 use kernel_runtime::{
     RuntimeOptions, SandboxError, SandboxRuntime, deno_runtime::DenoSandbox,
     wasm_runtime::WasmSandbox,
@@ -61,7 +63,7 @@ async fn test_wasm_execution() {
     let input = serde_json::Value::Null;
     let result = runtime.execute(wat, input).await;
     assert!(result.is_ok(), "Wasm execution failed: {:?}", result.err());
-    assert_eq!(result.unwrap(), serde_json::json!(""));
+    assert_eq!(result.unwrap(), serde_json::Value::Null);
 }
 
 #[tokio::test]
@@ -266,7 +268,7 @@ async fn test_wasm_stdout_exact_limit_allowed() {
     let mut runtime = WasmSandbox::new(options).unwrap();
     let input = serde_json::Value::Null;
     let output = runtime.execute(wat, input).await.unwrap();
-    assert_eq!(output, serde_json::json!("12345"));
+    assert_eq!(output, serde_json::json!(12345));
 }
 
 #[tokio::test]
@@ -319,7 +321,34 @@ async fn test_wasm_missing_start_export() {
 }
 
 #[tokio::test]
-async fn test_wasm_stdout() {
+async fn test_wasm_json_stdout() {
+    let wat = r#"
+    (module
+        (import "wasi_snapshot_preview1" "fd_write"
+            (func $fd_write (param i32 i32 i32 i32) (result i32)))
+        (memory (export "memory") 1)
+        (data (i32.const 8) "42")
+        (func (export "_start")
+            (i32.store (i32.const 0) (i32.const 8))
+            (i32.store (i32.const 4) (i32.const 2))
+            (call $fd_write
+                (i32.const 1)
+                (i32.const 0)
+                (i32.const 1)
+                (i32.const 20))
+            drop
+        )
+    )
+    "#;
+    let options = RuntimeOptions::default();
+    let mut runtime = WasmSandbox::new(options).unwrap();
+    let input = serde_json::Value::Null;
+    let output = runtime.execute(wat, input).await.unwrap();
+    assert_eq!(output, serde_json::json!(42));
+}
+
+#[tokio::test]
+async fn test_wasm_non_json_stdout_returns_string() {
     let wat = r#"
     (module
         (import "wasi_snapshot_preview1" "fd_write"
@@ -342,10 +371,7 @@ async fn test_wasm_stdout() {
     let mut runtime = WasmSandbox::new(options).unwrap();
     let input = serde_json::Value::Null;
     let output = runtime.execute(wat, input).await.unwrap();
-    match output {
-        serde_json::Value::String(s) => assert!(!s.is_empty(), "stdout should not be empty"),
-        other => panic!("Expected String output, got: {:?}", other),
-    }
+    assert_eq!(output, serde_json::json!("hello wasm\n"));
 }
 
 #[tokio::test]

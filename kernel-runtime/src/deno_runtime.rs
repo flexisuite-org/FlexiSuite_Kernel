@@ -139,6 +139,15 @@ impl SandboxRuntime for DenoSandbox {
         code: &str,
         input: serde_json::Value,
     ) -> Result<serde_json::Value, SandboxError> {
+        #[cfg(not(unix))]
+        {
+            if !self.options.cpu_time_limit.is_zero() {
+                return Err(SandboxError::InitError(
+                    "Deno CPU time limiting is unsupported on this platform".to_string(),
+                ));
+            }
+        }
+
         if !self.options.permissions.network_allowlist.is_empty() {
             return Err(SandboxError::PermissionDenied(
                 "permissions.network_allowlist is not enforced yet".to_string(),
