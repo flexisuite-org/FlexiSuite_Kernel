@@ -15,10 +15,11 @@ use common::auth::TestAuth;
 use kernel_data::DataError;
 use kernel_data::connection::{RawConnection, TenantScoped, with_tenant_tx};
 use kernel_data::entities::entity_record;
+use kernel_data::entities::key_record;
 use kernel_data::repository::TenantRepository;
 use sea_orm::{
     ActiveValue, ConnectionTrait, Database, DatabaseConnection, DbBackend, Statement,
-    TransactionTrait,
+    TransactionTrait, ColumnTrait, QueryFilter, EntityTrait, ActiveModelTrait
 };
 use std::sync::OnceLock;
 use testcontainers::{RunnableImage, clients};
@@ -399,6 +400,58 @@ async fn test_connection_rejects_colon_injection() {
     assert!(
         err.contains("tenant_id must not contain ':'"),
         "Should match our new error check: {}",
+        err
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore] // Requires Docker
+async fn test_authorize_rejects_revoked_key() {
+    let (db, _node) = setup_test_db().await;
+    TestAuth::init_keys(&db).await.expect("Failed to init keys");
+
+    let tenant_id = TenantId::new("revocation-tenant").unwrap();
+    let ctx = TenantContext::new(tenant_id.clone(), Some(UserId::new("user-1").unwrap()));
+    let token = TestAuth::generate_tenant_token(&db, &tenant_id)
+        .await
+        .expect("Failed to generate token");
+
+    with_tenant_tx(&db, &ctx, &token, |_| Box::pin(async { Ok(()) }))
+        .await
+        .expect("First token usage should succeed");
+
+    // Verify pgcrypto extension is enabled (as per acceptance criteria)
+    let admin = TestAdminTenantContext::new(&db);
+    let pgcrypto_exists = admin
+        .query_all_check("SELECT 1 FROM pg_extension WHERE extname = 'pgcrypto'")
+        .await
+        .expect("Failed to query extensions");
+    assert_eq!(pgcrypto_exists.len(), 1, "pgcrypto extension should be enabled");
+
+    // Revoke key
+    let key_model = key_record::Entity::find()
+        .filter(key_record::Column::KeyType.eq(key_record::KeyType::Hmac))
+        .filter(key_record::Column::State.eq(key_record::KeyState::Active))
+        .one(&db)
+        .await
+        .expect("Query failed")
+        .expect("Active key must exist");
+
+    let mut key_active: key_record::ActiveModel = key_model.into();
+    key_active.state = ActiveValue::Set(key_record::KeyState::Revoked);
+    key_active.revoked_at = ActiveValue::Set(Some(chrono::Utc::now().into()));
+    key_active.update(&db).await.expect("Failed to update key");
+
+    let second = with_tenant_tx(&db, &ctx, &token, |_| Box::pin(async { Ok(()) })).await;
+    assert!(
+        second.is_err(),
+        "Token usage with revoked key must fail"
+    );
+    let err = second.unwrap_err().to_string();
+    // In m20250521..., authorize_tenant raises 'Invalid or expired key ID: %' if key is not found (filtered out)
+    assert!(
+        err.contains("Invalid or expired key ID"),
+        "Expected 'Invalid or expired key ID' error, got: {}",
         err
     );
 }
