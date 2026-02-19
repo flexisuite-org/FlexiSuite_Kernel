@@ -84,7 +84,7 @@ pub fn build_app_with_state(
                     ))
                     .layer(SetResponseHeaderLayer::overriding(
                         header::STRICT_TRANSPORT_SECURITY,
-                        HeaderValue::from_static("max-age=63072000; includeSubDomains; preload"),
+                        HeaderValue::from_static("max-age=63072000; includeSubDomains"),
                     )),
             ),
         cleanup_handle,
@@ -187,7 +187,7 @@ mod tests {
         );
         assert_eq!(
             headers.get(header::STRICT_TRANSPORT_SECURITY).unwrap(),
-            "max-age=63072000; includeSubDomains; preload"
+            "max-age=63072000; includeSubDomains"
         );
     }
 }
