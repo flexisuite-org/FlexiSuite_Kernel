@@ -245,6 +245,7 @@ pub trait IdempotencyStore: Send + Sync {
         lease: &IdempotencyLease,
     ) -> Result<(), IdempotencyStoreError>;
     async fn cleanup(&self);
+    async fn ping(&self) -> Result<(), IdempotencyStoreError>;
 }
 
 pub struct InMemoryIdempotencyStore {
@@ -402,6 +403,10 @@ impl IdempotencyStore for InMemoryIdempotencyStore {
         for notify in expired_inflight_notifies {
             notify.notify_waiters();
         }
+    }
+
+    async fn ping(&self) -> Result<(), IdempotencyStoreError> {
+        Ok(())
     }
 }
 
@@ -865,6 +870,20 @@ impl IdempotencyStore for RedisIdempotencyStore {
     }
 
     async fn cleanup(&self) {}
+
+    async fn ping(&self) -> Result<(), IdempotencyStoreError> {
+        let mut conn = self.manager.clone();
+        match redis::cmd("PING")
+            .query_async::<String>(&mut conn)
+            .await
+        {
+            Ok(_) => Ok(()),
+            Err(e) => {
+                error!("Redis ping error: {}", e);
+                Err(IdempotencyStoreError::BackendUnavailable)
+            }
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
