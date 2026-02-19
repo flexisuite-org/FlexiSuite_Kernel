@@ -8,9 +8,11 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::JoinHandle;
 use std::time::Duration;
+use tokio::sync::Semaphore;
 
 pub struct DenoSandbox {
     options: RuntimeOptions,
+    exec_limiter: Arc<Semaphore>,
 }
 
 const DEFAULT_MAX_OUTPUT_SIZE: usize = 1 << 20; // 1MB default hard cap
@@ -18,7 +20,14 @@ const MIN_DENO_HEAP_LIMIT: usize = 16 * 1024 * 1024; // avoid V8 process-abort r
 
 impl DenoSandbox {
     pub fn new(options: RuntimeOptions) -> Self {
-        Self { options }
+        let permits = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(2)
+            .clamp(2, 8);
+        Self {
+            options,
+            exec_limiter: Arc::new(Semaphore::new(permits)),
+        }
     }
 }
 
@@ -139,6 +148,16 @@ impl SandboxRuntime for DenoSandbox {
         code: &str,
         input: serde_json::Value,
     ) -> Result<serde_json::Value, SandboxError> {
+        // Defense-in-depth: require explicit hardening acknowledgment in release builds
+        // because deno_core embedding must run inside an OS/container sandbox.
+        if !cfg!(debug_assertions)
+            && std::env::var("FLEXISUITE_DENO_HARDENED").ok().as_deref() != Some("1")
+        {
+            return Err(SandboxError::InitError(
+                "Deno runtime requires hardened sandbox deployment. Set FLEXISUITE_DENO_HARDENED=1 only when seccomp/AppArmor, least-privilege user, and secret isolation are enforced.".to_string(),
+            ));
+        }
+
         #[cfg(not(unix))]
         {
             if !self.options.cpu_time_limit.is_zero() {
@@ -154,12 +173,23 @@ impl SandboxRuntime for DenoSandbox {
             ));
         }
 
+        let exec_permit = self
+            .exec_limiter
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|_| SandboxError::InitError("Deno execution semaphore is closed".to_string()))?;
+
         let options = self.options.clone();
         let code = code.to_string();
 
         let result = tokio::task::spawn_blocking(move || {
+            let _exec_permit = exec_permit;
             if options.memory_limit < MIN_DENO_HEAP_LIMIT {
-                return Err(SandboxError::MemoryLimitExceeded);
+                return Err(SandboxError::InitError(format!(
+                    "memory_limit ({}) is below the minimum Deno/V8 heap limit ({})",
+                    options.memory_limit, MIN_DENO_HEAP_LIMIT
+                )));
             }
 
             // Reserve a bounded headroom within the configured limit so V8 can unwind safely

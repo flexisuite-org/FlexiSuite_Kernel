@@ -109,24 +109,34 @@ async fn test_wasm_zero_wall_clock_limit_times_out_before_compile() {
 }
 
 #[tokio::test]
-async fn test_deno_memory_limit() {
+async fn test_deno_invalid_memory_limit_is_init_error() {
     let mut options = RuntimeOptions::default();
     options.memory_limit = 8 * 1024 * 1024;
-    options.wall_clock_limit = Duration::from_secs(10);
-    options.cpu_time_limit = Duration::from_secs(10);
     let mut runtime = DenoSandbox::new(options);
-    let code = "const items = []; for (let i = 0; i < 300_000; i++) { items.push({ i, s: 'memory-test-payload' }); } items.length;";
+    let code = "1 + 1";
     let input = serde_json::Value::Null;
     match runtime.execute(code, input).await {
-        Err(SandboxError::MemoryLimitExceeded) => {}
-        Err(SandboxError::CpuLimitExceeded) => {}
-        Err(SandboxError::Timeout) => {}
-        Ok(value) => panic!(
-            "Expected resource-limit error, got successful value: {:?}",
-            value
-        ),
-        other => panic!("Expected MemoryLimitExceeded, got: {:?}", other),
+        Err(SandboxError::InitError(e)) => {
+            assert!(e.contains("below the minimum Deno/V8 heap limit"));
+        }
+        other => panic!("Expected InitError for invalid memory limit, got: {:?}", other),
     }
+}
+
+#[tokio::test]
+async fn test_deno_min_memory_limit_allows_execution() {
+    let mut options = RuntimeOptions::default();
+    options.memory_limit = 16 * 1024 * 1024;
+    let mut runtime = DenoSandbox::new(options);
+    let code = "1 + 1";
+    let input = serde_json::Value::Null;
+    let result = runtime.execute(code, input).await;
+    assert!(
+        result.is_ok(),
+        "Expected execution to succeed at minimum Deno heap limit, got: {:?}",
+        result
+    );
+    assert_eq!(result.unwrap(), serde_json::json!(2));
 }
 
 #[tokio::test]
@@ -424,5 +434,18 @@ async fn test_wasm_network_allowlist_rejection() {
     match wasm_runtime.execute(wat, input).await {
         Err(SandboxError::PermissionDenied(_)) => {}
         other => panic!("Expected PermissionDenied for Wasm, got: {:?}", other),
+    }
+}
+
+#[tokio::test]
+async fn test_deno_network_allowlist_rejection() {
+    let mut options = RuntimeOptions::default();
+    options.permissions.network_allowlist = vec!["https://example.com".to_string()];
+
+    let mut deno_runtime = DenoSandbox::new(options);
+    let input = serde_json::Value::Null;
+    match deno_runtime.execute("1 + 1", input).await {
+        Err(SandboxError::PermissionDenied(_)) => {}
+        other => panic!("Expected PermissionDenied for Deno, got: {:?}", other),
     }
 }
