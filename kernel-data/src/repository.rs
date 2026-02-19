@@ -153,11 +153,10 @@ impl TenantRepository for TenantScoped<RawConnection> {
     async fn get_entity(&self, id: &str) -> Result<Option<entity_record::Model>, DataError> {
         // Since we have a composite primary key (id, tenant_id), we must provide both.
         // RLS will also filter this, but SeaORM requires both for the PK lookup.
-        let result =
-            EntityRecord::find_by_id((id.to_string(), self.tenant_id.to_string()))
-                .one(&self.inner.txn)
-                .await
-                .map_err(DataError::DbError)?;
+        let result = EntityRecord::find_by_id((id.to_string(), self.tenant_id.to_string()))
+            .one(&self.inner.txn)
+            .await
+            .map_err(DataError::DbError)?;
         Ok(result)
     }
 
@@ -203,9 +202,7 @@ impl TenantRepository for TenantScoped<RawConnection> {
         }
 
         let next_version = existing.version.checked_add(1).ok_or_else(|| {
-            DataError::ValidationError(
-                "version overflow: cannot increment entity version".into(),
-            )
+            DataError::ValidationError("version overflow: cannot increment entity version".into())
         })?;
         active_model.version = ActiveValue::Set(next_version);
         active_model.updated_at = ActiveValue::Set(chrono::Utc::now().into());

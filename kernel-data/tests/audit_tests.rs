@@ -126,7 +126,6 @@ async fn test_audit_log_creation() {
     .await
     .expect("Update entity failed");
 
-
     // Verification-only direct query. Never use unscoped direct queries in production code.
     let histories = entity_history::Entity::find()
         .filter(entity_history::Column::EntityId.eq(entity_id.clone()))

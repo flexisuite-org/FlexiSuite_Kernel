@@ -1062,7 +1062,6 @@ impl ActionStore for RedisActionStore {
     async fn cleanup(&self) {}
 }
 
-
 #[async_trait]
 pub trait QuotaStore: Send + Sync {
     async fn check_and_update(
@@ -1838,7 +1837,6 @@ fn build_replay_response(record: &IdempotencyRecord) -> Response {
     }
     res
 }
-
 
 pub async fn quota_middleware(req: Request<Body>, next: Next) -> Result<Response, Response> {
     let (parts, body) = req.into_parts();
