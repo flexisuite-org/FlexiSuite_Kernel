@@ -22,6 +22,7 @@ use crate::middleware::{
 
 pub mod auth;
 pub mod diagnostics;
+pub mod health;
 pub mod middleware;
 pub mod profile;
 pub mod error;
@@ -53,7 +54,10 @@ pub fn build_app_with_state(
 ) -> (Router, JoinHandle<()>) {
     let cleanup_handle = state.start_cleanup_task();
 
-    let public_router = Router::new().route("/health", get(|| async { "OK" }));
+    let public_router = Router::new()
+        .route("/health", get(|| async { "OK" }))
+        .route("/health/liveness", get(health::liveness))
+        .route("/health/readiness", get(health::readiness));
 
     let protected_router = Router::new()
         .route("/test", post(write_test).put(write_test))
@@ -102,7 +106,8 @@ pub fn build_app_with_state(
                         header::STRICT_TRANSPORT_SECURITY,
                         HeaderValue::from_static("max-age=63072000; includeSubDomains"),
                     )),
-            ),
+            )
+            .layer(Extension(db)),
         cleanup_handle,
     )
 }
