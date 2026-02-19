@@ -50,7 +50,10 @@ pub fn op_set_output(
     }
 
     let value: serde_json::Value = serde_json::from_str(&json).map_err(|e| {
-        eprintln!("Failed to parse sandbox output JSON: {e}. Raw: {json}");
+        eprintln!(
+            "Failed to parse sandbox output JSON: {e}. Output length: {} bytes.",
+            json.len()
+        );
         Error::new(ErrorKind::InvalidData, e)
     })?;
 

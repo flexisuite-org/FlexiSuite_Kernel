@@ -47,7 +47,7 @@ pub struct Permissions {
     /// URL prefixes or domains for network access.
     ///
     /// [IMPORTANT] Enforcement is not yet implemented. Both DenoSandbox and
-    /// WasmSandbox will return Error::PermissionDenied if this vector is non-empty.
+    /// WasmSandbox will return SandboxError::PermissionDenied if this vector is non-empty.
     pub network_allowlist: Vec<String>,
 }
 
