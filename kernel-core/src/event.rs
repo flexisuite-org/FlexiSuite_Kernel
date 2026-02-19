@@ -5,10 +5,6 @@ pub use kernel_data::event::{
     RetryPolicy, SHARD_COUNT, validate_stream_key,
 };
 
-
-
-
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GapRecoveryState {
     Normal,
@@ -16,8 +12,6 @@ pub enum GapRecoveryState {
     Recovering,
     RebuildRequired,
 }
-
-
 
 /// Validates that a transition between two OrderMode instances is valid.
 ///
@@ -32,10 +26,16 @@ pub fn validate_order_mode_transition(
         // Assert logically consistent keys in development
         match (existing_mode, next) {
             (OrderMode::Entity { entity_id: e1, .. }, OrderMode::Entity { entity_id: e2, .. }) => {
-                debug_assert_eq!(e1, e2, "validate_order_mode_transition called with different entity_ids");
+                debug_assert_eq!(
+                    e1, e2,
+                    "validate_order_mode_transition called with different entity_ids"
+                );
             }
             (OrderMode::Causality { key: k1, .. }, OrderMode::Causality { key: k2, .. }) => {
-                debug_assert_eq!(k1, k2, "validate_order_mode_transition called with different causality keys");
+                debug_assert_eq!(
+                    k1, k2,
+                    "validate_order_mode_transition called with different causality keys"
+                );
             }
             _ => {}
         }
@@ -84,8 +84,8 @@ pub fn compare_event_order(a: &EventEnvelope, b: &EventEnvelope) -> Option<Order
 /// 2. The event loop invokes `progress_gap_recovery` once per activity cycle when in a non-Normal state.
 ///    Invoking from Normal when `outbox_has_missing_seq` is false is treated as a no-op.
 /// 3. Recovering -> Normal transition ignores `outbox_has_missing_seq` under the assumption
-///    that the recovery poll (invoked by the logic managing this FSM) has either filled the gap 
-///    by fetching missing events or confirmed the gap cannot be recovered from the source.
+///    that the recovery poll (invoked by the logic managing this FSM) has filled the gap.
+///    If the gap still exists, Recovering must be retained.
 /// 4. RebuildRequired is an absorbing state indicating manual intervention or full re-sync is needed.
 ///    This occurs if a Gap is detected but the recovery source is empty or inaccessible.
 ///
@@ -106,7 +106,10 @@ pub fn progress_gap_recovery(
     outbox_has_missing_seq: bool,
 ) -> GapRecoveryState {
     if state == GapRecoveryState::Normal {
-        debug_assert!(!outbox_has_missing_seq, "progress_gap_recovery(Normal) called with outbox_has_missing_seq=true; callers must set GapDetected state first");
+        debug_assert!(
+            !outbox_has_missing_seq,
+            "progress_gap_recovery(Normal) called with outbox_has_missing_seq=true; callers must set GapDetected state first"
+        );
         if outbox_has_missing_seq {
             return GapRecoveryState::Normal;
         }
@@ -116,12 +119,11 @@ pub fn progress_gap_recovery(
         (GapRecoveryState::Normal, _) => GapRecoveryState::Normal,
         (GapRecoveryState::GapDetected, true) => GapRecoveryState::Recovering,
         (GapRecoveryState::GapDetected, false) => GapRecoveryState::RebuildRequired,
-        (GapRecoveryState::Recovering, _) => GapRecoveryState::Normal,
+        (GapRecoveryState::Recovering, true) => GapRecoveryState::Recovering,
+        (GapRecoveryState::Recovering, false) => GapRecoveryState::Normal,
         (GapRecoveryState::RebuildRequired, _) => GapRecoveryState::RebuildRequired,
     }
 }
-
-
 
 #[cfg(test)]
 mod tests {
@@ -234,6 +236,8 @@ mod tests {
         let state = progress_gap_recovery(GapRecoveryState::GapDetected, true);
         assert_eq!(state, GapRecoveryState::Recovering);
         let state = progress_gap_recovery(state, true);
+        assert_eq!(state, GapRecoveryState::Recovering);
+        let state = progress_gap_recovery(state, false);
         assert_eq!(state, GapRecoveryState::Normal);
     }
 

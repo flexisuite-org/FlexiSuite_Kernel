@@ -117,6 +117,7 @@ struct PasetoKeyset {
     next_kids: HashSet<String>,
     retired_kids: HashSet<String>,
     revoked_kids: HashSet<String>,
+    allow_legacy_no_kid: bool,
 }
 
 impl PasetoKeyset {
@@ -126,6 +127,7 @@ impl PasetoKeyset {
             next_kids: HashSet::new(),
             retired_kids: HashSet::new(),
             revoked_kids: HashSet::new(),
+            allow_legacy_no_kid: true,
         }
     }
 
@@ -135,11 +137,13 @@ impl PasetoKeyset {
         let next_kids = parse_kid_csv_env("FLEXI_PASETO_V4_NEXT_KIDS");
         let retired_kids = parse_kid_csv_env("FLEXI_PASETO_V4_RETIRED_KIDS");
         let revoked_kids = parse_kid_csv_env("FLEXI_PASETO_V4_REVOKED_KIDS");
+        let allow_legacy_no_kid = parse_bool_env("FLEXI_PASETO_V4_ALLOW_LEGACY_NO_KID", true);
         Self {
             active_kid,
             next_kids,
             retired_kids,
             revoked_kids,
+            allow_legacy_no_kid,
         }
     }
 
@@ -172,8 +176,17 @@ pub fn init_auth_config_with_public_key_and_revoked_kids(
     key: &str,
     revoked_kids: &[&str],
 ) -> Result<(), String> {
+    init_auth_config_with_public_key_and_revoked_kids_and_legacy_mode(key, revoked_kids, true)
+}
+
+pub fn init_auth_config_with_public_key_and_revoked_kids_and_legacy_mode(
+    key: &str,
+    revoked_kids: &[&str],
+    allow_legacy_no_kid: bool,
+) -> Result<(), String> {
     let mut keyset = PasetoKeyset::default_for_single_key();
     keyset.revoked_kids = revoked_kids.iter().map(|v| (*v).to_string()).collect();
+    keyset.allow_legacy_no_kid = allow_legacy_no_kid;
     init_auth_config_with_public_key_and_keyset(key, keyset)
 }
 
@@ -207,6 +220,17 @@ fn verify_paseto_v4_public_from_env(auth_header: &str) -> Result<TenantContext, 
     let public_key = PASETO_PUBLIC_KEY.get().ok_or(AuthError::Unauthorized)?;
     let keyset = PASETO_KEYSET.get().ok_or(AuthError::Unauthorized)?;
 
+    if has_legacy_paseto_layout(token) {
+        if !keyset.allow_legacy_no_kid {
+            tracing::warn!("PASETO footer.kid is required but missing");
+            return Err(AuthError::Unauthorized);
+        }
+        return verify_paseto_v4_public_token(token, public_key, None).map_err(|e| {
+            tracing::warn!("PASETO signature or claim validation failed");
+            e
+        });
+    }
+
     let (kid, footer_raw) = extract_footer_kid(token).map_err(|_| {
         tracing::warn!("PASETO footer missing or invalid");
         AuthError::Unauthorized
@@ -216,7 +240,7 @@ fn verify_paseto_v4_public_from_env(auth_header: &str) -> Result<TenantContext, 
         e
     })?;
 
-    verify_paseto_v4_public_token(token, public_key, &footer_raw).map_err(|e| {
+    verify_paseto_v4_public_token(token, public_key, Some(&footer_raw)).map_err(|e| {
         tracing::warn!("PASETO signature or claim validation failed");
         e
     })
@@ -228,7 +252,7 @@ fn verify_paseto_v4_public_from_env(auth_header: &str) -> Result<TenantContext, 
 fn verify_paseto_v4_public_token(
     token: &str,
     public_key_bytes: &[u8],
-    footer_raw: &str,
+    footer_raw: Option<&str>,
 ) -> Result<TenantContext, AuthError> {
     let key_array: [u8; 32] = public_key_bytes
         .try_into()
@@ -237,7 +261,9 @@ fn verify_paseto_v4_public_token(
     let key = PasetoAsymmetricPublicKey::<V4, Public>::from(&key_raw);
 
     let mut parser = PasetoParser::<V4, Public>::default();
-    parser.set_footer(Footer::from(footer_raw));
+    if let Some(raw) = footer_raw {
+        parser.set_footer(Footer::from(raw));
+    }
     let verified_payload: serde_json::Value = parser
         .parse(token, &key)
         .map_err(|_| AuthError::Unauthorized)?;
@@ -313,6 +339,21 @@ fn parse_kid_csv_env(key: &str) -> HashSet<String> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+fn parse_bool_env(key: &str, default: bool) -> bool {
+    match std::env::var(key) {
+        Ok(raw) => match raw.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" => true,
+            "0" | "false" | "no" | "off" => false,
+            _ => default,
+        },
+        Err(_) => default,
+    }
+}
+
+fn has_legacy_paseto_layout(token: &str) -> bool {
+    token.split('.').count() == 3
 }
 
 /// Pre-parses the PASETO v4.public token to extract kid from the footer.
@@ -426,8 +467,20 @@ mod tests {
         assert!(extract_footer_kid("v4.public.p").is_err()); // Missing footer segment
         assert!(extract_footer_kid("v4.public.p.f.extra").is_err()); // Too many segments
         assert!(extract_footer_kid("v4.public.p.!!!").is_err()); // Invalid b64
-        assert!(extract_footer_kid(&format!("v4.public.p.{}", URL_SAFE_NO_PAD.encode(r#"{"not_kid":"val"}"#))).is_err()); // Missing kid key
-        assert!(extract_footer_kid(&format!("v4.public.p.{}", URL_SAFE_NO_PAD.encode(r#"{"kid":" "}"#))).is_err()); // Empty kid
+        assert!(
+            extract_footer_kid(&format!(
+                "v4.public.p.{}",
+                URL_SAFE_NO_PAD.encode(r#"{"not_kid":"val"}"#)
+            ))
+            .is_err()
+        ); // Missing kid key
+        assert!(
+            extract_footer_kid(&format!(
+                "v4.public.p.{}",
+                URL_SAFE_NO_PAD.encode(r#"{"kid":" "}"#)
+            ))
+            .is_err()
+        ); // Empty kid
     }
 
     #[test]
@@ -470,6 +523,24 @@ mod tests {
                 assert_eq!(keyset.active_kid, "env-active");
                 assert!(keyset.revoked_kids.contains("r1"));
                 assert!(keyset.revoked_kids.contains("r2"));
+                assert!(keyset.allow_legacy_no_kid);
+            },
+        );
+    }
+
+    #[test]
+    fn test_parse_bool_env() {
+        temp_env::with_vars(
+            [
+                ("BOOL_TRUE", Some("true")),
+                ("BOOL_FALSE", Some("0")),
+                ("BOOL_INVALID", Some("wat")),
+            ],
+            || {
+                assert!(parse_bool_env("BOOL_TRUE", false));
+                assert!(!parse_bool_env("BOOL_FALSE", true));
+                assert!(parse_bool_env("BOOL_INVALID", true));
+                assert!(!parse_bool_env("BOOL_MISSING", false));
             },
         );
     }
