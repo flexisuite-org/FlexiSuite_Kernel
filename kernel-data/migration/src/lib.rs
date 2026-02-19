@@ -6,6 +6,7 @@ mod m20240216_000003_create_audit_tables;
 mod m20240520_000001_create_event_system;
 mod m20250521_000001_key_management;
 mod m20250627_000004_create_diagnostics;
+mod m20250627_000005_create_rbac;
 
 pub struct Migrator;
 
@@ -19,6 +20,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20240520_000001_create_event_system::Migration),
             Box::new(m20250521_000001_key_management::Migration),
             Box::new(m20250627_000004_create_diagnostics::Migration),
+            Box::new(m20250627_000005_create_rbac::Migration),
         ]
     }
 }
