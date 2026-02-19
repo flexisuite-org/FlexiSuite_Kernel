@@ -6,6 +6,8 @@ use sea_orm::{
 pub struct RBACRepository;
 
 impl RBACRepository {
+    // TODO: Add Redis caching for this query. This is a hot path (called on every request)
+    // and involves a 5-table join.
     pub async fn get_user_permissions(
         db: &impl ConnectionTrait,
         tenant_id: &str,
