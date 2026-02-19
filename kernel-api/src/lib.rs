@@ -22,6 +22,9 @@ pub mod diagnostics;
 pub mod middleware;
 pub mod profile;
 
+// Re-export entities from kernel-data for use in tests and other consumers
+pub use kernel_data::entities;
+
 #[derive(Serialize)]
 pub struct TestWriteResponse {
     pub action_id: String,

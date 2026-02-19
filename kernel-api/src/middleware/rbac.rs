@@ -57,6 +57,7 @@ pub async fn load_permissions_middleware(
 
     let mut permissions_set = HashSet::new();
     for p in permissions_list {
+        // Permission format: "resource:action" (e.g., "data:read")
         let perm_str = format!("{}:{}", p.resource, p.action);
         permissions_set.insert(perm_str);
     }
