@@ -53,3 +53,7 @@ impl DiagnosticPolicy {
         }
     }
 }
+
+pub fn is_diagnostics_enabled(policy: Option<&DiagnosticPolicy>) -> bool {
+    policy.map(|p| p.enabled).unwrap_or(false)
+}
