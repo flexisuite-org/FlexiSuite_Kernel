@@ -11,7 +11,6 @@ thiserror = "1.0"
 serde = { version = "1.0", features = ["derive"] }
 ring = "0.17"
 hex = "0.4"
-ed25519-dalek = { version = "2.1", features = ["std", "pem"] }
 # Exception (system-scoped only): KeyManager performs key lifecycle persistence.
 # Tenant-scoped data access must continue to go through kernel-data TenantContext APIs.
 kernel-data = { path = "../kernel-data" }

@@ -38,15 +38,16 @@ struct ManifestDigestPayload<'a> {
 
 impl RegistryStorage {
     pub fn new(store: Arc<dyn ObjectStore>, tenant_ctx: &TenantContext) -> Self {
-        // Default to loading from ops/trust/manifest_trust_root.json
-        let mut trust_path = std::path::PathBuf::from("ops/trust/manifest_trust_root.json");
+        // Allow override via env var for production config injection
+        let trust_path_str = std::env::var("MANIFEST_TRUST_ROOT_PATH")
+            .unwrap_or_else(|_| "ops/trust/manifest_trust_root.json".to_string());
 
+        let mut trust_path = std::path::PathBuf::from(&trust_path_str);
+
+        // Fallback logic for local development/testing from crate root
         if !trust_path.exists() {
              let cwd = std::env::current_dir().unwrap_or_default();
-             let abs = cwd.join(&trust_path);
-             eprintln!("CRITICAL: Trust root missing at {:?}. CWD: {:?}. Abs: {:?}", trust_path, cwd, abs);
-             // Verify if we are inside kernel-registry
-             if cwd.ends_with("kernel-registry") {
+             if cwd.ends_with("kernel-registry") && trust_path_str == "ops/trust/manifest_trust_root.json" {
                  let fallback = std::path::PathBuf::from("../ops/trust/manifest_trust_root.json");
                  if fallback.exists() {
                      eprintln!("Running inside kernel-registry, using fallback {:?}", fallback);
@@ -55,7 +56,6 @@ impl RegistryStorage {
              }
         }
 
-        // Try to load. If fail, we panic with detail.
         let trust_provider = FileTrustProvider::new(trust_path.clone())
             .expect(&format!("Failed to load trust root from {:?}. Security critical component missing.", trust_path));
 
