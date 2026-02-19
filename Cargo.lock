@@ -1448,10 +1448,15 @@ dependencies = [
  "anyhow",
  "async-trait",
  "axum",
+ "base64 0.22.1",
+ "chrono",
+ "ed25519-dalek",
  "http 1.4.0",
  "kernel-api",
  "kernel-core",
+ "rand 0.8.5",
  "reqwest",
+ "rusty_paseto",
  "sea-orm",
  "serde",
  "serde_json",
@@ -1462,6 +1467,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "url",
+ "uuid",
 ]
 
 [[package]]
@@ -2147,6 +2153,7 @@ checksum = "70e796c081cee67dc755e1a36a0a172b897fab85fc3f6bc48307991f64e4eca9"
 dependencies = [
  "curve25519-dalek",
  "ed25519",
+ "rand_core 0.6.4",
  "serde",
  "sha2",
  "subtle",
@@ -3347,6 +3354,7 @@ dependencies = [
  "serde_json",
  "serde_yaml",
  "sysinfo",
+ "temp-env",
  "tokio",
  "tower 0.4.13",
  "tower-http 0.5.2",
@@ -4837,9 +4845,9 @@ checksum = "b39cdef0fa800fc44525c84ccb54a029961a8215f9619753635a9c0d2538d46d"
 
 [[package]]
 name = "rusty_paseto"
-version = "0.7.2"
+version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "05501841a4cac5c065cb6a501a62207c4c235e37d2882579a2505a2aa2837826"
+checksum = "a61ebc4c4e058565285d54a1134a4f9f5d951ef901194c79437f3ee4f2538e49"
 dependencies = [
  "base64 0.22.1",
  "blake2",
@@ -4849,11 +4857,12 @@ dependencies = [
  "erased-serde",
  "hex",
  "iso8601",
- "rand_core 0.6.4",
+ "rand_core 0.9.5",
  "ring",
  "serde",
  "serde_json",
- "thiserror 1.0.69",
+ "subtle",
+ "thiserror 2.0.18",
  "time",
  "zeroize",
 ]
@@ -5846,6 +5855,15 @@ name = "target-lexicon"
 version = "0.13.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "adb6935a6f5c20170eeceb1a3835a49e12e19d792f6dd344ccc76a985ca5a6ca"
+
+[[package]]
+name = "temp-env"
+version = "0.3.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "96374855068f47402c3121c6eed88d29cb1de8f3ab27090e273e420bdabcf050"
+dependencies = [
+ "parking_lot",
+]
 
 [[package]]
 name = "tempfile"
