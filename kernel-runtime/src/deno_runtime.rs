@@ -256,7 +256,8 @@ impl SandboxRuntime for DenoSandbox {
                     eprintln!("Warning: CPU time limiting is not supported on this platform.");
                 }
 
-                let input_json = serde_json::to_string(&input).expect("serialize input JSON must not fail");
+                let input_json = serde_json::to_string(&input)
+                    .map_err(|e| SandboxError::RuntimeError(format!("failed to serialize input: {e}")))?;
                 let setup_code = format!("globalThis.INPUT = {};", input_json);
                 js_runtime
                     .execute_script("setup", setup_code)
