@@ -28,7 +28,7 @@ twox-hash = "2.1.2"
 
 [dev-dependencies]
 migration = { path = "./migration" }
-sea-orm-migration = "1.1.19"
+sea-orm-migration = { version = "1.1.19", default-features = false, features = ["sqlx-postgres", "runtime-tokio-rustls"] }
 tokio = { version = "1", features = ["full"] }
 testcontainers = "0.15"
 testcontainers-modules = { version = "0.3", features = ["postgres"] }
