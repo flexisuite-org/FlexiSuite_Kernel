@@ -231,19 +231,31 @@ fn verify_paseto_v4_public_from_env(auth_header: &str) -> Result<TenantContext, 
         });
     }
 
-    let (kid, footer_raw) = extract_footer_kid(token).map_err(|_| {
-        tracing::warn!("PASETO footer missing or invalid");
-        AuthError::Unauthorized
-    })?;
-    keyset.validate_token_kid(&kid).map_err(|e| {
-        tracing::warn!(kid = %kid, "PASETO kid rejected");
-        e
-    })?;
+    let res = extract_footer_kid(token);
+    match res {
+        Ok((kid, footer_raw)) => {
+            keyset.validate_token_kid(&kid).map_err(|e| {
+                tracing::warn!(kid = %kid, "PASETO kid rejected");
+                e
+            })?;
 
-    verify_paseto_v4_public_token(token, public_key, Some(&footer_raw)).map_err(|e| {
-        tracing::warn!("PASETO signature or claim validation failed");
-        e
-    })
+            verify_paseto_v4_public_token(token, public_key, Some(&footer_raw)).map_err(|e| {
+                tracing::warn!("PASETO signature or claim validation failed");
+                e
+            })
+        }
+        Err(_) if keyset.allow_legacy_no_kid => {
+            tracing::info!("PASETO footer.kid extraction failed, falling back to legacy mode");
+            verify_paseto_v4_public_token(token, public_key, None).map_err(|e| {
+                tracing::warn!("PASETO signature or claim validation failed in legacy mode");
+                e
+            })
+        }
+        Err(e) => {
+            tracing::warn!("PASETO footer missing or invalid, and legacy mode disabled");
+            Err(e)
+        }
+    }
 }
 
 /// Verifies a PASETO v4.public token using the provided public key.
@@ -343,11 +355,21 @@ fn parse_kid_csv_env(key: &str) -> HashSet<String> {
 
 fn parse_bool_env(key: &str, default: bool) -> bool {
     match std::env::var(key) {
-        Ok(raw) => match raw.trim().to_ascii_lowercase().as_str() {
-            "1" | "true" | "yes" | "on" => true,
-            "0" | "false" | "no" | "off" => false,
-            _ => default,
-        },
+        Ok(raw) => {
+            let trimmed = raw.trim().to_ascii_lowercase();
+            match trimmed.as_str() {
+                "1" | "true" | "yes" | "on" => true,
+                "0" | "false" | "no" | "off" => false,
+                _ => {
+                    tracing::warn!(
+                        key = %key,
+                        value = %raw,
+                        "Invalid boolean environment variable; failing closed (false)"
+                    );
+                    false
+                }
+            }
+        }
         Err(_) => default,
     }
 }
@@ -539,7 +561,8 @@ mod tests {
             || {
                 assert!(parse_bool_env("BOOL_TRUE", false));
                 assert!(!parse_bool_env("BOOL_FALSE", true));
-                assert!(parse_bool_env("BOOL_INVALID", true));
+                // Fail-closed: returns false on invalid input, NOT the provided default
+                assert!(!parse_bool_env("BOOL_INVALID", true));
                 assert!(!parse_bool_env("BOOL_MISSING", false));
             },
         );

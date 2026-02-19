@@ -106,12 +106,16 @@ impl Default for MiddlewareConfig {
 
         fn get_env_bool(key: &str, default_val: bool) -> bool {
             match std::env::var(key) {
-                Ok(v) => match v.to_ascii_lowercase().as_str() {
+                Ok(v) => match v.trim().to_ascii_lowercase().as_str() {
                     "1" | "true" | "yes" | "on" => true,
                     "0" | "false" | "no" | "off" => false,
                     _ => {
-                        tracing::warn!(key = %key, value = %v, "Invalid bool env var, using default");
-                        default_val
+                        tracing::warn!(
+                            key = %key,
+                            value = %v,
+                            "Invalid boolean environment variable; failing closed (false)"
+                        );
+                        false
                     }
                 },
                 Err(_) => default_val,
