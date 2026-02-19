@@ -1,9 +1,11 @@
 use crate::{RuntimeOptions, SandboxError, SandboxRuntime};
 use async_trait::async_trait;
 use deno_core::{JsRuntime, OpState, RuntimeOptions as DenoOptions, op2, v8};
+use libc::{clock_gettime, pthread_getcpuclockid, pthread_self, timespec};
 use std::io::{Error, ErrorKind};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::thread::JoinHandle;
 use std::time::Duration;
 
 pub struct DenoSandbox {
@@ -11,10 +13,38 @@ pub struct DenoSandbox {
 }
 
 const DEFAULT_MAX_OUTPUT_SIZE: usize = 1 << 20; // 1MB default hard cap
+const MIN_DENO_HEAP_LIMIT: usize = 16 * 1024 * 1024; // avoid V8 process-abort range for tiny heaps
 
 impl DenoSandbox {
     pub fn new(options: RuntimeOptions) -> Self {
         Self { options }
+    }
+}
+
+struct WatchdogGroup {
+    cancelled: Arc<AtomicBool>,
+    handles: Vec<JoinHandle<()>>,
+}
+
+impl WatchdogGroup {
+    fn new(cancelled: Arc<AtomicBool>) -> Self {
+        Self {
+            cancelled,
+            handles: Vec::new(),
+        }
+    }
+
+    fn spawn(&mut self, handle: JoinHandle<()>) {
+        self.handles.push(handle);
+    }
+}
+
+impl Drop for WatchdogGroup {
+    fn drop(&mut self) {
+        self.cancelled.store(true, Ordering::SeqCst);
+        for handle in self.handles.drain(..) {
+            let _ = handle.join();
+        }
     }
 }
 
@@ -29,10 +59,7 @@ struct OutputConfig {
 }
 
 #[op2(fast)]
-pub fn op_set_output(
-    state: &mut OpState,
-    #[string] json: String,
-) -> Result<(), Error> {
+pub fn op_set_output(state: &mut OpState, #[string] json: String) -> Result<(), Error> {
     if let Some(max_output_size) = state
         .try_borrow::<OutputConfig>()
         .and_then(|cfg| cfg.max_output_size)
@@ -50,6 +77,7 @@ pub fn op_set_output(
     }
 
     let value: serde_json::Value = serde_json::from_str(&json).map_err(|e| {
+        // Only log metadata and the error message to avoid leaking raw sandbox output
         eprintln!(
             "Failed to parse sandbox output JSON: {e}. Output length: {} bytes.",
             json.len()
@@ -62,6 +90,44 @@ pub fn op_set_output(
 }
 
 deno_core::extension!(sandbox_ext, ops = [op_set_output],);
+
+fn current_thread_cpu_clock_id() -> Result<libc::clockid_t, SandboxError> {
+    let mut clock_id: libc::clockid_t = 0;
+    // SAFETY: pthread_self returns the current thread handle, and clock_id is valid writable memory.
+    let rc = unsafe { pthread_getcpuclockid(pthread_self(), &mut clock_id) };
+    if rc != 0 {
+        return Err(SandboxError::RuntimeError(
+            format!(
+                "failed to resolve current thread CPU clock: {}",
+                std::io::Error::from_raw_os_error(rc)
+            ),
+        ));
+    }
+    Ok(clock_id)
+}
+
+fn thread_cpu_time(clock_id: libc::clockid_t) -> Result<Duration, SandboxError> {
+    let mut ts = std::mem::MaybeUninit::<timespec>::uninit();
+    // SAFETY: ts points to valid writable memory; clock_id was obtained via pthread_getcpuclockid.
+    let rc = unsafe { clock_gettime(clock_id, ts.as_mut_ptr()) };
+    if rc != 0 {
+        return Err(SandboxError::RuntimeError(
+            format!(
+                "failed to read thread CPU usage: {}",
+                std::io::Error::last_os_error()
+            ),
+        ));
+    }
+
+    // SAFETY: rc == 0 means ts is fully initialized by clock_gettime.
+    let ts = unsafe { ts.assume_init() };
+    if ts.tv_sec < 0 || ts.tv_nsec < 0 {
+        return Err(SandboxError::RuntimeError(
+            "thread CPU clock returned negative timestamp".to_string(),
+        ));
+    }
+    Ok(Duration::from_secs(ts.tv_sec as u64).saturating_add(Duration::from_nanos(ts.tv_nsec as u64)))
+}
 
 #[async_trait]
 impl SandboxRuntime for DenoSandbox {
@@ -80,6 +146,10 @@ impl SandboxRuntime for DenoSandbox {
         let code = code.to_string();
 
         let result = tokio::task::spawn_blocking(move || {
+            if options.memory_limit < MIN_DENO_HEAP_LIMIT {
+                return Err(SandboxError::MemoryLimitExceeded);
+            }
+
             // Reserve a bounded headroom within the configured limit so V8 can unwind safely
             // without allowing memory usage to exceed `options.memory_limit`.
             let near_heap_headroom = (options.memory_limit / 8).clamp(256 * 1024, 16 * 1024 * 1024);
@@ -111,11 +181,12 @@ impl SandboxRuntime for DenoSandbox {
 
                 let isolate_handle = js_runtime.v8_isolate().thread_safe_handle();
                 let wall_clock_limit = options.wall_clock_limit;
-                let cpu_wall_time_limit = options.cpu_time_limit;
+                let cpu_time_limit = options.cpu_time_limit;
                 let cancelled = Arc::new(AtomicBool::new(false));
                 let is_heap_oom = Arc::new(AtomicBool::new(false));
                 let is_wall_timeout = Arc::new(AtomicBool::new(false));
-                let is_cpu_wall_timeout = Arc::new(AtomicBool::new(false));
+                let is_cpu_timeout = Arc::new(AtomicBool::new(false));
+                let is_cpu_clock_failed = Arc::new(AtomicBool::new(false));
 
                 let near_heap_isolate = isolate_handle.clone();
                 let near_heap_flag = is_heap_oom.clone();
@@ -123,14 +194,13 @@ impl SandboxRuntime for DenoSandbox {
                     near_heap_flag.store(true, Ordering::SeqCst);
                     near_heap_isolate.terminate_execution();
                     current_limit
-                        .saturating_add(near_heap_headroom)
-                        .min(options.memory_limit)
                 });
 
+                let mut watchdogs = WatchdogGroup::new(cancelled.clone());
                 let watchdog_cancel = cancelled.clone();
                 let wall_timeout_flag = is_wall_timeout.clone();
                 let wall_isolate_handle = isolate_handle.clone();
-                std::thread::spawn(move || {
+                watchdogs.spawn(std::thread::spawn(move || {
                     let sleep_slice = Duration::from_millis(10);
                     let started = std::time::Instant::now();
                     while started.elapsed() < wall_clock_limit {
@@ -143,26 +213,36 @@ impl SandboxRuntime for DenoSandbox {
                         wall_timeout_flag.store(true, Ordering::SeqCst);
                         wall_isolate_handle.terminate_execution();
                     }
-                });
+                }));
 
                 let cpu_cancel = cancelled.clone();
-                let cpu_wall_timeout_flag = is_cpu_wall_timeout.clone();
+                let cpu_timeout_flag = is_cpu_timeout.clone();
+                let cpu_clock_failed_flag = is_cpu_clock_failed.clone();
                 let cpu_isolate_handle = isolate_handle.clone();
-                // This is a wall-clock timeout approximation, not actual CPU consumption metering; true CPU accounting is not implemented.
-                std::thread::spawn(move || {
+                let cpu_clock_id = current_thread_cpu_clock_id()?;
+                let cpu_start = thread_cpu_time(cpu_clock_id)?;
+                watchdogs.spawn(std::thread::spawn(move || {
                     let sleep_slice = Duration::from_millis(10);
-                    let started = std::time::Instant::now();
-                    while started.elapsed() < cpu_wall_time_limit {
+                    while !cpu_cancel.load(Ordering::SeqCst) {
+                        match thread_cpu_time(cpu_clock_id) {
+                            Ok(now) if now.saturating_sub(cpu_start) >= cpu_time_limit => {
+                                cpu_timeout_flag.store(true, Ordering::SeqCst);
+                                cpu_isolate_handle.terminate_execution();
+                                return;
+                            }
+                            Ok(_) => {}
+                            Err(_) => {
+                                cpu_clock_failed_flag.store(true, Ordering::SeqCst);
+                                cpu_isolate_handle.terminate_execution();
+                                return;
+                            }
+                        }
                         if cpu_cancel.load(Ordering::SeqCst) {
                             return;
                         }
                         std::thread::sleep(sleep_slice);
                     }
-                    if !cpu_cancel.load(Ordering::SeqCst) {
-                        cpu_wall_timeout_flag.store(true, Ordering::SeqCst);
-                        cpu_isolate_handle.terminate_execution();
-                    }
-                });
+                }));
 
                 let input_json = serde_json::to_string(&input).expect("serialize input JSON must not fail");
                 let setup_code = format!("globalThis.INPUT = {};", input_json);
@@ -214,7 +294,13 @@ impl SandboxRuntime for DenoSandbox {
                     return Err(SandboxError::MemoryLimitExceeded);
                 }
 
-                if is_cpu_wall_timeout.load(Ordering::SeqCst) {
+                if is_cpu_clock_failed.load(Ordering::SeqCst) {
+                    return Err(SandboxError::RuntimeError(
+                        "failed to enforce CPU limit due to thread CPU clock error".to_string(),
+                    ));
+                }
+
+                if is_cpu_timeout.load(Ordering::SeqCst) {
                     return Err(SandboxError::CpuLimitExceeded);
                 }
 
