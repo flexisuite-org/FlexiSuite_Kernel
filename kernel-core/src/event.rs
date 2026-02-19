@@ -155,10 +155,12 @@ pub fn compare_event_order(a: &EventEnvelope, b: &EventEnvelope) -> Option<Order
 ///
 /// Lifecycle/Contract:
 /// 1. GapDetected is emitted by the consumer logic when `delivery.seq > expected_seq`.
-/// 2. The event loop invokes `progress_gap_recovery` once per recovery attempt.
+/// 2. The event loop invokes `progress_gap_recovery` once per activity cycle when in a non-Normal state.
 /// 3. Recovering -> Normal transition ignores `outbox_has_missing_seq` under the assumption
-///    that the recovery poll itself either filled the gap or confirmed it's unrecoverable.
+///    that the recovery poll (invoked by the logic managing this FSM) has either filled the gap 
+///    by fetching missing events or confirmed the gap cannot be recovered from the source.
 /// 4. RebuildRequired is an absorbing state indicating manual intervention or full re-sync is needed.
+///    This occurs if a Gap is detected but the recovery source is empty or inaccessible.
 ///
 /// Example:
 /// ```
