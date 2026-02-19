@@ -303,24 +303,6 @@ impl SandboxRuntime for DenoSandbox {
 
                 cancelled.store(true, Ordering::SeqCst);
 
-                if is_heap_oom.load(Ordering::SeqCst) {
-                    return Err(SandboxError::MemoryLimitExceeded);
-                }
-
-                if is_cpu_clock_failed.load(Ordering::SeqCst) {
-                    return Err(SandboxError::RuntimeError(
-                        "failed to enforce CPU limit due to thread CPU clock error".to_string(),
-                    ));
-                }
-
-                if is_cpu_timeout.load(Ordering::SeqCst) {
-                    return Err(SandboxError::CpuLimitExceeded);
-                }
-
-                if is_wall_timeout.load(Ordering::SeqCst) {
-                    return Err(SandboxError::Timeout);
-                }
-
                 match execution_result {
                     Ok(()) => {
                         let op_state = js_runtime.op_state();
@@ -331,7 +313,27 @@ impl SandboxRuntime for DenoSandbox {
                             Ok(serde_json::Value::Null)
                         }
                     }
-                    Err(err) => Err(err),
+                    Err(err) => {
+                        if is_heap_oom.load(Ordering::SeqCst) {
+                            return Err(SandboxError::MemoryLimitExceeded);
+                        }
+
+                        if is_cpu_clock_failed.load(Ordering::SeqCst) {
+                            return Err(SandboxError::RuntimeError(
+                                "failed to enforce CPU limit due to thread CPU clock error".to_string(),
+                            ));
+                        }
+
+                        if is_cpu_timeout.load(Ordering::SeqCst) {
+                            return Err(SandboxError::CpuLimitExceeded);
+                        }
+
+                        if is_wall_timeout.load(Ordering::SeqCst) {
+                            return Err(SandboxError::Timeout);
+                        }
+
+                        Err(err)
+                    }
                 }
             })
         })
