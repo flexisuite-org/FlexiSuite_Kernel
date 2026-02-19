@@ -1,0 +1,6 @@
+[advisories]
+ignore = [
+  # Via migration/tooling path: sea-orm-migration -> sea-schema/sea-orm-cli -> sqlx-mysql -> rsa.
+  # Upstream advisory currently has no fixed upgrade available.
+  "RUSTSEC-2023-0071",
+]
