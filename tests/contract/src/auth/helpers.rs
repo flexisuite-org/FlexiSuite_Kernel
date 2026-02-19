@@ -1,8 +1,6 @@
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::{Duration, SecondsFormat, Utc};
-use kernel_api::auth::{
-    init_auth_config_with_public_key_and_revoked_kids_and_legacy_mode,
-};
+use kernel_api::auth::init_auth_config_with_public_key_and_revoked_kids_and_legacy_mode;
 use rusty_paseto::core::{Key, PasetoAsymmetricPrivateKey};
 use rusty_paseto::prelude::*;
 use std::sync::OnceLock;
@@ -16,30 +14,12 @@ pub fn setup() {
     let (_, pub_b64) = get_test_keypair();
     AUTH_INIT.get_or_init(|| {
         let _ = tracing_subscriber::fmt().with_test_writer().try_init();
-        if let Err(e1) = init_auth_config_with_public_key_and_revoked_kids_and_legacy_mode(
+        init_auth_config_with_public_key_and_revoked_kids_and_legacy_mode(
             &pub_b64,
             &["revoked"],
             false,
-        ) {
-            match init_auth_config_with_public_key_and_revoked_kids_and_legacy_mode(
-                &pub_b64,
-                &[],
-                false,
-            ) {
-                Ok(_) => {
-                    tracing::warn!(
-                        "init_auth_config_with_public_key_and_revoked_kids_and_legacy_mode failed (e: {}), but strict fallback init_auth_config_with_public_key_and_revoked_kids_and_legacy_mode succeeded",
-                        e1
-                    );
-                }
-                Err(e2) => {
-                    panic!(
-                        "Auth initialization failed.\nPrimary error: {}\nFallback error: {}",
-                        e1, e2
-                    );
-                }
-            }
-        }
+        )
+        .expect("Auth initialization failed");
     });
 }
 
