@@ -1,4 +1,3 @@
-use std::cmp::Ordering;
 use chrono::Utc;
 use kernel_core::auth::TenantId;
 use kernel_core::event::{

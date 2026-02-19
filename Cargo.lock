@@ -1218,7 +1218,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "axum",
- "base64 0.21.7",
+ "base64 0.22.1",
  "chrono",
  "ed25519-dalek",
  "http 1.4.0",

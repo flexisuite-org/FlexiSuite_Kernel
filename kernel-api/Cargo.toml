@@ -24,7 +24,7 @@ kernel-data = { path = "../kernel-data" }
 # Tracking: https://github.com/tokio-rs/tracing/issues/3455
 # Internal Tracking: https://github.com/flexisuite-org/FlexiSuite_Kernel/issues/25
 tracing = "=0.1.43"
-rusty_paseto = { version = "0.8", features = ["v4_public"] }
+rusty_paseto = { version = "=0.8.0", features = ["v4_public"] }
 chrono = { version = "0.4", features = ["serde"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 redis = { version = "1.0.3", features = ["aio", "connection-manager", "tokio-comp", "tokio-rustls-comp"] }

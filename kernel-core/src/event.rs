@@ -106,15 +106,7 @@ pub fn validate_order_mode_transition(
     next: &OrderMode,
 ) -> Result<(), EventError> {
     if let Some(existing_mode) = existing {
-        let existing_kind = match existing_mode {
-            OrderMode::Entity { .. } => "entity",
-            OrderMode::Causality { .. } => "causality",
-        };
-        let next_kind = match next {
-            OrderMode::Entity { .. } => "entity",
-            OrderMode::Causality { .. } => "causality",
-        };
-        if existing_kind != next_kind {
+        if std::mem::discriminant(existing_mode) != std::mem::discriminant(next) {
             return Err(EventError::Producer(
                 "mixed order_mode forbidden for same logical key".to_string(),
             ));
@@ -128,21 +120,21 @@ pub fn compare_event_order(a: &EventEnvelope, b: &EventEnvelope) -> Option<Order
         (
             OrderMode::Entity {
                 entity_id: aid,
-                seq: aseq,
+                seq: Some(aseq),
             },
             OrderMode::Entity {
                 entity_id: bid,
-                seq: bseq,
+                seq: Some(bseq),
             },
         ) if aid == bid => Some(aseq.cmp(bseq)),
         (
             OrderMode::Causality {
                 key: akey,
-                seq: aseq,
+                seq: Some(aseq),
             },
             OrderMode::Causality {
                 key: bkey,
-                seq: bseq,
+                seq: Some(bseq),
             },
         ) if akey == bkey => Some(aseq.cmp(bseq)),
         _ => None,
@@ -156,6 +148,7 @@ pub fn compare_event_order(a: &EventEnvelope, b: &EventEnvelope) -> Option<Order
 /// Lifecycle/Contract:
 /// 1. GapDetected is emitted by the consumer logic when `delivery.seq > expected_seq`.
 /// 2. The event loop invokes `progress_gap_recovery` once per activity cycle when in a non-Normal state.
+///    Invoking from Normal when `outbox_has_missing_seq` is false is treated as a no-op.
 /// 3. Recovering -> Normal transition ignores `outbox_has_missing_seq` under the assumption
 ///    that the recovery poll (invoked by the logic managing this FSM) has either filled the gap 
 ///    by fetching missing events or confirmed the gap cannot be recovered from the source.
@@ -180,7 +173,7 @@ pub fn progress_gap_recovery(
 ) -> GapRecoveryState {
     match (state, outbox_has_missing_seq) {
         (GapRecoveryState::Normal, true) => GapRecoveryState::Recovering,
-        (GapRecoveryState::Normal, false) => GapRecoveryState::RebuildRequired,
+        (GapRecoveryState::Normal, false) => GapRecoveryState::Normal,
         (GapRecoveryState::GapDetected, true) => GapRecoveryState::Recovering,
         (GapRecoveryState::GapDetected, false) => GapRecoveryState::RebuildRequired,
         (GapRecoveryState::Recovering, _) => GapRecoveryState::Normal,
@@ -356,10 +349,10 @@ mod tests {
 
     #[test]
     fn test_progress_gap_recovery_absorbing_states() {
-        // Normal false -> RebuildRequired
+        // Normal false -> Normal
         assert_eq!(
             progress_gap_recovery(GapRecoveryState::Normal, false),
-            GapRecoveryState::RebuildRequired
+            GapRecoveryState::Normal
         );
 
         // RebuildRequired is absorbing
@@ -379,5 +372,82 @@ mod tests {
         assert_eq!(state, GapRecoveryState::Recovering);
         let state = progress_gap_recovery(state, true);
         assert_eq!(state, GapRecoveryState::Normal);
+    }
+
+    #[test]
+    fn test_compare_event_order_edge_cases() {
+        let entity_id = Uuid::now_v7();
+        let tenant_id = TenantId::new("t1").unwrap();
+        let payload = Value::Null;
+        let created_at = Utc::now();
+        let event_type = "test".to_string();
+
+        let e_none = EventEnvelope {
+            event_id: Uuid::now_v7(),
+            tenant_id: tenant_id.clone(),
+            order_mode: OrderMode::Entity {
+                entity_id,
+                seq: None,
+            },
+            payload: payload.clone(),
+            created_at,
+            event_type: event_type.clone(),
+        };
+
+        let e_some1 = EventEnvelope {
+            event_id: Uuid::now_v7(),
+            tenant_id: tenant_id.clone(),
+            order_mode: OrderMode::Entity {
+                entity_id,
+                seq: Some(1),
+            },
+            payload: payload.clone(),
+            created_at,
+            event_type: event_type.clone(),
+        };
+
+        let e_some2 = EventEnvelope {
+            event_id: Uuid::now_v7(),
+            tenant_id: tenant_id.clone(),
+            order_mode: OrderMode::Entity {
+                entity_id,
+                seq: Some(2),
+            },
+            payload: payload.clone(),
+            created_at,
+            event_type: event_type.clone(),
+        };
+
+        // Same entity both None => None (incomparable)
+        assert_eq!(compare_event_order(&e_none, &e_none), None);
+
+        // Same entity one None one Some => None
+        assert_eq!(compare_event_order(&e_none, &e_some1), None);
+        assert_eq!(compare_event_order(&e_some1, &e_none), None);
+
+        // Same entity both Some => Some(Ordering)
+        assert_eq!(
+            compare_event_order(&e_some1, &e_some2),
+            Some(Ordering::Less)
+        );
+        assert_eq!(
+            compare_event_order(&e_some2, &e_some1),
+            Some(Ordering::Greater)
+        );
+
+        // Different entity => None
+        let other_id = Uuid::now_v7();
+        let e_other = EventEnvelope {
+            event_id: Uuid::now_v7(),
+            tenant_id,
+            order_mode: OrderMode::Entity {
+                entity_id: other_id,
+                seq: Some(1),
+            },
+            payload,
+            created_at,
+            event_type,
+        };
+        assert_eq!(compare_event_order(&e_some1, &e_other), None);
     }
 }
