@@ -15,6 +15,8 @@ pub struct WasmSandbox {
     watchdog: Option<(Arc<AtomicBool>, std::thread::JoinHandle<()>)>,
 }
 
+const DEFAULT_MAX_STDOUT: usize = 1 << 20; // 1MB default hard cap
+
 impl Drop for WasmSandbox {
     fn drop(&mut self) {
         if let Some((cancel, handle)) = self.watchdog.take() {
@@ -97,10 +99,8 @@ impl SandboxRuntime for WasmSandbox {
         wasmtime_wasi::p1::add_to_linker_async(&mut linker, |ctx: &mut Ctx| &mut ctx.wasi)
             .map_err(|e| SandboxError::InitError(e.to_string()))?;
 
-        let max_stdout = self.options.max_output_size;
-        let stdout_capacity = max_stdout
-            .map(|limit| limit.saturating_add(1))
-            .unwrap_or(usize::MAX);
+        let effective_max_stdout = self.options.max_output_size.unwrap_or(DEFAULT_MAX_STDOUT);
+        let stdout_capacity = effective_max_stdout.saturating_add(1);
         let stdout = MemoryOutputPipe::new(stdout_capacity);
         let input_json = serde_json::to_string(&input)
             .map_err(|e| SandboxError::RuntimeError(format!("failed to serialize input: {e}")))?;
@@ -202,12 +202,11 @@ impl SandboxRuntime for WasmSandbox {
             Ok(_) => {}
             Err(e) => {
                 stop_watchdog(self);
-                if let Some(max_stdout) = max_stdout {
-                    let message = e.to_string();
-                    if message.contains("write beyond capacity of MemoryOutputPipe") {
+                if let Some(msg) = e.downcast_ref::<Trap>().map(|t| t.to_string()).or_else(|| Some(e.to_string())) {
+                    if msg.contains("write beyond capacity of MemoryOutputPipe") {
                         return Err(SandboxError::RuntimeError(format!(
                             "stdout limit exceeded (max: {} bytes). Output may be truncated.",
-                            max_stdout
+                            effective_max_stdout
                         )));
                     }
                 }
@@ -224,12 +223,10 @@ impl SandboxRuntime for WasmSandbox {
         stop_watchdog(self);
 
         let stdout_bytes = store.data().stdout.contents();
-        if let Some(max_stdout) = max_stdout
-            && stdout_bytes.len() > max_stdout
-        {
+        if stdout_bytes.len() > effective_max_stdout {
             return Err(SandboxError::RuntimeError(format!(
                 "stdout limit exceeded (max: {} bytes). Output may be truncated.",
-                max_stdout
+                effective_max_stdout
             )));
         }
         let output = String::from_utf8(stdout_bytes.to_vec()).map_err(|e| {

@@ -362,11 +362,27 @@ async fn test_wasm_invalid_stdout_utf8() {
 async fn test_network_allowlist_rejection() {
     let mut options = RuntimeOptions::default();
     options.permissions.network_allowlist = vec!["https://example.com".to_string()];
-    let mut runtime = DenoSandbox::new(options);
+
+    // Test Deno rejection
+    let mut deno_runtime = DenoSandbox::new(options.clone());
     let code = "fetch('https://example.com')";
     let input = serde_json::Value::Null;
-    match runtime.execute(code, input).await {
+    match deno_runtime.execute(code, input.clone()).await {
         Err(SandboxError::PermissionDenied(_)) => {}
-        other => panic!("Expected PermissionDenied, got: {:?}", other),
+        other => panic!("Expected PermissionDenied for Deno, got: {:?}", other),
+    }
+
+    // Test Wasm rejection
+    let mut wasm_runtime = WasmSandbox::new(options).unwrap();
+    let wat = r#"
+    (module
+        (func (export "_start")
+            nop
+        )
+    )
+    "#;
+    match wasm_runtime.execute(wat, input).await {
+        Err(SandboxError::PermissionDenied(_)) => {}
+        other => panic!("Expected PermissionDenied for Wasm, got: {:?}", other),
     }
 }
