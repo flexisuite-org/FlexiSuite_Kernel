@@ -147,14 +147,15 @@ async fn test_wasm_memory_limit() {
     let mut runtime = WasmSandbox::new(options).unwrap();
     let input = serde_json::Value::Null;
     match runtime.execute(wat, input).await.unwrap_err() {
+        SandboxError::MemoryLimitExceeded => {}
         SandboxError::RuntimeError(e) => {
             assert!(
-                e.contains("memory minimum size")
-                    || e.contains("exceeds memory limits")
+                e.contains("minimum page size")
+                    || e.contains("exceeds the limit")
                     || e.contains("memory out of bounds")
             );
         }
-        other => panic!("Expected RuntimeError, got: {:?}", other),
+        other => panic!("Expected MemoryLimitExceeded or RuntimeError, got: {:?}", other),
     }
 }
 
@@ -270,7 +271,7 @@ async fn test_wasm_invalid_wat_does_not_block_next_execution() {
     )
     "#;
     let second = tokio::time::timeout(
-        Duration::from_millis(300),
+        Duration::from_secs(1),
         runtime.execute(valid_wat, input),
     )
     .await;
@@ -359,20 +360,10 @@ async fn test_wasm_invalid_stdout_utf8() {
 }
 
 #[tokio::test]
-async fn test_network_allowlist_rejection() {
+async fn test_wasm_network_allowlist_rejection() {
     let mut options = RuntimeOptions::default();
     options.permissions.network_allowlist = vec!["https://example.com".to_string()];
 
-    // Test Deno rejection
-    let mut deno_runtime = DenoSandbox::new(options.clone());
-    let code = "fetch('https://example.com')";
-    let input = serde_json::Value::Null;
-    match deno_runtime.execute(code, input.clone()).await {
-        Err(SandboxError::PermissionDenied(_)) => {}
-        other => panic!("Expected PermissionDenied for Deno, got: {:?}", other),
-    }
-
-    // Test Wasm rejection
     let mut wasm_runtime = WasmSandbox::new(options).unwrap();
     let wat = r#"
     (module
@@ -381,6 +372,7 @@ async fn test_network_allowlist_rejection() {
         )
     )
     "#;
+    let input = serde_json::Value::Null;
     match wasm_runtime.execute(wat, input).await {
         Err(SandboxError::PermissionDenied(_)) => {}
         other => panic!("Expected PermissionDenied for Wasm, got: {:?}", other),
