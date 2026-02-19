@@ -5,3 +5,8 @@ pub mod entity_history;
 pub mod entity_record;
 pub mod key_record;
 pub mod prelude;
+pub mod role;
+pub mod permission;
+pub mod group;
+pub mod group_member;
+pub mod group_role;

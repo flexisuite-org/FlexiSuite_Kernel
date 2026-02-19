@@ -14,7 +14,7 @@ use uuid::Uuid;
 use crate::auth::{TenantContext, auth_middleware};
 use crate::middleware::{
     ActionStatus, MiddlewareConfig, MiddlewareState, get_action, idempotency_middleware,
-    quota_middleware, record_action,
+    quota_middleware, record_action, load_permissions_middleware, require_permission,
 };
 
 pub mod auth;
@@ -54,11 +54,13 @@ pub fn build_app_with_state(
     let protected_router = Router::new()
         .route("/test", post(write_test).put(write_test))
         .route("/actions/:action_id", get(get_action_status))
+        .route("/test/protected", get(|| async { "Access Granted" }).layer(from_fn(|req, next| require_permission("test:read", req, next))))
         // Diagnostics routes under /api/v1/diagnostics
         .nest("/api/v1/diagnostics", diagnostics::routes())
-        // Outermost applied last: Auth -> Idempotency -> Quota
+        // Outermost applied last: Auth -> Permissions -> Idempotency -> Quota
         .layer(from_fn(quota_middleware))
         .layer(from_fn(idempotency_middleware))
+        .layer(from_fn(load_permissions_middleware))
         .layer(from_fn_with_state(db.clone(), auth_middleware));
 
     (

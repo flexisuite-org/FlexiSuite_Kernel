@@ -4,3 +4,8 @@ pub use super::diagnostic_report::Entity as DiagnosticReport;
 pub use super::entity_history::Entity as EntityHistory;
 pub use super::entity_record::Entity as EntityRecord;
 pub use super::key_record::Entity as KeyRecord;
+pub use super::role::Entity as Role;
+pub use super::permission::Entity as Permission;
+pub use super::group::Entity as Group;
+pub use super::group_member::Entity as GroupMember;
+pub use super::group_role::Entity as GroupRole;

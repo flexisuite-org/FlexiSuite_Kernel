@@ -1316,6 +1316,7 @@ dependencies = [
  "http 1.4.0",
  "kernel-api",
  "kernel-core",
+ "kernel-data",
  "rand 0.8.5",
  "reqwest",
  "rusty_paseto",

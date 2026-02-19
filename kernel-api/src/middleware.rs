@@ -1582,11 +1582,6 @@ pub async fn idempotency_middleware(
         idempotency_key: idempotency_key.clone(),
     };
 
-    // Body hash MUST be derived from the actual request body.
-    // DoS Protection: Limit body size
-    // Note: This forces buffering. For streams > 10MB, Idempotency is not supported by this middleware.
-
-    // Check Store
     let state = parts
         .extensions
         .get::<MiddlewareState>()
@@ -1755,8 +1750,6 @@ pub async fn idempotency_middleware(
             .await
             .is_err()
         {
-            // Release the IN_FLIGHT key immediately so concurrent waiters fail fast
-            // rather than waiting for TTL expiry.
             let _ = store.release_inflight(&scope_key, &lease).await;
             error!("Failed to complete idempotency record");
         }
@@ -1765,6 +1758,73 @@ pub async fn idempotency_middleware(
 
     let _ = store.release_inflight(&scope_key, &lease).await;
     Ok(response)
+}
+
+pub async fn quota_middleware(req: Request<Body>, next: Next) -> Result<Response, Response> {
+    let (parts, body) = req.into_parts();
+
+    let tenant_ctx = match parts.extensions.get::<TenantContext>() {
+        Some(ctx) => ctx,
+        None => {
+            warn!("Quota middleware missing TenantContext");
+            return Ok(StatusCode::UNAUTHORIZED.into_response());
+        }
+    };
+
+    let state = match parts.extensions.get::<MiddlewareState>() {
+        Some(s) => s,
+        None => {
+            error!("MiddlewareState missing");
+            return Ok(StatusCode::INTERNAL_SERVER_ERROR.into_response());
+        }
+    };
+
+    #[cfg(any(test, feature = "test-utils"))]
+    {
+        if parts.headers.contains_key("X-Mock-Quota-System") {
+            let violation = QuotaViolation {
+                layer: QuotaLayer::SystemHardLimit,
+                retry_after_s: 100,
+            };
+            warn!("System Hard Limit exceeded (Mock)");
+            return Err(violation_to_response(&violation));
+        }
+
+        if parts.headers.contains_key("X-Mock-Quota-Tenant") {
+            let violation = QuotaViolation {
+                layer: QuotaLayer::TenantBudget,
+                retry_after_s: 5,
+            };
+            warn!("Tenant Budget exceeded (Mock)");
+            return Err(violation_to_response(&violation));
+        }
+
+        if parts.headers.contains_key("X-Mock-Quota-Api") {
+            let violation = QuotaViolation {
+                layer: QuotaLayer::ApiRateLimit,
+                retry_after_s: 60,
+            };
+            warn!("API Rate Limit exceeded (Mock)");
+            return Err(violation_to_response(&violation));
+        }
+    }
+
+    if let Err(v) = state
+        .quota_store
+        .check_and_update_multi(
+            tenant_ctx.tenant_id(),
+            &[
+                QuotaLayer::SystemHardLimit,
+                QuotaLayer::TenantBudget,
+                QuotaLayer::ApiRateLimit,
+            ],
+        )
+        .await
+    {
+        return Err(violation_to_response(&v));
+    }
+
+    Ok(next.run(Request::from_parts(parts, body)).await)
 }
 
 fn compute_body_hash(body: &[u8]) -> String {
@@ -1838,73 +1898,6 @@ fn build_replay_response(record: &IdempotencyRecord) -> Response {
     res
 }
 
-pub async fn quota_middleware(req: Request<Body>, next: Next) -> Result<Response, Response> {
-    let (parts, body) = req.into_parts();
-
-    let tenant_ctx = match parts.extensions.get::<TenantContext>() {
-        Some(ctx) => ctx,
-        None => {
-            warn!("Quota middleware missing TenantContext");
-            return Ok(StatusCode::UNAUTHORIZED.into_response());
-        }
-    };
-
-    let state = match parts.extensions.get::<MiddlewareState>() {
-        Some(s) => s,
-        None => {
-            error!("MiddlewareState missing");
-            return Ok(StatusCode::INTERNAL_SERVER_ERROR.into_response());
-        }
-    };
-
-    #[cfg(any(test, feature = "test-utils"))]
-    {
-        if parts.headers.contains_key("X-Mock-Quota-System") {
-            let violation = QuotaViolation {
-                layer: QuotaLayer::SystemHardLimit,
-                retry_after_s: 100,
-            };
-            warn!("System Hard Limit exceeded (Mock)");
-            return Err(violation_to_response(&violation));
-        }
-
-        if parts.headers.contains_key("X-Mock-Quota-Tenant") {
-            let violation = QuotaViolation {
-                layer: QuotaLayer::TenantBudget,
-                retry_after_s: 5,
-            };
-            warn!("Tenant Budget exceeded (Mock)");
-            return Err(violation_to_response(&violation));
-        }
-
-        if parts.headers.contains_key("X-Mock-Quota-Api") {
-            let violation = QuotaViolation {
-                layer: QuotaLayer::ApiRateLimit,
-                retry_after_s: 60,
-            };
-            warn!("API Rate Limit exceeded (Mock)");
-            return Err(violation_to_response(&violation));
-        }
-    }
-
-    if let Err(v) = state
-        .quota_store
-        .check_and_update_multi(
-            tenant_ctx.tenant_id(),
-            &[
-                QuotaLayer::SystemHardLimit,
-                QuotaLayer::TenantBudget,
-                QuotaLayer::ApiRateLimit,
-            ],
-        )
-        .await
-    {
-        return Err(violation_to_response(&v));
-    }
-
-    Ok(next.run(Request::from_parts(parts, body)).await)
-}
-
 fn response_not_cacheable_for_replay(headers: &HeaderMap, max_size: usize) -> bool {
     headers
         .get(CONTENT_LENGTH)
@@ -1956,3 +1949,6 @@ pub fn violation_to_response(v: &QuotaViolation) -> Response {
 
     res
 }
+
+pub mod rbac;
+pub use rbac::{load_permissions_middleware, require_permission, UserPermissions};
