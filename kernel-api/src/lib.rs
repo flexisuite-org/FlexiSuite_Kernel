@@ -2,7 +2,7 @@ use axum::{
     Json, Router,
     extract::{Extension, Path},
     http::{HeaderName, HeaderValue, StatusCode},
-    middleware::from_fn,
+    middleware::{from_fn, from_fn_with_state},
     routing::{get, post},
 };
 use sea_orm::DatabaseConnection;
@@ -37,7 +37,7 @@ pub struct ActionStatusResponse {
 
 pub async fn build_app(
     config: MiddlewareConfig,
-    db: DatabaseConnection,
+    db: Arc<DatabaseConnection>,
 ) -> Result<(Router, JoinHandle<()>), String> {
     let state = MiddlewareState::new(config).await?;
     Ok(build_app_with_state(state, db))
@@ -45,7 +45,7 @@ pub async fn build_app(
 
 pub fn build_app_with_state(
     state: MiddlewareState,
-    db: DatabaseConnection,
+    db: Arc<DatabaseConnection>,
 ) -> (Router, JoinHandle<()>) {
     let cleanup_handle = state.start_cleanup_task();
 
@@ -59,14 +59,13 @@ pub fn build_app_with_state(
         // Outermost applied last: Auth -> Idempotency -> Quota
         .layer(from_fn(quota_middleware))
         .layer(from_fn(idempotency_middleware))
-        .layer(from_fn(auth_middleware));
+        .layer(from_fn_with_state(db.clone(), auth_middleware));
 
     (
         Router::new()
             .merge(public_router)
             .merge(protected_router)
-            .layer(Extension(state))
-            .layer(Extension(Arc::new(db))), // Inject DB connection
+            .layer(Extension(state)),
         cleanup_handle,
     )
 }
@@ -99,7 +98,7 @@ pub async fn write_test(
         [
             (
                 HeaderName::from_static("x-action-id"),
-                HeaderValue::from_str(&action_id).unwrap(),
+                HeaderValue::from_str(&action_id).expect("UUID v7 is valid ASCII"),
             ),
             (
                 HeaderName::from_static("x-result-version"),
