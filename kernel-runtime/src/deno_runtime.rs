@@ -10,6 +10,8 @@ pub struct DenoSandbox {
     options: RuntimeOptions,
 }
 
+const DEFAULT_MAX_OUTPUT_SIZE: usize = 1 << 20; // 1MB default hard cap
+
 impl DenoSandbox {
     pub fn new(options: RuntimeOptions) -> Self {
         Self { options }
@@ -122,7 +124,7 @@ impl SandboxRuntime for DenoSandbox {
                     ..Default::default()
                 });
                 js_runtime.op_state().borrow_mut().put(OutputConfig {
-                    max_output_size: options.max_output_size,
+                    max_output_size: Some(options.max_output_size.unwrap_or(DEFAULT_MAX_OUTPUT_SIZE)),
                 });
 
                 let isolate_handle = js_runtime.v8_isolate().thread_safe_handle();
