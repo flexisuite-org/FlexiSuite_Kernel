@@ -19,14 +19,18 @@ const DEFAULT_MAX_STDOUT: usize = 1 << 20; // 1MB default hard cap
 
 impl Drop for WasmSandbox {
     fn drop(&mut self) {
+        self.stop_watchdog();
+    }
+}
+
+impl WasmSandbox {
+    fn stop_watchdog(&mut self) {
         if let Some((cancel, handle)) = self.watchdog.take() {
             cancel.store(true, Ordering::SeqCst);
             let _ = handle.join();
         }
     }
-}
 
-impl WasmSandbox {
     pub fn new(options: RuntimeOptions) -> Result<Self, SandboxError> {
         let mut config = Config::new();
         config.async_support(true);
@@ -87,10 +91,7 @@ impl SandboxRuntime for WasmSandbox {
             ));
         }
 
-        if let Some((cancel, handle)) = self.watchdog.take() {
-            cancel.store(true, Ordering::SeqCst);
-            let _ = handle.join();
-        }
+        self.stop_watchdog();
         let started_at = Instant::now();
 
         let mut linker = Linker::new(&self.engine);
@@ -134,13 +135,6 @@ impl SandboxRuntime for WasmSandbox {
             .map_err(|e| SandboxError::InitError(e.to_string()))?;
         store.set_epoch_deadline(1);
         store.epoch_deadline_trap();
-
-        let stop_watchdog = |s: &mut Self| {
-            if let Some((cancel, handle)) = s.watchdog.take() {
-                cancel.store(true, Ordering::SeqCst);
-                let _ = handle.join();
-            }
-        };
 
         let compile_budget = self
             .options
@@ -197,7 +191,7 @@ impl SandboxRuntime for WasmSandbox {
         let instance = match linker.instantiate_async(&mut store, &module).await {
             Ok(instance) => instance,
             Err(e) => {
-                stop_watchdog(self);
+                self.stop_watchdog();
                 return Err(map_wasm_error(e));
             }
         };
@@ -205,7 +199,7 @@ impl SandboxRuntime for WasmSandbox {
         let start = match instance.get_typed_func::<(), ()>(&mut store, "_start") {
             Ok(start) => start,
             Err(e) => {
-                stop_watchdog(self);
+                self.stop_watchdog();
                 return Err(map_wasm_error(e));
             }
         };
@@ -215,7 +209,7 @@ impl SandboxRuntime for WasmSandbox {
         match execution.await {
             Ok(_) => {}
             Err(e) => {
-                stop_watchdog(self);
+                self.stop_watchdog();
                 let mapped = map_wasm_error(e);
                 if matches!(mapped, SandboxError::RuntimeError(_)) {
                     if is_wall_timeout.load(Ordering::SeqCst) {
@@ -226,7 +220,7 @@ impl SandboxRuntime for WasmSandbox {
             }
         }
 
-        stop_watchdog(self);
+        self.stop_watchdog();
 
         let stdout_bytes = store.data().stdout.contents();
         if stdout_bytes.len() > effective_max_stdout {
