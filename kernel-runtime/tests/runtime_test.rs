@@ -85,6 +85,28 @@ async fn test_wasm_timeout() {
 }
 
 #[tokio::test]
+async fn test_wasm_zero_wall_clock_limit_times_out_before_compile() {
+    let wat = r#"
+    (module
+        (func (export "_start")
+            nop
+        )
+    )
+    "#;
+    let mut options = RuntimeOptions::default();
+    options.wall_clock_limit = Duration::ZERO;
+    let mut runtime = WasmSandbox::new(options).unwrap();
+    let input = serde_json::Value::Null;
+    match runtime.execute(wat, input).await {
+        Err(SandboxError::Timeout) => {}
+        other => panic!(
+            "Expected Timeout for zero wall clock limit, got: {:?}",
+            other
+        ),
+    }
+}
+
+#[tokio::test]
 async fn test_deno_memory_limit() {
     let mut options = RuntimeOptions::default();
     options.memory_limit = 8 * 1024 * 1024;
@@ -155,7 +177,10 @@ async fn test_wasm_memory_limit() {
                     || e.contains("memory out of bounds")
             );
         }
-        other => panic!("Expected MemoryLimitExceeded or RuntimeError, got: {:?}", other),
+        other => panic!(
+            "Expected MemoryLimitExceeded or RuntimeError, got: {:?}",
+            other
+        ),
     }
 }
 
@@ -270,11 +295,8 @@ async fn test_wasm_invalid_wat_does_not_block_next_execution() {
         )
     )
     "#;
-    let second = tokio::time::timeout(
-        Duration::from_secs(1),
-        runtime.execute(valid_wat, input),
-    )
-    .await;
+    let second =
+        tokio::time::timeout(Duration::from_secs(1), runtime.execute(valid_wat, input)).await;
     assert!(
         second.is_ok(),
         "second execution timed out, watchdog cleanup may be leaking between runs"

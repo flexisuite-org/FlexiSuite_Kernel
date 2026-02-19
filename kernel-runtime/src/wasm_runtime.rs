@@ -3,7 +3,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use wasmtime::{Config, Engine, Linker, Module, Store, StoreLimits, StoreLimitsBuilder, Trap};
 use wasmtime_wasi::WasiCtxBuilder;
 use wasmtime_wasi::p1::WasiP1Ctx;
@@ -91,6 +91,7 @@ impl SandboxRuntime for WasmSandbox {
             cancel.store(true, Ordering::SeqCst);
             let _ = handle.join();
         }
+        let started_at = Instant::now();
 
         let mut linker = Linker::new(&self.engine);
 
@@ -133,16 +134,54 @@ impl SandboxRuntime for WasmSandbox {
             .map_err(|e| SandboxError::InitError(e.to_string()))?;
         store.set_epoch_deadline(1);
         store.epoch_deadline_trap();
+
+        let stop_watchdog = |s: &mut Self| {
+            if let Some((cancel, handle)) = s.watchdog.take() {
+                cancel.store(true, Ordering::SeqCst);
+                let _ = handle.join();
+            }
+        };
+
+        let compile_budget = self
+            .options
+            .wall_clock_limit
+            .checked_sub(started_at.elapsed())
+            .unwrap_or(Duration::ZERO);
+        if compile_budget.is_zero() {
+            return Err(SandboxError::Timeout);
+        }
+
+        let compile_engine = self.engine.clone();
+        let compile_code = code.to_string();
+        // Do not return early on compile timeout while leaving a blocking compile thread running.
+        // We always await compile completion, then apply wall-clock budget checks.
+        let module = match tokio::task::spawn_blocking(move || Module::new(&compile_engine, compile_code)).await
+        {
+            Ok(Ok(module)) => module,
+            Ok(Err(e)) => return Err(map_wasm_error(e.into())),
+            Err(e) => return Err(SandboxError::RuntimeError(e.to_string())),
+        };
+        if started_at.elapsed() >= self.options.wall_clock_limit {
+            return Err(SandboxError::Timeout);
+        }
+
+        let execute_budget = self
+            .options
+            .wall_clock_limit
+            .checked_sub(started_at.elapsed())
+            .unwrap_or(Duration::ZERO);
+        if execute_budget.is_zero() {
+            return Err(SandboxError::Timeout);
+        }
         let engine_clone = self.engine.clone();
-        let timeout = self.options.wall_clock_limit;
         let cancel_watchdog = Arc::new(AtomicBool::new(false));
         let is_wall_timeout = Arc::new(AtomicBool::new(false));
         let watchdog_cancel = cancel_watchdog.clone();
         let wall_timeout_flag = is_wall_timeout.clone();
         let watchdog_handle = std::thread::spawn(move || {
             let sleep_slice = Duration::from_millis(10);
-            let started = std::time::Instant::now();
-            while started.elapsed() < timeout {
+            let started = Instant::now();
+            while started.elapsed() < execute_budget {
                 if watchdog_cancel.load(Ordering::SeqCst) {
                     return;
                 }
@@ -154,30 +193,6 @@ impl SandboxRuntime for WasmSandbox {
             }
         });
         self.watchdog = Some((cancel_watchdog, watchdog_handle));
-
-        let stop_watchdog = |s: &mut Self| {
-            if let Some((cancel, handle)) = s.watchdog.take() {
-                cancel.store(true, Ordering::SeqCst);
-                let _ = handle.join();
-            }
-        };
-
-        let compile_engine = self.engine.clone();
-        let compile_code = code.to_string();
-        let module =
-            match tokio::task::spawn_blocking(move || Module::new(&compile_engine, compile_code))
-                .await
-            {
-                Ok(Ok(module)) => module,
-                Ok(Err(e)) => {
-                    stop_watchdog(self);
-                    return Err(map_wasm_error(e.into()));
-                }
-                Err(e) => {
-                    stop_watchdog(self);
-                    return Err(SandboxError::RuntimeError(e.to_string()));
-                }
-            };
 
         let instance = match linker.instantiate_async(&mut store, &module).await {
             Ok(instance) => instance,

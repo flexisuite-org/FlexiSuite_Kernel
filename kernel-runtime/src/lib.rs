@@ -24,6 +24,11 @@ pub enum SandboxError {
 #[derive(Debug, Clone)]
 pub struct RuntimeOptions {
     pub memory_limit: usize, // bytes
+    /// CPU budget for sandbox execution.
+    ///
+    /// Runtime-specific notes:
+    /// - Wasm: enforced via wasmtime fuel.
+    /// - Deno: enforced via process CPU time sampling.
     pub cpu_time_limit: Duration,
     pub wall_clock_limit: Duration,
     pub permissions: Permissions,
@@ -42,6 +47,7 @@ impl Default for RuntimeOptions {
     }
 }
 
+/// Permissions settings for the sandbox.
 #[derive(Debug, Clone, Default)]
 pub struct Permissions {
     /// URL prefixes or domains for network access.
