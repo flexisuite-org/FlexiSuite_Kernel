@@ -41,7 +41,6 @@ async fn test_idempotency_loop_limit() {
 
     let mut set = JoinSet::new();
     let num_requests = 20;
-
     let tenant_ctx = TenantContext::new(
         TenantId::new("tenant-1").unwrap(),
         Some(UserId::new("user-1").unwrap()),
