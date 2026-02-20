@@ -3252,13 +3252,16 @@ dependencies = [
 name = "kernel-registry"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "bytes",
  "hex",
  "kernel-core",
  "object_store",
+ "ring",
  "serde",
  "serde_json",
  "sha2",
+ "temp-env",
  "tempfile",
  "thiserror 1.0.69",
  "tokio",

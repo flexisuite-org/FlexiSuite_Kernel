@@ -1,9 +1,12 @@
 use crate::error::RegistryError;
 use crate::model::{Dependencies, DistManifest, Kind, Route};
+use base64::Engine;
+use base64::prelude::BASE64_URL_SAFE_NO_PAD;
 use bytes::Bytes;
 use kernel_core::auth::TenantContext;
 use object_store::ObjectStore;
 use object_store::path::Path;
+use ring::signature;
 use serde::Serialize;
 use sha2::{Digest, Sha384};
 use std::collections::BTreeMap;
@@ -169,6 +172,52 @@ impl RegistryStorage {
         }
     }
 
+    fn verify_signature(kid: &str, digest: &str, signature: &str) -> Result<(), RegistryError> {
+        // 1. Resolve Public Key
+        // Normalize kid for env var lookup (e.g., "my-key" -> "MY_KEY")
+        let normalized_kid = kid
+            .chars()
+            .map(|ch| {
+                if ch.is_ascii_alphanumeric() {
+                    ch.to_ascii_uppercase()
+                } else {
+                    '_'
+                }
+            })
+            .collect::<String>();
+        let env_key = format!("FLEXI_REGISTRY_TRUST_ROOT_KEY_B64URL_{}", normalized_kid);
+        let key_b64 = std::env::var(&env_key).map_err(|_| {
+            warn!(kid = %kid, env_var = %env_key, "Trust root key not found");
+            RegistryError::KeyNotFound(format!("Public key for kid '{kid}' not found"))
+        })?;
+
+        // 2. Decode Public Key
+        let public_key_bytes = BASE64_URL_SAFE_NO_PAD.decode(&key_b64).map_err(|e| {
+            warn!(kid = %kid, "Invalid base64 public key");
+            RegistryError::SignatureVerificationFailed(format!(
+                "Invalid public key encoding: {e}"
+            ))
+        })?;
+
+        // 3. Decode Signature
+        let signature_bytes = BASE64_URL_SAFE_NO_PAD.decode(signature).map_err(|e| {
+            warn!(kid = %kid, "Invalid base64 signature");
+            RegistryError::SignatureVerificationFailed(format!("Invalid signature encoding: {e}"))
+        })?;
+
+        // 4. Verify (Ed25519)
+        let peer_public_key =
+            signature::UnparsedPublicKey::new(&signature::ED25519, public_key_bytes);
+
+        // We verify the signature against the digest string bytes
+        peer_public_key
+            .verify(digest.as_bytes(), &signature_bytes)
+            .map_err(|_| {
+                warn!(kid = %kid, digest = %digest, "Signature verification failed");
+                RegistryError::SignatureVerificationFailed("Invalid signature".to_string())
+            })
+    }
+
     /// Saves binary data and returns the SHA-384 digest (hex string).
     #[instrument(skip(self, data), fields(tenant = %self.tenant_id, artifact = %key))]
     pub async fn save_artifact(&self, key: &str, data: Bytes) -> Result<String, RegistryError> {
@@ -257,6 +306,14 @@ impl RegistryStorage {
         // manifest_digest is computed from the manifest with the entire
         // security section excluded from the hashed payload.
         let computed_digest = Self::manifest_payload_digest(manifest)?;
+
+        // Verify signature BEFORE accepting/persisting
+        Self::verify_signature(
+            &manifest.security.manifest_signature_kid,
+            &computed_digest,
+            &manifest.security.manifest_signature,
+        )?;
+
         let mut persisted = manifest.clone();
         persisted.security.manifest_digest = computed_digest.clone();
 
