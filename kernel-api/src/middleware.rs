@@ -1512,7 +1512,7 @@ struct IdempotencyError {
     error: String,
 }
 
-fn build_idempotency_error(status: StatusCode, message: &str) -> Response {
+fn build_json_error_response(status: StatusCode, message: &str) -> Response {
     (
         status,
         Json(IdempotencyError {
@@ -1553,7 +1553,7 @@ pub async fn idempotency_middleware(req: Request<Body>, next: Next) -> Result<Re
                 Ok(k) => k,
                 Err(_) => {
                     warn!("Invalid Idempotency-Key encoding");
-                    return Err(build_idempotency_error(
+                    return Err(build_json_error_response(
                         StatusCode::BAD_REQUEST,
                         "Invalid Idempotency-Key encoding",
                     ));
@@ -1561,7 +1561,7 @@ pub async fn idempotency_middleware(req: Request<Body>, next: Next) -> Result<Re
             };
             if validate_idempotency_key(key).is_err() {
                 warn!(key = %key, "Invalid Idempotency-Key format");
-                return Err(build_idempotency_error(
+                return Err(build_json_error_response(
                     StatusCode::BAD_REQUEST,
                     "Invalid Idempotency-Key format",
                 ));
@@ -1575,7 +1575,7 @@ pub async fn idempotency_middleware(req: Request<Body>, next: Next) -> Result<Re
                 || method == Method::PATCH
             {
                 warn!(method = %method, "Missing Idempotency-Key for write operation");
-                return Err(build_idempotency_error(
+                return Err(build_json_error_response(
                     StatusCode::BAD_REQUEST,
                     "Missing Idempotency-Key for write operation",
                 ));
@@ -1589,7 +1589,7 @@ pub async fn idempotency_middleware(req: Request<Body>, next: Next) -> Result<Re
         .get::<TenantContext>()
         .ok_or_else(|| {
             warn!("Idempotency middleware missing TenantContext");
-            build_idempotency_error(StatusCode::UNAUTHORIZED, "Missing authentication context")
+            build_json_error_response(StatusCode::UNAUTHORIZED, "Missing authentication context")
         })?;
 
     tracing::Span::current().record("tenant_id", &tenant_ctx.tenant_id().to_string());
@@ -1618,7 +1618,7 @@ pub async fn idempotency_middleware(req: Request<Body>, next: Next) -> Result<Re
         .cloned()
         .ok_or_else(|| {
             error!("Idempotency middleware missing MiddlewareState");
-            build_idempotency_error(
+            build_json_error_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "Middleware state missing",
             )
@@ -1631,7 +1631,7 @@ pub async fn idempotency_middleware(req: Request<Body>, next: Next) -> Result<Re
                 "Request body exceeded max_body_size ({})",
                 state.config.max_body_size
             );
-            return Err(build_idempotency_error(
+            return Err(build_json_error_response(
                 StatusCode::BAD_REQUEST,
                 "Request body exceeded max_body_size",
             ));
@@ -1652,9 +1652,9 @@ pub async fn idempotency_middleware(req: Request<Body>, next: Next) -> Result<Re
                 attempts = attempts,
                 "Exceeded max attempts waiting for in-flight idempotent request"
             );
-            let mut res = build_idempotency_error(
+            let mut res = build_json_error_response(
                 StatusCode::SERVICE_UNAVAILABLE,
-                "Idempotency store unavailable during acquire",
+                "Max idempotency attempts exhausted",
             );
             let retry_after = state
                 .config
@@ -1666,7 +1666,7 @@ pub async fn idempotency_middleware(req: Request<Body>, next: Next) -> Result<Re
                 res.headers_mut()
                     .insert(axum::http::header::RETRY_AFTER, val);
             }
-            return Ok(res);
+            return Err(res);
         }
 
         match store
@@ -1686,7 +1686,7 @@ pub async fn idempotency_middleware(req: Request<Body>, next: Next) -> Result<Re
                             key = %idempotency_key,
                             "Idempotency conflict detected (Completed)"
                         );
-                        return Err(build_idempotency_error(
+                        return Err(build_json_error_response(
                             StatusCode::CONFLICT,
                             "Idempotency conflict detected",
                         ));
@@ -1704,7 +1704,7 @@ pub async fn idempotency_middleware(req: Request<Body>, next: Next) -> Result<Re
                             key = %idempotency_key,
                             "Idempotency conflict detected (InFlight)"
                         );
-                        return Err(build_idempotency_error(
+                        return Err(build_json_error_response(
                             StatusCode::CONFLICT,
                             "Idempotency conflict detected",
                         ));
@@ -1723,7 +1723,7 @@ pub async fn idempotency_middleware(req: Request<Body>, next: Next) -> Result<Re
                             timeout_ms = state.config.inflight_wait_timeout.as_millis() as u64,
                             "Timed out waiting for in-flight idempotent request"
                         );
-                        let mut res = build_idempotency_error(
+                        let mut res = build_json_error_response(
                             StatusCode::SERVICE_UNAVAILABLE,
                             "Timed out waiting for in-flight request",
                         );
@@ -1737,13 +1737,13 @@ pub async fn idempotency_middleware(req: Request<Body>, next: Next) -> Result<Re
                             res.headers_mut()
                                 .insert(axum::http::header::RETRY_AFTER, val);
                         }
-                        return Ok(res);
+                        return Err(res);
                     }
                 }
             },
             Err(IdempotencyStoreError::BackendUnavailable) => {
                 error!("Idempotency store unavailable during acquire");
-                return Err(build_idempotency_error(
+                return Err(build_json_error_response(
                     StatusCode::SERVICE_UNAVAILABLE,
                     "Idempotency store unavailable during acquire",
                 ));
@@ -1895,7 +1895,7 @@ pub async fn quota_middleware(req: Request<Body>, next: Next) -> Result<Response
         Some(ctx) => ctx,
         None => {
             warn!("Quota middleware missing TenantContext");
-            return Err(build_idempotency_error(
+            return Err(build_json_error_response(
                 StatusCode::UNAUTHORIZED,
                 "Missing authentication context",
             ));
@@ -1906,7 +1906,7 @@ pub async fn quota_middleware(req: Request<Body>, next: Next) -> Result<Response
         Some(s) => s,
         None => {
             error!("MiddlewareState missing");
-            return Err(build_idempotency_error(
+            return Err(build_json_error_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "Middleware state missing",
             ));

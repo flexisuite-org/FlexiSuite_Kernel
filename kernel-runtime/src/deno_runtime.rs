@@ -134,11 +134,19 @@ fn thread_cpu_time(clock_id: libc::clockid_t) -> Result<Duration, SandboxError> 
     // SAFETY: rc == 0 means ts is fully initialized by clock_gettime.
     let ts = unsafe { ts.assume_init() };
     if ts.tv_sec < 0 || ts.tv_nsec < 0 {
+        eprintln!(
+            "thread CPU clock returned negative timestamp: sec={}, nsec={}",
+            ts.tv_sec, ts.tv_nsec
+        );
         return Err(SandboxError::RuntimeError(
             "thread CPU clock returned negative timestamp".to_string(),
         ));
     }
     if ts.tv_nsec > 999_999_999 {
+        eprintln!(
+            "thread CPU clock returned out-of-range tv_nsec: {}",
+            ts.tv_nsec
+        );
         return Err(SandboxError::RuntimeError(
             "thread CPU clock returned out-of-range tv_nsec".to_string(),
         ));
