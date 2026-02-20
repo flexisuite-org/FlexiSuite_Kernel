@@ -4,6 +4,7 @@ use axum::{
     http::{HeaderName, HeaderValue, StatusCode},
     middleware::{from_fn, from_fn_with_state},
     routing::{get, post},
+    response::{IntoResponse, Response},
 };
 use sea_orm::DatabaseConnection;
 use serde::Serialize;
@@ -20,6 +21,7 @@ use crate::middleware::{
 
 pub mod auth;
 pub mod diagnostics;
+pub mod error;
 pub mod middleware;
 pub mod profile;
 
@@ -130,13 +132,14 @@ pub async fn get_action_status(
     Path(action_id): Path<String>,
     Extension(state): Extension<MiddlewareState>,
     Extension(ctx): Extension<TenantContext>,
-) -> Result<Json<ActionStatusResponse>, StatusCode> {
+) -> Response {
     if let Some(record) = get_action(&state, ctx.tenant_id().clone(), &action_id).await {
-        return Ok(Json(ActionStatusResponse {
+        return Json(ActionStatusResponse {
             action_id,
             status: record.status,
-        }));
+        })
+        .into_response();
     }
 
-    Err(StatusCode::NOT_FOUND)
+    error::build_json_error_response(StatusCode::NOT_FOUND, "Action not found")
 }

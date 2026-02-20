@@ -1,12 +1,11 @@
 use async_trait::async_trait;
 use axum::{
-    Json,
     body::{Body, to_bytes},
     http::{
         HeaderMap, HeaderName, HeaderValue, Method, Request, StatusCode, header::CONTENT_LENGTH,
     },
     middleware::Next,
-    response::{IntoResponse, Response},
+    response::Response,
 };
 use base64::prelude::*;
 use http_body_util::BodyExt;
@@ -23,6 +22,7 @@ use tokio::sync::{Mutex, Notify};
 use tracing::{error, info, instrument, warn};
 
 use crate::auth::TenantContext;
+use crate::error::build_json_error_response;
 
 #[derive(Clone)]
 pub struct MiddlewareConfig {
@@ -1507,20 +1507,7 @@ fn sanitize_redis_error(error_text: &str, redis_url: &str) -> String {
     error_text.replace(redis_url, &redact_redis_url(redis_url))
 }
 
-#[derive(Serialize)]
-struct ApiError {
-    error: String,
-}
 
-fn build_json_error_response(status: StatusCode, message: &str) -> Response {
-    (
-        status,
-        Json(ApiError {
-            error: message.to_string(),
-        }),
-    )
-        .into_response()
-}
 
 pub async fn record_action(
     state: &MiddlewareState,
@@ -1543,7 +1530,10 @@ pub async fn get_action(
 }
 
 #[instrument(skip_all, fields(tenant_id, method, path))]
-pub async fn idempotency_middleware(req: Request<Body>, next: Next) -> Result<Response, Response> {
+pub async fn idempotency_middleware(
+    req: Request<Body>,
+    next: Next,
+) -> Result<Response, Response> {
     let (parts, body) = req.into_parts();
     let method = parts.method.clone();
 
@@ -1633,7 +1623,10 @@ pub async fn idempotency_middleware(req: Request<Body>, next: Next) -> Result<Re
             );
             return Err(build_json_error_response(
                 StatusCode::BAD_REQUEST,
-                "Request body exceeded max_body_size",
+                format!(
+                    "Request body exceeded max_body_size ({})",
+                    state.config.max_body_size
+                ),
             ));
         }
     };
@@ -1654,7 +1647,7 @@ pub async fn idempotency_middleware(req: Request<Body>, next: Next) -> Result<Re
             );
             let mut res = build_json_error_response(
                 StatusCode::SERVICE_UNAVAILABLE,
-                "Max idempotency attempts exhausted",
+                "Exceeded max attempts waiting for in-flight idempotent request",
             );
             let retry_after = state
                 .config
@@ -1725,7 +1718,7 @@ pub async fn idempotency_middleware(req: Request<Body>, next: Next) -> Result<Re
                         );
                         let mut res = build_json_error_response(
                             StatusCode::SERVICE_UNAVAILABLE,
-                            "Timed out waiting for in-flight request",
+                            "Timed out waiting for in-flight idempotent request",
                         );
                         let retry_after = state
                             .config
@@ -1745,7 +1738,7 @@ pub async fn idempotency_middleware(req: Request<Body>, next: Next) -> Result<Re
                 error!("Idempotency store unavailable during acquire");
                 return Err(build_json_error_response(
                     StatusCode::SERVICE_UNAVAILABLE,
-                    "Idempotency store unavailable during acquire",
+                    "Idempotency store unavailable",
                 ));
             }
         }
@@ -1872,7 +1865,12 @@ fn build_replay_response(record: &IdempotencyRecord) -> Response {
     let mut res = Response::builder()
         .status(record.status)
         .body(Body::from(record.body.clone()))
-        .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response());
+        .unwrap_or_else(|_| {
+            build_json_error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to build replay response",
+            )
+        });
 
     for (name, val) in &record.headers {
         if let (Ok(header_name), Ok(header_value)) = (
