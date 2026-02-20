@@ -96,7 +96,10 @@ impl IdempotencyStore for NotifyingStore {
     }
 }
 
+#[cfg(debug_assertions)]
 struct FailingStore;
+
+#[cfg(debug_assertions)]
 #[async_trait]
 impl IdempotencyStore for FailingStore {
     async fn get(
@@ -160,6 +163,48 @@ async fn test_health_is_public() {
         .unwrap();
     let res = app.clone().oneshot(req).await.unwrap();
     assert_eq!(res.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn test_global_security_headers() {
+    let app = setup_app().await;
+
+    let req = Request::builder()
+        .uri("/health")
+        .body(Body::empty())
+        .unwrap();
+    let res = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+
+    let headers = res.headers();
+    assert_eq!(
+        headers
+            .get("x-content-type-options")
+            .unwrap()
+            .to_str()
+            .unwrap(),
+        "nosniff"
+    );
+    assert_eq!(
+        headers.get("x-frame-options").unwrap().to_str().unwrap(),
+        "DENY"
+    );
+    assert_eq!(
+        headers
+            .get("content-security-policy")
+            .unwrap()
+            .to_str()
+            .unwrap(),
+        "default-src 'none'; frame-ancestors 'none'"
+    );
+    assert_eq!(
+        headers
+            .get("strict-transport-security")
+            .unwrap()
+            .to_str()
+            .unwrap(),
+        "max-age=63072000; includeSubDomains; preload"
+    );
 }
 
 #[tokio::test]

@@ -1725,7 +1725,7 @@ pub async fn idempotency_middleware(req: Request<Body>, next: Next) -> Result<Re
                         );
                         let mut res = build_idempotency_error(
                             StatusCode::SERVICE_UNAVAILABLE,
-                            "Idempotency store unavailable during acquire",
+                            "Timed out waiting for in-flight request",
                         );
                         let retry_after = state
                             .config
@@ -1895,7 +1895,10 @@ pub async fn quota_middleware(req: Request<Body>, next: Next) -> Result<Response
         Some(ctx) => ctx,
         None => {
             warn!("Quota middleware missing TenantContext");
-            return Ok(StatusCode::UNAUTHORIZED.into_response());
+            return Err(build_idempotency_error(
+                StatusCode::UNAUTHORIZED,
+                "Missing authentication context",
+            ));
         }
     };
 
@@ -1903,7 +1906,10 @@ pub async fn quota_middleware(req: Request<Body>, next: Next) -> Result<Response
         Some(s) => s,
         None => {
             error!("MiddlewareState missing");
-            return Ok(StatusCode::INTERNAL_SERVER_ERROR.into_response());
+            return Err(build_idempotency_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Middleware state missing",
+            ));
         }
     };
 
