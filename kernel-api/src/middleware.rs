@@ -1772,12 +1772,13 @@ fn compute_body_hash(body: &[u8]) -> String {
 }
 
 fn sha256_hex(input: &[u8]) -> String {
-    use std::fmt::Write;
     let result = digest(&SHA256, input);
     let bytes = result.as_ref();
     let mut hex = String::with_capacity(bytes.len() * 2);
+    const HEX_CHARS: &[u8] = b"0123456789abcdef";
     for &b in bytes {
-        let _ = write!(hex, "{b:02x}");
+        hex.push(HEX_CHARS[(b >> 4) as usize] as char);
+        hex.push(HEX_CHARS[(b & 0xf) as usize] as char);
     }
     hex
 }
@@ -1955,4 +1956,30 @@ pub fn violation_to_response(v: &QuotaViolation) -> Response {
     }
 
     res
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_sha256_hex() {
+        let input = b"hello world";
+        // echo -n "hello world" | sha256sum
+        // b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9
+        let expected = "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9";
+        assert_eq!(sha256_hex(input), expected);
+
+        let input_empty = b"";
+        // echo -n "" | sha256sum
+        // e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+        let expected_empty = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+        assert_eq!(sha256_hex(input_empty), expected_empty);
+
+        // FIPS 180-4 / NIST SHA-256 test vector "abc"
+        // https://csrc.nist.gov/projects/cryptographic-algorithm-validation-program/secure-hashing
+        let input_nist = b"abc";
+        let expected_nist = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+        assert_eq!(sha256_hex(input_nist), expected_nist);
+    }
 }
