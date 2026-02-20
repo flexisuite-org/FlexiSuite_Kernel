@@ -164,7 +164,7 @@
 
 ### Phase 2 (Identity & Access)
 - [ ] `SECURITY DEFINER` SQL Linter を導入し、未準拠SQLでCIをFailさせる。
-- [ ] `authorize_tenant()` のNonce再利用拒否テストを追加する。
+- [ ] `authorize_tenant()` のNonce再利用拒否テスト (`test_authorize_rejects_nonce_reuse`) および鍵失効テスト (`test_authorize_rejects_revoked_key`) を追加する。
 - [ ] `tenant_token` v2 (`kid` 必須) を実装し、2リリース/60日・14日連続ゼロ条件を検証する。
 - [ ] `Idempotency-Key` / `X-Action-Id` の契約テストを追加する。
 
