@@ -873,6 +873,9 @@ impl IdempotencyStore for RedisIdempotencyStore {
 
     async fn ping(&self) -> Result<(), IdempotencyStoreError> {
         let mut conn = self.manager.clone();
+        // Use a low-level command invocation to utilize the connection pool efficiently
+        // and avoid potential overhead of high-level abstractions if they exist.
+        // The ConnectionManager handles multiplexing and reconnection.
         match redis::cmd("PING")
             .query_async::<String>(&mut conn)
             .await

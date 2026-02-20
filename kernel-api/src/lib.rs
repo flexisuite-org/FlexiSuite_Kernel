@@ -55,7 +55,6 @@ pub fn build_app_with_state(
     let cleanup_handle = state.start_cleanup_task();
 
     let public_router = Router::new()
-        .route("/health", get(|| async { "OK" }))
         .route("/health/liveness", get(health::liveness))
         .route("/health/readiness", get(health::readiness));
 
