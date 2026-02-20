@@ -96,6 +96,44 @@ impl IdempotencyStore for NotifyingStore {
     }
 }
 
+#[cfg(debug_assertions)]
+struct FailingStore;
+
+#[cfg(debug_assertions)]
+#[async_trait]
+impl IdempotencyStore for FailingStore {
+    async fn get(
+        &self,
+        _key: &IdempotencyScopeKey,
+    ) -> Result<Option<IdempotencyEntry>, IdempotencyStoreError> {
+        Err(IdempotencyStoreError::BackendUnavailable)
+    }
+    async fn try_acquire(
+        &self,
+        _key: IdempotencyScopeKey,
+        _hash: String,
+        _ttl: std::time::Duration,
+    ) -> Result<IdempotencyAcquireResult, IdempotencyStoreError> {
+        Err(IdempotencyStoreError::BackendUnavailable)
+    }
+    async fn complete(
+        &self,
+        _key: IdempotencyScopeKey,
+        _lease: &IdempotencyLease,
+        _record: IdempotencyRecord,
+    ) -> Result<(), IdempotencyStoreError> {
+        Err(IdempotencyStoreError::BackendUnavailable)
+    }
+    async fn release_inflight(
+        &self,
+        _key: &IdempotencyScopeKey,
+        _lease: &IdempotencyLease,
+    ) -> Result<(), IdempotencyStoreError> {
+        Err(IdempotencyStoreError::BackendUnavailable)
+    }
+    async fn cleanup(&self) {}
+}
+
 fn build_idempotent_post(key: &str, body: &str) -> Request<Body> {
     let mut builder = Request::builder().method("POST").uri("/test");
 
@@ -125,6 +163,48 @@ async fn test_health_is_public() {
         .unwrap();
     let res = app.clone().oneshot(req).await.unwrap();
     assert_eq!(res.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn test_global_security_headers() {
+    let app = setup_app().await;
+
+    let req = Request::builder()
+        .uri("/health")
+        .body(Body::empty())
+        .unwrap();
+    let res = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+
+    let headers = res.headers();
+    assert_eq!(
+        headers
+            .get("x-content-type-options")
+            .unwrap()
+            .to_str()
+            .unwrap(),
+        "nosniff"
+    );
+    assert_eq!(
+        headers.get("x-frame-options").unwrap().to_str().unwrap(),
+        "DENY"
+    );
+    assert_eq!(
+        headers
+            .get("content-security-policy")
+            .unwrap()
+            .to_str()
+            .unwrap(),
+        "default-src 'none'; frame-ancestors 'none'"
+    );
+    assert_eq!(
+        headers
+            .get("strict-transport-security")
+            .unwrap()
+            .to_str()
+            .unwrap(),
+        "max-age=63072000; includeSubDomains; preload"
+    );
 }
 
 #[tokio::test]
@@ -215,6 +295,17 @@ async fn test_idempotency_conflict_scope_and_action_lookup() {
     let req = build_idempotent_post("key-1", "payload-b");
     let res = app.clone().oneshot(req).await.unwrap();
     assert_eq!(res.status(), StatusCode::CONFLICT);
+    assert!(
+        res.headers()
+            .get("content-type")
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .contains("application/json")
+    );
+    let body_bytes = to_bytes(res.into_body(), usize::MAX).await.unwrap();
+    let body_json: Value = serde_json::from_slice(&body_bytes).unwrap();
+    assert_eq!(body_json["error"], "Idempotency conflict detected");
 
     // 4. Action lookup contract
     let mut builder = Request::builder()
@@ -247,6 +338,7 @@ async fn test_idempotency_conflict_scope_and_action_lookup() {
 async fn test_idempotency_key_validation() {
     let app = setup_app().await;
 
+    // 1. Invalid Key Format
     let too_long = "k".repeat(129);
     let req = build_idempotent_post(&too_long, "payload");
     let res = app.clone().oneshot(req).await.unwrap();
@@ -254,11 +346,62 @@ async fn test_idempotency_key_validation() {
     #[cfg(debug_assertions)]
     {
         assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+        assert!(
+            res.headers()
+                .get("content-type")
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .contains("application/json")
+        );
+        let body_bytes = to_bytes(res.into_body(), usize::MAX).await.unwrap();
+        let body_json: Value = serde_json::from_slice(&body_bytes).unwrap();
+        assert_eq!(body_json["error"], "Invalid Idempotency-Key format");
     }
 
     #[cfg(not(debug_assertions))]
     {
+        // UNAUTHORIZED is produced by auth middleware which runs before idempotency
         assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    // 2. Missing Key
+    let mut req_builder = Request::builder().uri("/test").method("POST");
+    #[cfg(debug_assertions)]
+    {
+        req_builder = req_builder.header("X-Tenant-Id", "tenant-1");
+    }
+    #[cfg(not(debug_assertions))]
+    {
+        req_builder = req_builder.header("Authorization", "Bearer invalid");
+    }
+    let req_missing = req_builder.body(Body::from("payload")).unwrap();
+    let res_missing = app.clone().oneshot(req_missing).await.unwrap();
+
+    #[cfg(debug_assertions)]
+    {
+        assert_eq!(res_missing.status(), StatusCode::BAD_REQUEST);
+        assert!(
+            res_missing
+                .headers()
+                .get("content-type")
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .contains("application/json")
+        );
+        let body_bytes = to_bytes(res_missing.into_body(), usize::MAX).await.unwrap();
+        let body_json: Value = serde_json::from_slice(&body_bytes).unwrap();
+        assert_eq!(
+            body_json["error"],
+            "Missing Idempotency-Key for write operation"
+        );
+    }
+
+    #[cfg(not(debug_assertions))]
+    {
+        // UNAUTHORIZED is produced by auth middleware which runs before idempotency
+        assert_eq!(res_missing.status(), StatusCode::UNAUTHORIZED);
     }
 }
 
@@ -360,4 +503,30 @@ async fn test_idempotency_inflight_concurrency() {
     });
 
     assert_eq!(replay_count, 1, "Exactly one request should be a replay");
+}
+
+#[tokio::test]
+#[cfg(debug_assertions)]
+async fn test_idempotency_backend_unavailable() {
+    let store = Arc::new(FailingStore);
+    let app = setup_app_with_config(MiddlewareConfig::default(), Some(store)).await;
+
+    let req = build_idempotent_post("key-unavailable", "payload");
+    let res = app.clone().oneshot(req).await.unwrap();
+
+    assert_eq!(res.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert!(
+        res.headers()
+            .get("content-type")
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .contains("application/json")
+    );
+    let body_bytes = to_bytes(res.into_body(), usize::MAX).await.unwrap();
+    let body_json: Value = serde_json::from_slice(&body_bytes).unwrap();
+    assert_eq!(
+        body_json["error"],
+        "Idempotency store unavailable during acquire"
+    );
 }

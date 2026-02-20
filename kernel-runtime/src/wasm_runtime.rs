@@ -312,14 +312,12 @@ impl SandboxRuntime for WasmSandbox {
         // Keep permit for the entire compile phase to avoid admitting unbounded
         // concurrent compiles while this task is active.
         let _compile_permit = compile_permit;
-        let module =
-            match tokio::task::spawn_blocking(move || Module::new(&compile_engine, compile_code))
-                .await
-            {
-                Ok(Ok(module)) => module,
-                Ok(Err(e)) => return Err(map_wasm_error(e)),
-                Err(e) => return Err(SandboxError::RuntimeError(e.to_string())),
-            };
+        let module = match tokio::task::spawn_blocking(move || Module::new(&compile_engine, compile_code)).await
+        {
+            Ok(Ok(module)) => module,
+            Ok(Err(e)) => return Err(map_wasm_error(e)),
+            Err(e) => return Err(SandboxError::RuntimeError(e.to_string())),
+        };
 
         if started_at.elapsed() > self.options.wall_clock_limit {
             return Err(SandboxError::Timeout);

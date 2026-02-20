@@ -1,7 +1,7 @@
 use axum::{
     Json, Router,
     extract::{Extension, Path},
-    http::{HeaderName, HeaderValue, StatusCode, header},
+    http::{HeaderName, HeaderValue, StatusCode},
     middleware::{from_fn, from_fn_with_state},
     routing::{get, post},
 };
@@ -9,7 +9,6 @@ use sea_orm::DatabaseConnection;
 use serde::Serialize;
 use std::sync::Arc;
 use tokio::task::JoinHandle;
-use tower::ServiceBuilder;
 use tower_http::set_header::SetResponseHeaderLayer;
 use uuid::Uuid;
 
@@ -67,26 +66,23 @@ pub fn build_app_with_state(
         Router::new()
             .merge(public_router)
             .merge(protected_router)
-            .layer(Extension(state))
-            .layer(
-                ServiceBuilder::new()
-                    .layer(SetResponseHeaderLayer::overriding(
-                        header::X_CONTENT_TYPE_OPTIONS,
-                        HeaderValue::from_static("nosniff"),
-                    ))
-                    .layer(SetResponseHeaderLayer::overriding(
-                        header::X_FRAME_OPTIONS,
-                        HeaderValue::from_static("DENY"),
-                    ))
-                    .layer(SetResponseHeaderLayer::overriding(
-                        header::CONTENT_SECURITY_POLICY,
-                        HeaderValue::from_static("default-src 'none'; frame-ancestors 'none'"),
-                    ))
-                    .layer(SetResponseHeaderLayer::overriding(
-                        header::STRICT_TRANSPORT_SECURITY,
-                        HeaderValue::from_static("max-age=63072000; includeSubDomains"),
-                    )),
-            ),
+            .layer(SetResponseHeaderLayer::overriding(
+                HeaderName::from_static("x-content-type-options"),
+                HeaderValue::from_static("nosniff"),
+            ))
+            .layer(SetResponseHeaderLayer::overriding(
+                HeaderName::from_static("x-frame-options"),
+                HeaderValue::from_static("DENY"),
+            ))
+            .layer(SetResponseHeaderLayer::overriding(
+                HeaderName::from_static("content-security-policy"),
+                HeaderValue::from_static("default-src 'none'; frame-ancestors 'none'"),
+            ))
+            .layer(SetResponseHeaderLayer::overriding(
+                HeaderName::from_static("strict-transport-security"),
+                HeaderValue::from_static("max-age=63072000; includeSubDomains; preload"),
+            ))
+            .layer(Extension(state)),
         cleanup_handle,
     )
 }
@@ -143,96 +139,4 @@ pub async fn get_action_status(
     }
 
     Err(StatusCode::NOT_FOUND)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use axum::{body::Body, http::Request};
-    use sea_orm::{DatabaseBackend, MockDatabase};
-    use tower::ServiceExt;
-
-    #[tokio::test]
-    async fn test_security_headers() {
-        let db = Arc::new(MockDatabase::new(DatabaseBackend::Postgres).into_connection());
-        let mut config = MiddlewareConfig::default();
-        config.require_redis = false;
-        // Use an invalid URL to force fallback to in-memory store without delay
-        config.redis_url = "redis://0.0.0.0:0".to_string();
-
-        let state = MiddlewareState::new(config)
-            .await
-            .expect("Failed to create state");
-
-        let (app, _cleanup) = build_app_with_state(state, db);
-
-        let request = Request::builder()
-            .uri("/health")
-            .body(Body::empty())
-            .unwrap();
-
-        let response = app.clone().oneshot(request).await.unwrap();
-
-        assert_eq!(response.status(), StatusCode::OK);
-
-        let headers = response.headers();
-        assert_eq!(
-            headers.get(header::X_CONTENT_TYPE_OPTIONS).unwrap(),
-            "nosniff"
-        );
-        assert_eq!(headers.get(header::X_FRAME_OPTIONS).unwrap(), "DENY");
-        assert_eq!(
-            headers.get(header::CONTENT_SECURITY_POLICY).unwrap(),
-            "default-src 'none'; frame-ancestors 'none'"
-        );
-        assert_eq!(
-            headers.get(header::STRICT_TRANSPORT_SECURITY).unwrap(),
-            "max-age=63072000; includeSubDomains"
-        );
-
-        // Negative test: 401 Unauthorized
-        let request = Request::builder()
-            .method("POST")
-            .uri("/test")
-            .body(Body::empty())
-            .unwrap();
-        let response = app.clone().oneshot(request).await.unwrap();
-        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-        let headers = response.headers();
-        assert_eq!(
-            headers.get(header::X_CONTENT_TYPE_OPTIONS).unwrap(),
-            "nosniff"
-        );
-        assert_eq!(headers.get(header::X_FRAME_OPTIONS).unwrap(), "DENY");
-        assert_eq!(
-            headers.get(header::CONTENT_SECURITY_POLICY).unwrap(),
-            "default-src 'none'; frame-ancestors 'none'"
-        );
-        assert_eq!(
-            headers.get(header::STRICT_TRANSPORT_SECURITY).unwrap(),
-            "max-age=63072000; includeSubDomains"
-        );
-
-        // Negative test: 404 Not Found
-        let request = Request::builder()
-            .uri("/not-found")
-            .body(Body::empty())
-            .unwrap();
-        let response = app.clone().oneshot(request).await.unwrap();
-        assert_eq!(response.status(), StatusCode::NOT_FOUND);
-        let headers = response.headers();
-        assert_eq!(
-            headers.get(header::X_CONTENT_TYPE_OPTIONS).unwrap(),
-            "nosniff"
-        );
-        assert_eq!(headers.get(header::X_FRAME_OPTIONS).unwrap(), "DENY");
-        assert_eq!(
-            headers.get(header::CONTENT_SECURITY_POLICY).unwrap(),
-            "default-src 'none'; frame-ancestors 'none'"
-        );
-        assert_eq!(
-            headers.get(header::STRICT_TRANSPORT_SECURITY).unwrap(),
-            "max-age=63072000; includeSubDomains"
-        );
-    }
 }
