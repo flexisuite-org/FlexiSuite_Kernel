@@ -138,8 +138,12 @@ fn thread_cpu_time(clock_id: libc::clockid_t) -> Result<Duration, SandboxError> 
             "thread CPU clock returned negative timestamp".to_string(),
         ));
     }
-    let nsec = ts.tv_nsec.min(999_999_999) as u64;
-    Ok(Duration::from_secs(ts.tv_sec as u64).saturating_add(Duration::from_nanos(nsec)))
+    if ts.tv_nsec > 999_999_999 {
+        return Err(SandboxError::RuntimeError(
+            "thread CPU clock returned out-of-range tv_nsec".to_string(),
+        ));
+    }
+    Ok(Duration::from_secs(ts.tv_sec as u64).saturating_add(Duration::from_nanos(ts.tv_nsec as u64)))
 }
 
 #[async_trait]
