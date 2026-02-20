@@ -119,10 +119,7 @@ async fn test_deno_invalid_memory_limit_is_init_error() {
         Err(SandboxError::InitError(e)) => {
             assert!(e.contains("below the minimum Deno/V8 heap limit"));
         }
-        other => panic!(
-            "Expected InitError for invalid memory limit, got: {:?}",
-            other
-        ),
+        other => panic!("Expected InitError for invalid memory limit, got: {:?}", other),
     }
 }
 
