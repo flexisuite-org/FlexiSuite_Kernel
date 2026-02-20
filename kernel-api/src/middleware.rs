@@ -1588,6 +1588,7 @@ pub async fn idempotency_middleware(req: Request<Body>, next: Next) -> Result<Re
         .extensions
         .get::<TenantContext>()
         .ok_or_else(|| {
+            warn!("Idempotency middleware missing TenantContext");
             build_idempotency_error(StatusCode::UNAUTHORIZED, "Missing authentication context")
         })?;
 
@@ -1616,6 +1617,7 @@ pub async fn idempotency_middleware(req: Request<Body>, next: Next) -> Result<Re
         .get::<MiddlewareState>()
         .cloned()
         .ok_or_else(|| {
+            error!("Idempotency middleware missing MiddlewareState");
             build_idempotency_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "Middleware state missing",
@@ -1650,7 +1652,10 @@ pub async fn idempotency_middleware(req: Request<Body>, next: Next) -> Result<Re
                 attempts = attempts,
                 "Exceeded max attempts waiting for in-flight idempotent request"
             );
-            let mut res = StatusCode::SERVICE_UNAVAILABLE.into_response();
+            let mut res = build_idempotency_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Idempotency store unavailable during acquire",
+            );
             let retry_after = state
                 .config
                 .inflight_wait_timeout
@@ -1718,7 +1723,10 @@ pub async fn idempotency_middleware(req: Request<Body>, next: Next) -> Result<Re
                             timeout_ms = state.config.inflight_wait_timeout.as_millis() as u64,
                             "Timed out waiting for in-flight idempotent request"
                         );
-                        let mut res = StatusCode::SERVICE_UNAVAILABLE.into_response();
+                        let mut res = build_idempotency_error(
+                            StatusCode::SERVICE_UNAVAILABLE,
+                            "Idempotency store unavailable during acquire",
+                        );
                         let retry_after = state
                             .config
                             .inflight_wait_timeout
@@ -1813,12 +1821,13 @@ fn compute_body_hash(body: &[u8]) -> String {
 }
 
 fn sha256_hex(input: &[u8]) -> String {
-    use std::fmt::Write;
     let result = digest(&SHA256, input);
     let bytes = result.as_ref();
     let mut hex = String::with_capacity(bytes.len() * 2);
+    const HEX_CHARS: &[u8] = b"0123456789abcdef";
     for &b in bytes {
-        let _ = write!(hex, "{b:02x}");
+        hex.push(HEX_CHARS[(b >> 4) as usize] as char);
+        hex.push(HEX_CHARS[(b & 0x0f) as usize] as char);
     }
     hex
 }

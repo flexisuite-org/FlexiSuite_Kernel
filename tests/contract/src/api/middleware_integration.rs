@@ -96,6 +96,41 @@ impl IdempotencyStore for NotifyingStore {
     }
 }
 
+struct FailingStore;
+#[async_trait]
+impl IdempotencyStore for FailingStore {
+    async fn get(
+        &self,
+        _key: &IdempotencyScopeKey,
+    ) -> Result<Option<IdempotencyEntry>, IdempotencyStoreError> {
+        Err(IdempotencyStoreError::BackendUnavailable)
+    }
+    async fn try_acquire(
+        &self,
+        _key: IdempotencyScopeKey,
+        _hash: String,
+        _ttl: std::time::Duration,
+    ) -> Result<IdempotencyAcquireResult, IdempotencyStoreError> {
+        Err(IdempotencyStoreError::BackendUnavailable)
+    }
+    async fn complete(
+        &self,
+        _key: IdempotencyScopeKey,
+        _lease: &IdempotencyLease,
+        _record: IdempotencyRecord,
+    ) -> Result<(), IdempotencyStoreError> {
+        Err(IdempotencyStoreError::BackendUnavailable)
+    }
+    async fn release_inflight(
+        &self,
+        _key: &IdempotencyScopeKey,
+        _lease: &IdempotencyLease,
+    ) -> Result<(), IdempotencyStoreError> {
+        Err(IdempotencyStoreError::BackendUnavailable)
+    }
+    async fn cleanup(&self) {}
+}
+
 fn build_idempotent_post(key: &str, body: &str) -> Request<Body> {
     let mut builder = Request::builder().method("POST").uri("/test");
 
@@ -423,4 +458,30 @@ async fn test_idempotency_inflight_concurrency() {
     });
 
     assert_eq!(replay_count, 1, "Exactly one request should be a replay");
+}
+
+#[tokio::test]
+#[cfg(debug_assertions)]
+async fn test_idempotency_backend_unavailable() {
+    let store = Arc::new(FailingStore);
+    let app = setup_app_with_config(MiddlewareConfig::default(), Some(store)).await;
+
+    let req = build_idempotent_post("key-unavailable", "payload");
+    let res = app.clone().oneshot(req).await.unwrap();
+
+    assert_eq!(res.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert!(
+        res.headers()
+            .get("content-type")
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .contains("application/json")
+    );
+    let body_bytes = to_bytes(res.into_body(), usize::MAX).await.unwrap();
+    let body_json: Value = serde_json::from_slice(&body_bytes).unwrap();
+    assert_eq!(
+        body_json["error"],
+        "Idempotency store unavailable during acquire"
+    );
 }
