@@ -3,14 +3,12 @@ use base64::prelude::BASE64_URL_SAFE_NO_PAD;
 use kernel_core::auth::{TenantContext, TenantId};
 use kernel_registry::error::RegistryError;
 use kernel_registry::model::{Dependencies, DistManifest, Kind, Route, Security};
-use kernel_registry::storage::RegistryStorage;
+use kernel_registry::storage::{RegistryStorage, reload_trust_root_keys};
 use object_store::memory::InMemory;
 use object_store::path::Path;
 use object_store::ObjectStore;
-use ring::rand::SystemRandom;
-use ring::signature::{Ed25519KeyPair, KeyPair};
-use serde::Serialize;
-use sha2::{Digest, Sha384};
+use ed25519_dalek::{Signer, SigningKey, VerifyingKey};
+use rand::rngs::OsRng;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -45,106 +43,40 @@ fn test_manifest(id: &str, version: &str) -> DistManifest {
     }
 }
 
-// Copy of ManifestDigestPayload to ensure tests match implementation logic
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct TestManifestDigestPayload<'a> {
-    schema_version: &'a str,
-    id: &'a str,
-    version: &'a str,
-    kind: &'a Kind,
-    name: &'a str,
-    protected: bool,
-    composition_root: &'a str,
-    routes: &'a [Route],
-    dependencies: &'a Dependencies,
-    configuration: &'a BTreeMap<String, serde_json::Value>,
-}
-
-fn normalize_value(v: serde_json::Value) -> serde_json::Value {
-    use serde_json::Value;
-    match v {
-        Value::Object(map) => Value::Object(
-            map.into_iter()
-                .map(|(k, v)| (k, normalize_value(v)))
-                .collect(),
-        ),
-        Value::Array(vec) => Value::Array(vec.into_iter().map(normalize_value).collect()),
-        Value::Number(n) => {
-            if let Some(i) = n.as_i64() {
-                return Value::from(i);
-            }
-            if let Some(u) = n.as_u64() {
-                return Value::from(u);
-            }
-            if let Some(f) = n.as_f64() {
-                if f.fract() == 0.0 {
-                    if f >= (i64::MIN as f64) && f < (i64::MAX as f64) {
-                        let i = f as i64;
-                        if (i as f64) == f {
-                            return Value::from(i);
-                        }
-                    }
-                    if f >= 0.0 && f < (u64::MAX as f64) {
-                        let u = f as u64;
-                        if (u as f64) == f {
-                            return Value::from(u);
-                        }
-                    }
-                }
-            }
-            Value::Number(n)
-        }
-        _ => v,
-    }
-}
-
+// Replaced local compute_digest with call to RegistryStorage implementation
 fn compute_digest(manifest: &DistManifest) -> String {
-    let payload = TestManifestDigestPayload {
-        schema_version: &manifest.schema_version,
-        id: &manifest.id,
-        version: &manifest.version,
-        kind: &manifest.kind,
-        name: &manifest.name,
-        protected: manifest.protected,
-        composition_root: &manifest.composition_root,
-        routes: &manifest.routes,
-        dependencies: &manifest.dependencies,
-        configuration: &manifest.configuration,
-    };
-    let payload_value = serde_json::to_value(&payload).unwrap();
-    let normalized = normalize_value(payload_value);
-    let payload_bytes = serde_json::to_vec(&normalized).unwrap();
-    let mut hasher = Sha384::new();
-    hasher.update(payload_bytes);
-    hex::encode(hasher.finalize())
+    RegistryStorage::manifest_payload_digest(manifest).expect("Digest computation failed")
 }
 
 struct TestKey {
     kid: String,
-    key_pair: Ed25519KeyPair,
+    signing_key: SigningKey,
     public_key_b64: String,
 }
 
 impl TestKey {
     fn new(kid: &str) -> Self {
-        let rng = SystemRandom::new();
-        let pkcs8_bytes = Ed25519KeyPair::generate_pkcs8(&rng).unwrap();
-        let key_pair = Ed25519KeyPair::from_pkcs8(pkcs8_bytes.as_ref()).unwrap();
-        let public_key_bytes = key_pair.public_key().as_ref();
+        let mut csprng = OsRng;
+        let mut bytes = [0u8; 32];
+        rand::RngCore::fill_bytes(&mut csprng, &mut bytes);
+        let signing_key = SigningKey::from_bytes(&bytes);
+        let verifying_key = VerifyingKey::from(&signing_key);
+        let public_key_bytes = verifying_key.as_bytes();
         let public_key_b64 = BASE64_URL_SAFE_NO_PAD.encode(public_key_bytes);
         Self {
             kid: kid.to_string(),
-            key_pair,
+            signing_key,
             public_key_b64,
         }
     }
 
     fn sign(&self, manifest: &mut DistManifest) {
         manifest.security.manifest_signature_kid = self.kid.clone();
-        let digest = compute_digest(manifest);
-        let signature = self.key_pair.sign(digest.as_bytes());
-        manifest.security.manifest_signature = BASE64_URL_SAFE_NO_PAD.encode(signature.as_ref());
+        let digest_hex = compute_digest(manifest);
+        // Verify RAW digest bytes (SHA-384 output), not hex string bytes.
+        let digest_bytes = hex::decode(digest_hex).expect("Valid hex");
+        let signature = self.signing_key.sign(&digest_bytes);
+        manifest.security.manifest_signature = BASE64_URL_SAFE_NO_PAD.encode(signature.to_bytes());
     }
 
     fn env_var_name(&self) -> String {
@@ -198,6 +130,10 @@ fn test_save_and_get_manifest() {
     let key = TestKey::new("test-key-1");
 
     temp_env::with_var(key.env_var_name(), Some(&key.public_key_b64), || {
+        // Explicitly reload keys because temp_env only sets env vars,
+        // it doesn't notify our lazy static cache.
+        reload_trust_root_keys();
+
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
             let mut manifest = test_manifest("app_test", "1.0.0");
@@ -228,6 +164,7 @@ fn test_manifest_digest_excludes_security_section() {
     let key = TestKey::new("test-key-digest");
 
     temp_env::with_var(key.env_var_name(), Some(&key.public_key_b64), || {
+        reload_trust_root_keys();
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
             let mut manifest_a = test_manifest("app_security_digest", "1.0.0");
@@ -252,6 +189,7 @@ fn test_save_manifest_rejects_invalid_signature() {
     let key = TestKey::new("test-key-invalid");
 
     temp_env::with_var(key.env_var_name(), Some(&key.public_key_b64), || {
+        reload_trust_root_keys();
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
             let mut manifest = test_manifest("app_invalid_sig", "1.0.0");
@@ -268,21 +206,27 @@ fn test_save_manifest_rejects_invalid_signature() {
     });
 }
 
-#[tokio::test]
-async fn test_save_manifest_rejects_unknown_kid() {
+#[test]
+fn test_save_manifest_rejects_unknown_kid() {
     let store = Arc::new(InMemory::new());
     let registry = RegistryStorage::new(store, &test_tenant_ctx());
     let key = TestKey::new("test-key-unknown");
 
-    // Do NOT set env var
-    let mut manifest = test_manifest("app_unknown_kid", "1.0.0");
-    key.sign(&mut manifest);
+    // Explicitly UNSET the key to ensure it's unknown even if env leaked
+    temp_env::with_var(key.env_var_name(), None::<&str>, || {
+        reload_trust_root_keys();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let mut manifest = test_manifest("app_unknown_kid", "1.0.0");
+            key.sign(&mut manifest);
 
-    let result = registry.save_manifest(&manifest).await;
-    match result {
-        Err(RegistryError::KeyNotFound(_)) => {}
-        other => panic!("expected KeyNotFound, got {other:?}"),
-    }
+            let result = registry.save_manifest(&manifest).await;
+            match result {
+                Err(RegistryError::KeyNotFound(_)) => {}
+                other => panic!("expected KeyNotFound, got {other:?}"),
+            }
+        })
+    });
 }
 
 #[tokio::test]
@@ -359,6 +303,7 @@ fn test_get_manifest_detects_tampered_stored_json() {
     let key = TestKey::new("test-key-tamper");
 
     temp_env::with_var(key.env_var_name(), Some(&key.public_key_b64), || {
+        reload_trust_root_keys();
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
             let mut manifest = test_manifest("app_tamper_test", "1.0.0");
@@ -400,6 +345,7 @@ fn test_manifest_digest_numeric_normalization() {
     let key = TestKey::new("test-key-numeric");
 
     temp_env::with_var(key.env_var_name(), Some(&key.public_key_b64), || {
+        reload_trust_root_keys();
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
             let mut manifest_int = test_manifest("app_numeric", "1.0.0");
@@ -436,6 +382,7 @@ fn test_manifest_digest_big_int_normalization() {
     let key = TestKey::new("test-key-bigint");
 
     temp_env::with_var(key.env_var_name(), Some(&key.public_key_b64), || {
+        reload_trust_root_keys();
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
             let mut manifest_big = test_manifest("app_big_int", "1.0.0");
