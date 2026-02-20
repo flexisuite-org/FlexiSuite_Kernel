@@ -1508,14 +1508,14 @@ fn sanitize_redis_error(error_text: &str, redis_url: &str) -> String {
 }
 
 #[derive(Serialize)]
-struct IdempotencyError {
+struct ApiError {
     error: String,
 }
 
 fn build_json_error_response(status: StatusCode, message: &str) -> Response {
     (
         status,
-        Json(IdempotencyError {
+        Json(ApiError {
             error: message.to_string(),
         }),
     )
@@ -1983,7 +1983,7 @@ pub fn violation_to_response(v: &QuotaViolation) -> Response {
         StatusCode::TOO_MANY_REQUESTS => "Rate limit exceeded",
         _ => "Quota limit exceeded",
     };
-    let mut res = (status, message).into_response();
+    let mut res = build_json_error_response(status, message);
 
     // Inject headers from violation
     let headers = res.headers_mut();
