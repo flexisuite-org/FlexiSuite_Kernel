@@ -1530,10 +1530,7 @@ pub async fn get_action(
 }
 
 #[instrument(skip_all, fields(tenant_id, method, path))]
-pub async fn idempotency_middleware(
-    req: Request<Body>,
-    next: Next,
-) -> Result<Response, Response> {
+pub async fn idempotency_middleware(req: Request<Body>, next: Next) -> Result<Response, Response> {
     let (parts, body) = req.into_parts();
     let method = parts.method.clone();
 
@@ -1623,10 +1620,7 @@ pub async fn idempotency_middleware(
             );
             return Err(build_json_error_response(
                 StatusCode::BAD_REQUEST,
-                format!(
-                    "Request body exceeded max_body_size ({})",
-                    state.config.max_body_size
-                ),
+                "Request body exceeded max_body_size",
             ));
         }
     };
@@ -1647,7 +1641,7 @@ pub async fn idempotency_middleware(
             );
             let mut res = build_json_error_response(
                 StatusCode::SERVICE_UNAVAILABLE,
-                "Exceeded max attempts waiting for in-flight idempotent request",
+                "Max idempotency attempts exhausted",
             );
             let retry_after = state
                 .config
@@ -1718,7 +1712,7 @@ pub async fn idempotency_middleware(
                         );
                         let mut res = build_json_error_response(
                             StatusCode::SERVICE_UNAVAILABLE,
-                            "Timed out waiting for in-flight idempotent request",
+                            "Timed out waiting for in-flight request",
                         );
                         let retry_after = state
                             .config
@@ -1738,7 +1732,7 @@ pub async fn idempotency_middleware(
                 error!("Idempotency store unavailable during acquire");
                 return Err(build_json_error_response(
                     StatusCode::SERVICE_UNAVAILABLE,
-                    "Idempotency store unavailable",
+                    "Idempotency store unavailable during acquire",
                 ));
             }
         }
