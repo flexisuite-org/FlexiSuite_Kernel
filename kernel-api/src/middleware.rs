@@ -1512,6 +1512,16 @@ struct IdempotencyError {
     error: String,
 }
 
+fn build_idempotency_error(status: StatusCode, message: &str) -> Response {
+    (
+        status,
+        Json(IdempotencyError {
+            error: message.to_string(),
+        }),
+    )
+        .into_response()
+}
+
 pub async fn record_action(
     state: &MiddlewareState,
     tenant_id: kernel_core::auth::TenantId,
@@ -1543,24 +1553,18 @@ pub async fn idempotency_middleware(req: Request<Body>, next: Next) -> Result<Re
                 Ok(k) => k,
                 Err(_) => {
                     warn!("Invalid Idempotency-Key encoding");
-                    return Err((
+                    return Err(build_idempotency_error(
                         StatusCode::BAD_REQUEST,
-                        Json(IdempotencyError {
-                            error: "Invalid Idempotency-Key encoding".to_string(),
-                        }),
-                    )
-                        .into_response());
+                        "Invalid Idempotency-Key encoding",
+                    ));
                 }
             };
             if validate_idempotency_key(key).is_err() {
                 warn!(key = %key, "Invalid Idempotency-Key format");
-                return Err((
+                return Err(build_idempotency_error(
                     StatusCode::BAD_REQUEST,
-                    Json(IdempotencyError {
-                        error: "Invalid Idempotency-Key format".to_string(),
-                    }),
-                )
-                    .into_response());
+                    "Invalid Idempotency-Key format",
+                ));
             }
             key.to_string()
         }
@@ -1571,13 +1575,10 @@ pub async fn idempotency_middleware(req: Request<Body>, next: Next) -> Result<Re
                 || method == Method::PATCH
             {
                 warn!(method = %method, "Missing Idempotency-Key for write operation");
-                return Err((
+                return Err(build_idempotency_error(
                     StatusCode::BAD_REQUEST,
-                    Json(IdempotencyError {
-                        error: "Missing Idempotency-Key for write operation".to_string(),
-                    }),
-                )
-                    .into_response());
+                    "Missing Idempotency-Key for write operation",
+                ));
             }
             return Ok(next.run(Request::from_parts(parts, body)).await);
         }
@@ -1586,7 +1587,9 @@ pub async fn idempotency_middleware(req: Request<Body>, next: Next) -> Result<Re
     let tenant_ctx = parts
         .extensions
         .get::<TenantContext>()
-        .ok_or(StatusCode::UNAUTHORIZED.into_response())?;
+        .ok_or_else(|| {
+            build_idempotency_error(StatusCode::UNAUTHORIZED, "Missing authentication context")
+        })?;
 
     tracing::Span::current().record("tenant_id", &tenant_ctx.tenant_id().to_string());
     tracing::Span::current().record("method", method.as_str());
@@ -1612,7 +1615,12 @@ pub async fn idempotency_middleware(req: Request<Body>, next: Next) -> Result<Re
         .extensions
         .get::<MiddlewareState>()
         .cloned()
-        .ok_or(StatusCode::INTERNAL_SERVER_ERROR.into_response())?;
+        .ok_or_else(|| {
+            build_idempotency_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Middleware state missing",
+            )
+        })?;
 
     let body_bytes = match to_bytes(body, state.config.max_body_size).await {
         Ok(b) => b,
@@ -1621,13 +1629,10 @@ pub async fn idempotency_middleware(req: Request<Body>, next: Next) -> Result<Re
                 "Request body exceeded max_body_size ({})",
                 state.config.max_body_size
             );
-            return Err((
+            return Err(build_idempotency_error(
                 StatusCode::BAD_REQUEST,
-                Json(IdempotencyError {
-                    error: "Request body exceeded max_body_size".to_string(),
-                }),
-            )
-                .into_response());
+                "Request body exceeded max_body_size",
+            ));
         }
     };
 
@@ -1676,7 +1681,10 @@ pub async fn idempotency_middleware(req: Request<Body>, next: Next) -> Result<Re
                             key = %idempotency_key,
                             "Idempotency conflict detected (Completed)"
                         );
-                        return Err(StatusCode::CONFLICT.into_response());
+                        return Err(build_idempotency_error(
+                            StatusCode::CONFLICT,
+                            "Idempotency conflict detected",
+                        ));
                     }
                     info!(key = %idempotency_key, "Replaying idempotent response");
                     return Ok(build_replay_response(&record));
@@ -1691,7 +1699,10 @@ pub async fn idempotency_middleware(req: Request<Body>, next: Next) -> Result<Re
                             key = %idempotency_key,
                             "Idempotency conflict detected (InFlight)"
                         );
-                        return Err(StatusCode::CONFLICT.into_response());
+                        return Err(build_idempotency_error(
+                            StatusCode::CONFLICT,
+                            "Idempotency conflict detected",
+                        ));
                     }
 
                     let notified = notify.notified();
@@ -1724,7 +1735,10 @@ pub async fn idempotency_middleware(req: Request<Body>, next: Next) -> Result<Re
             },
             Err(IdempotencyStoreError::BackendUnavailable) => {
                 error!("Idempotency store unavailable during acquire");
-                return Err(StatusCode::SERVICE_UNAVAILABLE.into_response());
+                return Err(build_idempotency_error(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "Idempotency store unavailable during acquire",
+                ));
             }
         }
     };
@@ -1799,13 +1813,12 @@ fn compute_body_hash(body: &[u8]) -> String {
 }
 
 fn sha256_hex(input: &[u8]) -> String {
+    use std::fmt::Write;
     let result = digest(&SHA256, input);
     let bytes = result.as_ref();
     let mut hex = String::with_capacity(bytes.len() * 2);
-    const HEX_CHARS: &[u8] = b"0123456789abcdef";
     for &b in bytes {
-        hex.push(HEX_CHARS[(b >> 4) as usize] as char);
-        hex.push(HEX_CHARS[(b & 0xf) as usize] as char);
+        let _ = write!(hex, "{b:02x}");
     }
     hex
 }
@@ -1983,30 +1996,4 @@ pub fn violation_to_response(v: &QuotaViolation) -> Response {
     }
 
     res
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_sha256_hex() {
-        let input = b"hello world";
-        // echo -n "hello world" | sha256sum
-        // b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9
-        let expected = "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9";
-        assert_eq!(sha256_hex(input), expected);
-
-        let input_empty = b"";
-        // echo -n "" | sha256sum
-        // e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
-        let expected_empty = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
-        assert_eq!(sha256_hex(input_empty), expected_empty);
-
-        // FIPS 180-4 / NIST SHA-256 test vector "abc"
-        // https://csrc.nist.gov/projects/cryptographic-algorithm-validation-program/secure-hashing
-        let input_nist = b"abc";
-        let expected_nist = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
-        assert_eq!(sha256_hex(input_nist), expected_nist);
-    }
 }

@@ -215,6 +215,17 @@ async fn test_idempotency_conflict_scope_and_action_lookup() {
     let req = build_idempotent_post("key-1", "payload-b");
     let res = app.clone().oneshot(req).await.unwrap();
     assert_eq!(res.status(), StatusCode::CONFLICT);
+    assert!(
+        res.headers()
+            .get("content-type")
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .contains("application/json")
+    );
+    let body_bytes = to_bytes(res.into_body(), usize::MAX).await.unwrap();
+    let body_json: Value = serde_json::from_slice(&body_bytes).unwrap();
+    assert_eq!(body_json["error"], "Idempotency conflict detected");
 
     // 4. Action lookup contract
     let mut builder = Request::builder()
@@ -255,6 +266,14 @@ async fn test_idempotency_key_validation() {
     #[cfg(debug_assertions)]
     {
         assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+        assert!(
+            res.headers()
+                .get("content-type")
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .contains("application/json")
+        );
         let body_bytes = to_bytes(res.into_body(), usize::MAX).await.unwrap();
         let body_json: Value = serde_json::from_slice(&body_bytes).unwrap();
         assert_eq!(body_json["error"], "Invalid Idempotency-Key format");
@@ -262,6 +281,7 @@ async fn test_idempotency_key_validation() {
 
     #[cfg(not(debug_assertions))]
     {
+        // UNAUTHORIZED is produced by auth middleware which runs before idempotency
         assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
     }
 
@@ -281,6 +301,15 @@ async fn test_idempotency_key_validation() {
     #[cfg(debug_assertions)]
     {
         assert_eq!(res_missing.status(), StatusCode::BAD_REQUEST);
+        assert!(
+            res_missing
+                .headers()
+                .get("content-type")
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .contains("application/json")
+        );
         let body_bytes = to_bytes(res_missing.into_body(), usize::MAX).await.unwrap();
         let body_json: Value = serde_json::from_slice(&body_bytes).unwrap();
         assert_eq!(
@@ -291,6 +320,7 @@ async fn test_idempotency_key_validation() {
 
     #[cfg(not(debug_assertions))]
     {
+        // UNAUTHORIZED is produced by auth middleware which runs before idempotency
         assert_eq!(res_missing.status(), StatusCode::UNAUTHORIZED);
     }
 }
