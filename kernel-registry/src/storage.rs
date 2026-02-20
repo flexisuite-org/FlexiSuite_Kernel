@@ -3,15 +3,58 @@ use crate::model::{Dependencies, DistManifest, Kind, Route};
 use base64::Engine;
 use base64::prelude::BASE64_URL_SAFE_NO_PAD;
 use bytes::Bytes;
+use ed25519_dalek::{Signature, VerifyingKey, Verifier};
 use kernel_core::auth::TenantContext;
 use object_store::ObjectStore;
 use object_store::path::Path;
-use ring::signature;
+use once_cell::sync::Lazy;
+use regex::Regex;
 use serde::Serialize;
 use sha2::{Digest, Sha384};
-use std::collections::BTreeMap;
-use std::sync::Arc;
+use std::collections::{BTreeMap, HashMap};
+use std::sync::{Arc, RwLock};
 use tracing::{error, info, instrument, warn};
+
+// Cached Trust Roots
+static TRUST_ROOTS: Lazy<RwLock<HashMap<String, VerifyingKey>>> = Lazy::new(|| {
+    let map = load_trust_roots_from_env();
+    RwLock::new(map)
+});
+
+fn load_trust_roots_from_env() -> HashMap<String, VerifyingKey> {
+    let mut map = HashMap::new();
+    for (key, val) in std::env::vars() {
+        if let Some(kid_suffix) = key.strip_prefix("FLEXI_REGISTRY_TRUST_ROOT_KEY_B64URL_") {
+            if kid_suffix.is_empty() {
+                continue;
+            }
+            // The suffix is the NORMALIZED KID (uppercase, alphanumeric + underscore).
+            // We store it as-is for lookup.
+            match BASE64_URL_SAFE_NO_PAD.decode(&val) {
+                Ok(bytes) => {
+                    if let Ok(vk) = VerifyingKey::from_bytes(bytes.as_slice().try_into().unwrap_or(&[0u8; 32])) {
+                         map.insert(kid_suffix.to_string(), vk);
+                    } else {
+                        warn!("Invalid Ed25519 public key for env var {}", key);
+                    }
+                }
+                Err(_) => {
+                    warn!("Invalid Base64URL encoding for env var {}", key);
+                }
+            }
+        }
+    }
+    info!("Loaded {} trust root keys from environment", map.len());
+    map
+}
+
+/// Explicitly reloads trust root keys from environment variables.
+/// Call this after updating environment variables (e.g., in tests or during config refresh).
+pub fn reload_trust_root_keys() {
+    let new_map = load_trust_roots_from_env();
+    let mut write_guard = TRUST_ROOTS.write().expect("Trust root lock poisoned");
+    *write_guard = new_map;
+}
 
 pub struct RegistryStorage {
     store: Arc<dyn ObjectStore>,
@@ -21,14 +64,6 @@ pub struct RegistryStorage {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-/// Digest payload for `manifest_payload_digest`.
-///
-/// Hash stability depends on the serde serialization shape of this payload and
-/// all nested types referenced here (`Route`, `Dependencies`, `Kind`).
-/// Changing serde attributes (for example `rename_all`, field/variant renames,
-/// or ordering-affecting schema changes) can silently change computed digests.
-/// Treat such serde-shape changes as breaking: update stored manifests, add
-/// migration steps, and add digest regression tests.
 struct ManifestDigestPayload<'a> {
     schema_version: &'a str,
     id: &'a str,
@@ -99,15 +134,7 @@ impl RegistryStorage {
         ))
     }
 
-    /// Computes a digest from the JSON serialization of `ManifestDigestPayload`.
-    ///
-    /// Maintenance note: digest stability is tied to serde configuration of
-    /// nested payload types (`Route`, `Dependencies`, `Kind`) and this payload's
-    /// own serde shape. Any serde change (including `rename_all`, field/variant
-    /// renames, or ordering-affecting schema edits) must be treated as breaking:
-    /// update stored manifests, add migration steps, and add digest regression
-    /// tests.
-    fn manifest_payload_digest(manifest: &DistManifest) -> Result<String, RegistryError> {
+    pub fn manifest_payload_digest(manifest: &DistManifest) -> Result<String, RegistryError> {
         let payload = ManifestDigestPayload {
             schema_version: &manifest.schema_version,
             id: &manifest.id,
@@ -121,7 +148,6 @@ impl RegistryStorage {
             configuration: &manifest.configuration,
         };
 
-        // Normalize numeric values to ensure digest stability (1.0 vs 1)
         let payload_value = serde_json::to_value(&payload)?;
         let normalized = Self::normalize_value(payload_value);
         let payload_bytes = serde_json::to_vec(&normalized)?;
@@ -148,10 +174,7 @@ impl RegistryStorage {
                     return Value::from(u);
                 }
                 if let Some(f) = n.as_f64() {
-                    // Check if the float is effectively an integer
                     if f.fract() == 0.0 {
-                        // Prefer integer representation if it fits in i64/u64
-                        // Perform lossless round-trip check to avoid silent saturation
                         if f >= (i64::MIN as f64) && f < (i64::MAX as f64) {
                             let i = f as i64;
                             if (i as f64) == f {
@@ -173,8 +196,20 @@ impl RegistryStorage {
     }
 
     fn verify_signature(kid: &str, digest: &str, signature: &str) -> Result<(), RegistryError> {
-        // 1. Resolve Public Key
-        // Normalize kid for env var lookup (e.g., "my-key" -> "MY_KEY")
+        // 1. Validate KID Format
+        // Strict allowlist: Alphanumeric, hyphen, underscore only.
+        static KID_REGEX: Lazy<Regex> = Lazy::new(|| Regex::new(r"^[A-Za-z0-9_-]+$").unwrap());
+        if !KID_REGEX.is_match(kid) {
+            warn!(kid = %kid, "Invalid KID format rejected");
+            return Err(RegistryError::KeyNotFound(format!("Invalid KID format: {}", kid)));
+        }
+
+        // 2. Normalize KID for Lookup
+        // Convert to uppercase, replacing non-alphanumerics with underscore is NOT needed
+        // because we already validated strict charset [A-Za-z0-9_-].
+        // However, the ENV VAR convention (FLEXI_REGISTRY_TRUST_ROOT_KEY_B64URL_{NORMALIZED})
+        // typically implies uppercase transformation for shell variable compatibility.
+        // We replicate the normalization logic: Alphanumeric -> Uppercase, others -> Underscore.
         let normalized_kid = kid
             .chars()
             .map(|ch| {
@@ -185,37 +220,35 @@ impl RegistryStorage {
                 }
             })
             .collect::<String>();
-        let env_key = format!("FLEXI_REGISTRY_TRUST_ROOT_KEY_B64URL_{}", normalized_kid);
-        let key_b64 = std::env::var(&env_key).map_err(|_| {
-            warn!(kid = %kid, env_var = %env_key, "Trust root key not found");
+
+        // 3. Lookup Public Key from Cache
+        let trust_roots = TRUST_ROOTS.read().expect("Trust root lock poisoned");
+        let public_key = trust_roots.get(&normalized_kid).ok_or_else(|| {
+            warn!(kid = %kid, normalized = %normalized_kid, "Trust root key not found");
             RegistryError::KeyNotFound(format!("Public key for kid '{kid}' not found"))
         })?;
 
-        // 2. Decode Public Key
-        let public_key_bytes = BASE64_URL_SAFE_NO_PAD.decode(&key_b64).map_err(|e| {
-            warn!(kid = %kid, "Invalid base64 public key");
-            RegistryError::SignatureVerificationFailed(format!(
-                "Invalid public key encoding: {e}"
-            ))
-        })?;
-
-        // 3. Decode Signature
+        // 4. Decode Signature
         let signature_bytes = BASE64_URL_SAFE_NO_PAD.decode(signature).map_err(|e| {
             warn!(kid = %kid, "Invalid base64 signature");
             RegistryError::SignatureVerificationFailed(format!("Invalid signature encoding: {e}"))
         })?;
+        let signature_obj = Signature::from_slice(&signature_bytes).map_err(|e| {
+            warn!(kid = %kid, "Invalid signature length");
+            RegistryError::SignatureVerificationFailed(format!("Invalid signature format: {e}"))
+        })?;
 
-        // 4. Verify (Ed25519)
-        let peer_public_key =
-            signature::UnparsedPublicKey::new(&signature::ED25519, public_key_bytes);
+        // 5. Verify (Ed25519)
+        // Verify raw SHA-384 digest bytes (48 bytes), NOT the hex string bytes.
+        let digest_bytes = hex::decode(digest).map_err(|e| {
+            warn!(kid = %kid, "Invalid digest hex encoding");
+            RegistryError::InvalidManifest(format!("Invalid digest hex: {e}"))
+        })?;
 
-        // We verify the signature against the digest string bytes
-        peer_public_key
-            .verify(digest.as_bytes(), &signature_bytes)
-            .map_err(|_| {
-                warn!(kid = %kid, digest = %digest, "Signature verification failed");
-                RegistryError::SignatureVerificationFailed("Invalid signature".to_string())
-            })
+        public_key.verify(&digest_bytes, &signature_obj).map_err(|_| {
+            warn!(kid = %kid, digest = %digest, "Signature verification failed");
+            RegistryError::SignatureVerificationFailed("Invalid signature".to_string())
+        })
     }
 
     /// Saves binary data and returns the SHA-384 digest (hex string).

@@ -15,10 +15,13 @@ hex = "0.4"
 bytes = "1.5"
 kernel-core = { path = "../kernel-core" }
 tracing = "=0.1.43"
-ring = "0.17.14"
 base64 = "0.22"
+ed25519-dalek = { version = "2.1", features = ["std"] }
+once_cell = "1.19"
+regex = "1.10"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full"] }
 tempfile = "3"
 temp-env = "=0.3.6"
+rand = "0.8"
