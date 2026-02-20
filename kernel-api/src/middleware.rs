@@ -434,13 +434,18 @@ impl RedisIdempotencyStore {
     }
 
     fn format_key(key: &IdempotencyScopeKey) -> String {
-        let tenant_hash = sha256_hex(key.tenant_id.as_str().as_bytes());
-        let canonical_target_hash = sha256_hex(key.canonical_target.as_bytes());
-        let idempotency_key_hash = sha256_hex(key.idempotency_key.as_bytes());
-        format!(
-            "idemp:v3:{}:{}:{}:{}",
-            tenant_hash, key.method, canonical_target_hash, idempotency_key_hash
-        )
+        // idemp:v3:<tenant_hash>:<method>:<target_hash>:<key_hash>
+        // 9 chars prefix + 64*3 hashes + method + colons
+        let mut s = String::with_capacity(256 + key.method.len());
+        s.push_str("idemp:v3:");
+        append_sha256_hex(key.tenant_id.as_str().as_bytes(), &mut s);
+        s.push(':');
+        s.push_str(&key.method);
+        s.push(':');
+        append_sha256_hex(key.canonical_target.as_bytes(), &mut s);
+        s.push(':');
+        append_sha256_hex(key.idempotency_key.as_bytes(), &mut s);
+        s
     }
 
     fn channel_name(redis_key: &str) -> String {
@@ -983,9 +988,12 @@ impl RedisActionStore {
     }
 
     fn format_key(tenant_id: &str, action_id: &str) -> String {
-        let tenant_hash = sha256_hex(tenant_id.as_bytes());
-        let action_hash = sha256_hex(action_id.as_bytes());
-        format!("action:{}:{}", tenant_hash, action_hash)
+        let mut s = String::with_capacity(7 + 64 + 1 + 64);
+        s.push_str("action:");
+        append_sha256_hex(tenant_id.as_bytes(), &mut s);
+        s.push(':');
+        append_sha256_hex(action_id.as_bytes(), &mut s);
+        s
     }
 }
 
@@ -1232,25 +1240,21 @@ impl RedisQuotaStore {
                 let q = tenant_override
                     .and_then(|o| o.tenant_budget)
                     .unwrap_or(self.quota.tenant_budget);
-                let tenant_hash = sha256_hex(tenant_id_str.as_bytes());
-                Some((
-                    format!("quota:{{global}}:tenant:{}:cpu", tenant_hash),
-                    q.rate,
-                    q.capacity,
-                    q.cost,
-                ))
+                let mut s = String::with_capacity(128);
+                s.push_str("quota:{global}:tenant:");
+                append_sha256_hex(tenant_id_str.as_bytes(), &mut s);
+                s.push_str(":cpu");
+                Some((s, q.rate, q.capacity, q.cost))
             }
             QuotaLayer::ApiRateLimit => {
                 let q = tenant_override
                     .and_then(|o| o.api_rate_limit)
                     .unwrap_or(self.quota.api_rate_limit);
-                let tenant_hash = sha256_hex(tenant_id_str.as_bytes());
-                Some((
-                    format!("quota:{{global}}:tenant:{}:api", tenant_hash),
-                    q.rate,
-                    q.capacity,
-                    q.cost,
-                ))
+                let mut s = String::with_capacity(128);
+                s.push_str("quota:{global}:tenant:");
+                append_sha256_hex(tenant_id_str.as_bytes(), &mut s);
+                s.push_str(":api");
+                Some((s, q.rate, q.capacity, q.cost))
             }
             QuotaLayer::CircuitBreaker => None,
         }
