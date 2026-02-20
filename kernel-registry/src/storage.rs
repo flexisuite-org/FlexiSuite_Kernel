@@ -37,7 +37,7 @@ struct ManifestDigestPayload<'a> {
 }
 
 impl RegistryStorage {
-    pub fn new(store: Arc<dyn ObjectStore>, tenant_ctx: &TenantContext) -> Self {
+    pub fn new(store: Arc<dyn ObjectStore>, tenant_ctx: &TenantContext) -> Result<Self, RegistryError> {
         // Allow override via env var for production config injection
         let trust_path_str = std::env::var("MANIFEST_TRUST_ROOT_PATH")
             .unwrap_or_else(|_| "ops/trust/manifest_trust_root.json".to_string());
@@ -50,21 +50,21 @@ impl RegistryStorage {
              if cwd.ends_with("kernel-registry") && trust_path_str == "ops/trust/manifest_trust_root.json" {
                  let fallback = std::path::PathBuf::from("../ops/trust/manifest_trust_root.json");
                  if fallback.exists() {
-                     eprintln!("Running inside kernel-registry, using fallback {:?}", fallback);
+                     info!("Running inside kernel-registry, using fallback {:?}", fallback);
                      trust_path = fallback;
                  }
              }
         }
 
         let trust_provider = FileTrustProvider::new(trust_path.clone())
-            .expect(&format!("Failed to load trust root from {:?}. Security critical component missing.", trust_path));
+            .map_err(|e| RegistryError::TrustRootError(format!("Failed to load trust root from {:?}: {}", trust_path, e)))?;
 
-        Self {
+        Ok(Self {
             store,
             prefix: format!("tenants/{}/", tenant_ctx.tenant_id().as_str()),
             tenant_id: tenant_ctx.tenant_id().to_string(),
             trust_provider: Arc::new(trust_provider),
-        }
+        })
     }
 
     /// Builder-style method to override trust provider (for testing)
@@ -141,7 +141,8 @@ impl RegistryStorage {
 
         let mut hasher = Sha384::new();
         hasher.update(payload_bytes);
-        Ok(format!("sha384-{}", hex::encode(hasher.finalize())))
+        // Backwards compatibility: return raw hex, no prefix
+        Ok(hex::encode(hasher.finalize()))
     }
 
     fn normalize_value(v: serde_json::Value) -> serde_json::Value {
@@ -272,9 +273,12 @@ impl RegistryStorage {
             .trust_provider
             .get_key(&manifest.security.manifest_signature_kid)?;
 
+        // Prepend prefix ONLY for verification logic to match kernel-core requirement
+        let digest_for_verification = format!("sha384-{}", computed_digest);
+
         let core_manifest = Manifest {
             id: manifest.id.clone(),
-            digest: computed_digest.clone(),
+            digest: digest_for_verification.clone(),
             signature: manifest.security.manifest_signature.clone(),
             kid: manifest.security.manifest_signature_kid.clone(),
         };
@@ -287,7 +291,7 @@ impl RegistryStorage {
         match verify_manifest(
             &core_manifest,
             &trusted_key,
-            &computed_digest, // Should match manifest_digest but we check computed one
+            &digest_for_verification, // Should match manifest_digest but we check computed one
             now,
         ) {
             VerificationResult::Ok => {
@@ -303,6 +307,7 @@ impl RegistryStorage {
         }
 
         let mut persisted = manifest.clone();
+        // Persist the raw hex digest as per contract (or current state)
         persisted.security.manifest_digest = computed_digest.clone();
 
         let path = self.manifest_path(&manifest.id, &manifest.version);
