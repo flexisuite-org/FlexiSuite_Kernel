@@ -9,6 +9,7 @@ use sea_orm::DatabaseConnection;
 use serde::Serialize;
 use std::sync::Arc;
 use tokio::task::JoinHandle;
+use tower_http::set_header::SetResponseHeaderLayer;
 use uuid::Uuid;
 
 use crate::auth::{TenantContext, auth_middleware};
@@ -57,14 +58,30 @@ pub fn build_app_with_state(
         // Diagnostics routes under /api/v1/diagnostics
         .nest("/api/v1/diagnostics", diagnostics::routes())
         // Outermost applied last: Auth -> Idempotency -> Quota
-        .layer(from_fn(quota_middleware))
-        .layer(from_fn(idempotency_middleware))
-        .layer(from_fn_with_state(db.clone(), auth_middleware));
+        .route_layer(from_fn(quota_middleware))
+        .route_layer(from_fn(idempotency_middleware))
+        .route_layer(from_fn_with_state(db.clone(), auth_middleware));
 
     (
         Router::new()
             .merge(public_router)
             .merge(protected_router)
+            .layer(SetResponseHeaderLayer::overriding(
+                HeaderName::from_static("x-content-type-options"),
+                HeaderValue::from_static("nosniff"),
+            ))
+            .layer(SetResponseHeaderLayer::overriding(
+                HeaderName::from_static("x-frame-options"),
+                HeaderValue::from_static("DENY"),
+            ))
+            .layer(SetResponseHeaderLayer::overriding(
+                HeaderName::from_static("content-security-policy"),
+                HeaderValue::from_static("default-src 'none'; frame-ancestors 'none'"),
+            ))
+            .layer(SetResponseHeaderLayer::overriding(
+                HeaderName::from_static("strict-transport-security"),
+                HeaderValue::from_static("max-age=63072000; includeSubDomains; preload"),
+            ))
             .layer(Extension(state)),
         cleanup_handle,
     )
