@@ -56,15 +56,25 @@ impl TestAuth {
         db: &DatabaseConnection,
         tenant_id: &TenantId,
     ) -> Result<String, Box<dyn std::error::Error>> {
+        Self::generate_tenant_token_with_state(db, tenant_id, KeyState::Active).await
+    }
+
+    /// Helper that generates a token using a key in a specific state.
+    /// Used for testing revocation and other state-dependent behaviors.
+    pub async fn generate_tenant_token_with_state(
+        db: &DatabaseConnection,
+        tenant_id: &TenantId,
+        state: KeyState,
+    ) -> Result<String, Box<dyn std::error::Error>> {
         use sea_orm::{ColumnTrait, QueryFilter, QueryOrder};
 
         let key_record = key_record::Entity::find()
             .filter(key_record::Column::KeyType.eq(KeyType::Hmac))
-            .filter(key_record::Column::State.eq(KeyState::Active))
+            .filter(key_record::Column::State.eq(state.clone()))
             .order_by_desc(key_record::Column::ActivatedAt)
             .one(db)
             .await?
-            .ok_or("No active HMAC key found")?;
+            .ok_or(format!("No key found with state {:?}", state))?;
 
         let secret = key_record.secret_bytes.ok_or("No secret bytes")?;
         let now = Utc::now().timestamp();
@@ -94,7 +104,7 @@ impl TestAuth {
     pub async fn revoke_active_hmac_key(
         db: &DatabaseConnection,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        use sea_orm::{ActiveValue, ColumnTrait, QueryFilter};
+        use sea_orm::{ColumnTrait, QueryFilter, Set};
 
         let key_model = key_record::Entity::find()
             .filter(key_record::Column::KeyType.eq(KeyType::Hmac))
@@ -104,8 +114,8 @@ impl TestAuth {
             .ok_or("No active HMAC key found to revoke")?;
 
         let mut key_active: key_record::ActiveModel = key_model.into();
-        key_active.state = ActiveValue::Set(KeyState::Revoked);
-        key_active.revoked_at = ActiveValue::Set(Some(Utc::now().into()));
+        key_active.state = Set(KeyState::Revoked);
+        key_active.revoked_at = Set(Some(Utc::now().into()));
         key_active.update(db).await?;
 
         Ok(())
