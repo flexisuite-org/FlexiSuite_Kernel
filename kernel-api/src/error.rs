@@ -17,21 +17,11 @@ pub fn build_json_error_response(status: StatusCode, message: impl Into<String>)
     (status, Json(body)).into_response()
 }
 
-pub fn build_json_error_response_with_details(
-    status: StatusCode,
-    message: impl Into<String>,
-    details: serde_json::Value,
-) -> Response {
-    let body = build_json_error_with_details(message, Some(details));
-    (status, Json(body)).into_response()
-}
-
 pub fn build_json_error(message: impl Into<String>) -> JsonError {
-    let body = JsonError {
+    JsonError {
         error: message.into(),
         details: None,
-    };
-    body
+    }
 }
 
 pub fn build_json_error_with_details(
