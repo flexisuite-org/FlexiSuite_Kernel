@@ -384,7 +384,8 @@ async fn test_wasm_non_json_stdout_returns_string() {
     let mut runtime = WasmSandbox::new(options).unwrap();
     let input = serde_json::Value::Null;
     let output = runtime.execute(wat, input).await.unwrap();
-    assert_eq!(output, serde_json::json!("hello wasm\n"));
+    // Runtime normalizes non-JSON stdout via trim().
+    assert_eq!(output, serde_json::json!("hello wasm"));
 }
 
 #[tokio::test]
