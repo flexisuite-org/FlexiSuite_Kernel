@@ -18,8 +18,7 @@ use kernel_data::entities::entity_record;
 use kernel_data::entities::key_record;
 use kernel_data::repository::TenantRepository;
 use sea_orm::{
-    ActiveValue, ConnectionTrait, Database, DatabaseConnection, DbBackend, Statement,
-    TransactionTrait, QueryFilter,
+    ConnectionTrait, Database, DatabaseConnection, DbBackend, Statement, TransactionTrait, Set,
 };
 use std::sync::OnceLock;
 use testcontainers::{RunnableImage, clients};
@@ -73,14 +72,7 @@ async fn setup_test_db() -> (DatabaseConnection, PostgresNode) {
         .expect("Failed to reconnect to DB");
 
     // 5. Re-initialize Admin for verification (the old admin was tied to the dropped connection)
-    let admin = TestAdminTenantContext::new(&db);
-
-    // Verify pgcrypto extension is enabled (as per acceptance criteria)
-    let pgcrypto_exists = admin
-        .query_all_check("SELECT 1 FROM pg_extension WHERE extname = 'pgcrypto'")
-        .await
-        .expect("Failed to query extensions");
-    assert_eq!(pgcrypto_exists.len(), 1, "pgcrypto extension should be enabled");
+    let _admin = TestAdminTenantContext::new(&db);
 
     (db, node)
 }
@@ -89,6 +81,14 @@ async fn setup_test_db() -> (DatabaseConnection, PostgresNode) {
 #[ignore] // Requires Docker
 async fn test_tenant_isolation_rls() {
     let (db, _node) = setup_test_db().await;
+
+    // Verify pgcrypto extension is enabled (as per acceptance criteria)
+    let admin = TestAdminTenantContext::new(&db);
+    let pgcrypto_exists = admin
+        .query_all_check("SELECT 1 FROM pg_extension WHERE extname = 'pgcrypto'")
+        .await
+        .expect("Failed to query extensions");
+    assert_eq!(pgcrypto_exists.len(), 1, "pgcrypto extension should be enabled");
 
     // 5. Initialize Keys (HMAC)
     TestAuth::init_keys(&db)
@@ -168,9 +168,9 @@ async fn insert_record(
     val: &str,
 ) -> Result<(), DataError> {
     let active_model = entity_record::ActiveModel {
-        id: ActiveValue::Set(id),
-        entity_type: ActiveValue::Set("test".to_string()),
-        content: ActiveValue::Set(serde_json::json!({"foo": val})),
+        id: Set(id),
+        entity_type: Set("test".to_string()),
+        content: Set(serde_json::json!({"foo": val})),
         ..Default::default()
     };
     repo.create_entity(active_model).await?;
