@@ -1,5 +1,7 @@
 use thiserror::Error;
 
+pub const INVALID_OR_EXPIRED_KEY_ID: &str = "Invalid or expired key ID";
+
 #[derive(Debug, Error)]
 pub enum DataError {
     #[error("Database error: {0}")]
