@@ -320,6 +320,7 @@ async fn test_save_manifest_rejects_empty_trust_root_version() {
 
 #[test]
 fn test_get_manifest_detects_tampered_stored_json() {
+    let _guard = ENV_LOCK.lock().unwrap();
     let key = TestKey::new("test-key-tamper");
 
     // We can't easily use with_test_key helper because we need to tamper with the store.
@@ -341,12 +342,7 @@ fn test_get_manifest_detects_tampered_stored_json() {
             let mut tampered = persisted.clone();
             tampered.name = "Tampered Name".to_string();
             let tampered_bytes = serde_json::to_vec(&tampered).unwrap();
-            let tampered_path = Path::from(format!(
-                "tenants/{}/manifests/{}/{}/manifest.json",
-                tenant_ctx.tenant_id().as_str(),
-                manifest.id,
-                manifest.version
-            ));
+            let tampered_path = registry.manifest_path(&manifest.id, &manifest.version);
             store
                 .put(&tampered_path, tampered_bytes.into())
                 .await
