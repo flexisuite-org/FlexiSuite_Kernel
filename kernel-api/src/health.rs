@@ -33,7 +33,7 @@ pub async fn readiness(
     let db_status = match db.ping().await {
         Ok(_) => "up",
         Err(e) => {
-            tracing::error!("Readiness check failed (database): {}", e);
+            tracing::error!(error = ?e, "Readiness check failed (database)");
             "down"
         },
     };
@@ -42,7 +42,7 @@ pub async fn readiness(
     let redis_status = match state.idempotency_store.ping().await {
         Ok(_) => "up",
         Err(e) => {
-            tracing::error!("Readiness check failed (redis): {:?}", e);
+            tracing::error!(error = ?e, "Readiness check failed (redis)");
             "down"
         },
     };
