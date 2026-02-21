@@ -3456,6 +3456,7 @@ dependencies = [
 name = "migration"
 version = "0.1.0"
 dependencies = [
+ "kernel-data",
  "sea-orm-migration",
 ]
 
