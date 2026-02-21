@@ -32,7 +32,7 @@ fn load_trust_roots_from_env() -> HashMap<String, VerifyingKey> {
             // We validate to prevent garbage keys.
             if !kid_suffix
                 .chars()
-                .all(|c| c.is_ascii_alphanumeric() || c == '_')
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
             {
                 warn!("Ignoring invalid trust root env key suffix: {}", kid_suffix);
                 continue;
@@ -51,7 +51,7 @@ fn load_trust_roots_from_env() -> HashMap<String, VerifyingKey> {
                     if let Ok(vk) = VerifyingKey::from_bytes(
                         bytes.as_slice().try_into().expect("Checked length is 32"),
                     ) {
-                        map.insert(kid_suffix.to_string(), vk);
+                        map.insert(normalize_kid(kid_suffix), vk);
                     } else {
                         warn!("Invalid Ed25519 public key format for env var {}", key);
                     }
@@ -84,11 +84,24 @@ pub fn reload_trust_root_keys() {
         .iter()
         .filter(|k| !new_map.contains_key(*k))
         .collect();
+    
+    // Detect rotated keys (same KID, different value)
+    let rotated: Vec<_> = new_keys
+        .iter()
+        .filter(|k| {
+            if let (Some(old_val), Some(new_val)) = (write_guard.get(*k), new_map.get(*k)) {
+                // VerifyingKey implements PartialEq
+                old_val != new_val
+            } else {
+                false
+            }
+        })
+        .collect();
 
-    if !added.is_empty() || !removed.is_empty() {
+    if !added.is_empty() || !removed.is_empty() || !rotated.is_empty() {
         info!(
-            "Reloading trust roots. Added: {:?}, Removed: {:?}",
-            added, removed
+            "Reloading trust roots. Added: {:?}, Removed: {:?}, Rotated: {:?}",
+            added, removed, rotated
         );
     } else {
         info!("Reloading trust roots. No changes detected.");
@@ -99,17 +112,15 @@ pub fn reload_trust_root_keys() {
 
 pub fn normalize_kid(kid: &str) -> String {
     // Alphanumeric -> Uppercase
+    // Hyphen -> Hyphen (preserved)
     // Others -> Underscore
     // This matches the ENV var pattern FLEXI_REGISTRY_TRUST_ROOT_KEY_B64URL_{NORMALIZED}
-    //
-    // Note: This mapping treats '-' (hyphen) and '_' (underscore) as equivalent ('_').
-    // This means "key-1" and "key_1" will resolve to the same trust root key
-    // (FLEXI_REGISTRY_TRUST_ROOT_KEY_B64URL_KEY_1).
-    // Operators should not rely on hyphen vs underscore distinction for KIDs.
     kid.chars()
         .map(|ch| {
             if ch.is_ascii_alphanumeric() {
                 ch.to_ascii_uppercase()
+            } else if ch == '-' {
+                '-'
             } else {
                 '_'
             }
@@ -188,7 +199,7 @@ impl RegistryStorage {
         Path::from(format!("{}artifacts/{}", self.prefix, key))
     }
 
-    fn manifest_path(&self, id: &str, version: &str) -> Path {
+    pub(crate) fn manifest_path(&self, id: &str, version: &str) -> Path {
         Path::from(format!(
             "{}manifests/{}/{}/manifest.json",
             self.prefix, id, version
@@ -302,6 +313,14 @@ impl RegistryStorage {
             warn!(kid = %kid, "Invalid digest hex encoding");
             RegistryError::InvalidManifest(format!("Invalid digest hex: {e}"))
         })?;
+
+        if digest_bytes.len() != 48 {
+            warn!(kid = %kid, digest = %digest, len = digest_bytes.len(), "Invalid digest length");
+            return Err(RegistryError::InvalidManifest(format!(
+                "Invalid digest length: expected 48, got {}",
+                digest_bytes.len()
+            )));
+        }
 
         // Use verify_strict to reject weak keys
         public_key
@@ -451,6 +470,14 @@ impl RegistryStorage {
             warn!(expected = %expected, actual = %actual, "Manifest integrity check failed");
             return Err(RegistryError::IntegrityCheckFailed { expected, actual });
         }
+
+        // Verify signature
+        Self::verify_signature(
+            &manifest.security.manifest_signature_kid,
+            &actual,
+            &manifest.security.manifest_signature,
+        )?;
+
         info!(digest = %actual, "Manifest retrieved successfully");
         Ok(manifest)
     }

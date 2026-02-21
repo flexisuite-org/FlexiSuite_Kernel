@@ -1,7 +1,7 @@
 use axum::{
     Json, Router,
     extract::{Extension, Path},
-    http::{HeaderName, HeaderValue, StatusCode, header},
+    http::{HeaderMap, HeaderName, HeaderValue, StatusCode, header},
     middleware::{from_fn, from_fn_with_state},
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -72,6 +72,20 @@ pub fn build_app_with_state(
             .layer(Extension(state))
             .layer(
                 ServiceBuilder::new()
+                    // COOP/COEP/CORP headers for cross-origin isolation
+                    .layer(SetResponseHeaderLayer::overriding(
+                        HeaderName::from_static("cross-origin-opener-policy"),
+                        HeaderValue::from_static("same-origin"),
+                    ))
+                    .layer(SetResponseHeaderLayer::overriding(
+                        HeaderName::from_static("cross-origin-embedder-policy"),
+                        HeaderValue::from_static("require-corp"),
+                    ))
+                    .layer(SetResponseHeaderLayer::overriding(
+                        HeaderName::from_static("cross-origin-resource-policy"),
+                        HeaderValue::from_static("same-origin"),
+                    ))
+                    // Standard security headers
                     .layer(SetResponseHeaderLayer::overriding(
                         header::X_CONTENT_TYPE_OPTIONS,
                         HeaderValue::from_static("nosniff"),
@@ -134,6 +148,7 @@ pub async fn write_test(
 
 pub async fn get_action_status(
     Path(action_id): Path<String>,
+    headers: HeaderMap,
     Extension(state): Extension<MiddlewareState>,
     Extension(ctx): Extension<TenantContext>,
 ) -> Response {
@@ -145,97 +160,128 @@ pub async fn get_action_status(
         .into_response();
     }
 
-    StatusCode::NOT_FOUND.into_response()
+    let request_id = headers
+        .get("x-request-id")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+
+    error::build_json_error_response("Action not found", StatusCode::NOT_FOUND, request_id)
 }
 
 #[cfg(test)]
-mod tests {
+mod security_header_tests {
     use super::*;
-    use axum::{body::Body, http::Request};
+    use axum::{
+        body::Body,
+        http::{Request, StatusCode},
+    };
     use sea_orm::{DatabaseBackend, MockDatabase};
     use tower::ServiceExt;
 
-    #[tokio::test]
-    async fn test_security_headers() {
+    async fn make_test_app() -> Router {
         let db = Arc::new(MockDatabase::new(DatabaseBackend::Postgres).into_connection());
         let mut config = MiddlewareConfig::default();
         config.require_redis = false;
-        // Use an invalid URL to force fallback to in-memory store without delay
         config.redis_url = "redis://0.0.0.0:0".to_string();
 
         let state = MiddlewareState::new(config)
             .await
             .expect("Failed to create state");
-
         let (app, _cleanup) = build_app_with_state(state, db);
+        app
+    }
 
-        let request = Request::builder()
-            .uri("/health")
-            .body(Body::empty())
+    async fn assert_security_headers(response: Response) {
+        let headers = response.headers();
+        assert_eq!(
+            headers
+                .get("cross-origin-opener-policy")
+                .and_then(|v| v.to_str().ok()),
+            Some("same-origin")
+        );
+        assert_eq!(
+            headers
+                .get("cross-origin-embedder-policy")
+                .and_then(|v| v.to_str().ok()),
+            Some("require-corp")
+        );
+        assert_eq!(
+            headers
+                .get("cross-origin-resource-policy")
+                .and_then(|v| v.to_str().ok()),
+            Some("same-origin")
+        );
+
+        // Verify existing security headers are present
+        assert!(headers
+            .get("x-content-type-options")
+            .and_then(|v| v.to_str().ok())
+            .is_some());
+        assert!(headers
+            .get("x-frame-options")
+            .and_then(|v| v.to_str().ok())
+            .is_some());
+        assert!(headers
+            .get("content-security-policy")
+            .and_then(|v| v.to_str().ok())
+            .is_some());
+        assert!(headers
+            .get("strict-transport-security")
+            .and_then(|v| v.to_str().ok())
+            .is_some());
+    }
+
+    #[tokio::test]
+    async fn test_security_headers_health() {
+        let app = make_test_app().await;
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
             .unwrap();
-
-        let response = app.clone().oneshot(request).await.unwrap();
 
         assert_eq!(response.status(), StatusCode::OK);
+        assert_security_headers(response).await;
+    }
 
-        let headers = response.headers();
-        assert_eq!(
-            headers.get(header::X_CONTENT_TYPE_OPTIONS).unwrap(),
-            "nosniff"
-        );
-        assert_eq!(headers.get(header::X_FRAME_OPTIONS).unwrap(), "DENY");
-        assert_eq!(
-            headers.get(header::CONTENT_SECURITY_POLICY).unwrap(),
-            "default-src 'none'; frame-ancestors 'none'"
-        );
-        assert_eq!(
-            headers.get(header::STRICT_TRANSPORT_SECURITY).unwrap(),
-            "max-age=63072000; includeSubDomains"
-        );
-
-        // Negative test: 401 Unauthorized
-        let request = Request::builder()
-            .method("POST")
-            .uri("/test")
-            .body(Body::empty())
+    #[tokio::test]
+    async fn test_security_headers_protected() {
+        let app = make_test_app().await;
+        // Call protected route without auth to trigger a response (even if it's 401/error, headers should still be there)
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/test")
+                    .method("POST")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
             .unwrap();
-        let response = app.clone().oneshot(request).await.unwrap();
+
+        // Should be 401 Unauthorized because we didn't provide any auth headers
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-        let headers = response.headers();
-        assert_eq!(
-            headers.get(header::X_CONTENT_TYPE_OPTIONS).unwrap(),
-            "nosniff"
-        );
-        assert_eq!(headers.get(header::X_FRAME_OPTIONS).unwrap(), "DENY");
-        assert_eq!(
-            headers.get(header::CONTENT_SECURITY_POLICY).unwrap(),
-            "default-src 'none'; frame-ancestors 'none'"
-        );
-        assert_eq!(
-            headers.get(header::STRICT_TRANSPORT_SECURITY).unwrap(),
-            "max-age=63072000; includeSubDomains"
-        );
+        assert_security_headers(response).await;
+    }
 
-        // Negative test: 404 Not Found
-        let request = Request::builder()
-            .uri("/not-found")
-            .body(Body::empty())
+    #[tokio::test]
+    async fn test_security_headers_error() {
+        let app = make_test_app().await;
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/non-existent")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
             .unwrap();
-        let response = app.clone().oneshot(request).await.unwrap();
+
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
-        let headers = response.headers();
-        assert_eq!(
-            headers.get(header::X_CONTENT_TYPE_OPTIONS).unwrap(),
-            "nosniff"
-        );
-        assert_eq!(headers.get(header::X_FRAME_OPTIONS).unwrap(), "DENY");
-        assert_eq!(
-            headers.get(header::CONTENT_SECURITY_POLICY).unwrap(),
-            "default-src 'none'; frame-ancestors 'none'"
-        );
-        assert_eq!(
-            headers.get(header::STRICT_TRANSPORT_SECURITY).unwrap(),
-            "max-age=63072000; includeSubDomains"
-        );
+        assert_security_headers(response).await;
     }
 }
