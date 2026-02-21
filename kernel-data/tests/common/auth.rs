@@ -60,7 +60,10 @@ impl TestAuth {
     }
 
     /// Helper that generates a token using a key in a specific state.
-    /// Used for testing revocation and other state-dependent behaviors.
+    ///
+    /// NOTE: Signing tokens with keys in states other than `KeyState::Active` (e.g., `KeyState::Revoked`)
+    /// is strictly for testing `authorize_tenant` behavior. In production, `KeyManager`
+    /// would never perform signing operations with non-Active keys.
     pub async fn generate_tenant_token_with_state(
         db: &DatabaseConnection,
         tenant_id: &TenantId,
