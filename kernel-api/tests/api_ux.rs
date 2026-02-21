@@ -1,6 +1,6 @@
 use axum::{
     body::Body,
-    http::{Request, StatusCode},
+    http::{Request, StatusCode, header},
 };
 use kernel_api::{build_app_with_state, middleware::MiddlewareConfig, middleware::MiddlewareState};
 use sea_orm::{DatabaseBackend, MockDatabase};
@@ -27,6 +27,15 @@ async fn test_get_action_status_not_found_ux() {
     let response = app.oneshot(request).await.unwrap();
 
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    let content_type = response
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("");
+    assert!(
+        content_type.starts_with("application/json"),
+        "Expected application/json Content-Type, got: {content_type}"
+    );
 
     let body_bytes = response.into_body().collect().await.unwrap().to_bytes();
     let body_str = String::from_utf8(body_bytes.to_vec()).unwrap();

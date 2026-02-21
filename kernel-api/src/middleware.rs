@@ -1856,15 +1856,18 @@ fn snapshot_headers(headers: &HeaderMap) -> Vec<(String, String)> {
 }
 
 fn build_replay_response(record: &IdempotencyRecord) -> Response {
-    let mut res = Response::builder()
+    let mut res = match Response::builder()
         .status(record.status)
         .body(Body::from(record.body.clone()))
-        .unwrap_or_else(|_| {
-            build_json_error_response(
+    {
+        Ok(response) => response,
+        Err(_) => {
+            return build_json_error_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "Failed to build replay response",
-            )
-        });
+            );
+        }
+    };
 
     for (name, val) in &record.headers {
         if let (Ok(header_name), Ok(header_value)) = (
