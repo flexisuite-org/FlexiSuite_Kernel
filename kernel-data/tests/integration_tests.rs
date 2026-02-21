@@ -439,8 +439,7 @@ async fn test_authorize_rejects_revoked_key() {
 
     // Generate a fresh token (new nonce) so authorize_tenant sees revocation rather than a spent nonce.
     // We must use the Revoked key explicitly here as TestAuth::generate_tenant_token only looks for Active keys.
-    use kernel_data::entities::key_record::KeyState;
-    let fresh_token = TestAuth::generate_tenant_token_with_state(&db, &tenant_id, KeyState::Revoked)
+    let fresh_token = TestAuth::generate_tenant_token_with_state(&db, &tenant_id, key_record::KeyState::Revoked)
         .await
         .expect("Failed to generate fresh token");
 
