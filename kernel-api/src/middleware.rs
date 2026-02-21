@@ -1,6 +1,5 @@
 use async_trait::async_trait;
 use axum::{
-    Json,
     body::{Body, to_bytes},
     http::{
         HeaderMap, HeaderName, HeaderValue, Method, Request, StatusCode, header::CONTENT_LENGTH,
@@ -1507,21 +1506,6 @@ fn sanitize_redis_error(error_text: &str, redis_url: &str) -> String {
     error_text.replace(redis_url, &redact_redis_url(redis_url))
 }
 
-#[derive(Serialize)]
-struct ApiError {
-    error: String,
-}
-
-fn build_json_error_response(status: StatusCode, message: &str) -> Response {
-    (
-        status,
-        Json(ApiError {
-            error: message.to_string(),
-        }),
-    )
-        .into_response()
-}
-
 pub async fn record_action(
     state: &MiddlewareState,
     tenant_id: kernel_core::auth::TenantId,
@@ -1543,7 +1527,10 @@ pub async fn get_action(
 }
 
 #[instrument(skip_all, fields(tenant_id, method, path))]
-pub async fn idempotency_middleware(req: Request<Body>, next: Next) -> Result<Response, Response> {
+pub async fn idempotency_middleware(
+    req: Request<Body>,
+    next: Next,
+) -> Result<Response, StatusCode> {
     let (parts, body) = req.into_parts();
     let method = parts.method.clone();
 
@@ -1553,18 +1540,12 @@ pub async fn idempotency_middleware(req: Request<Body>, next: Next) -> Result<Re
                 Ok(k) => k,
                 Err(_) => {
                     warn!("Invalid Idempotency-Key encoding");
-                    return Err(build_json_error_response(
-                        StatusCode::BAD_REQUEST,
-                        "Invalid Idempotency-Key encoding",
-                    ));
+                    return Err(StatusCode::BAD_REQUEST);
                 }
             };
             if validate_idempotency_key(key).is_err() {
                 warn!(key = %key, "Invalid Idempotency-Key format");
-                return Err(build_json_error_response(
-                    StatusCode::BAD_REQUEST,
-                    "Invalid Idempotency-Key format",
-                ));
+                return Err(StatusCode::BAD_REQUEST);
             }
             key.to_string()
         }
@@ -1575,10 +1556,7 @@ pub async fn idempotency_middleware(req: Request<Body>, next: Next) -> Result<Re
                 || method == Method::PATCH
             {
                 warn!(method = %method, "Missing Idempotency-Key for write operation");
-                return Err(build_json_error_response(
-                    StatusCode::BAD_REQUEST,
-                    "Missing Idempotency-Key for write operation",
-                ));
+                return Err(StatusCode::BAD_REQUEST);
             }
             return Ok(next.run(Request::from_parts(parts, body)).await);
         }
@@ -1587,10 +1565,7 @@ pub async fn idempotency_middleware(req: Request<Body>, next: Next) -> Result<Re
     let tenant_ctx = parts
         .extensions
         .get::<TenantContext>()
-        .ok_or_else(|| {
-            warn!("Idempotency middleware missing TenantContext");
-            build_json_error_response(StatusCode::UNAUTHORIZED, "Missing authentication context")
-        })?;
+        .ok_or(StatusCode::UNAUTHORIZED)?;
 
     tracing::Span::current().record("tenant_id", &tenant_ctx.tenant_id().to_string());
     tracing::Span::current().record("method", method.as_str());
@@ -1616,13 +1591,7 @@ pub async fn idempotency_middleware(req: Request<Body>, next: Next) -> Result<Re
         .extensions
         .get::<MiddlewareState>()
         .cloned()
-        .ok_or_else(|| {
-            error!("Idempotency middleware missing MiddlewareState");
-            build_json_error_response(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Middleware state missing",
-            )
-        })?;
+        .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
 
     let body_bytes = match to_bytes(body, state.config.max_body_size).await {
         Ok(b) => b,
@@ -1631,10 +1600,7 @@ pub async fn idempotency_middleware(req: Request<Body>, next: Next) -> Result<Re
                 "Request body exceeded max_body_size ({})",
                 state.config.max_body_size
             );
-            return Err(build_json_error_response(
-                StatusCode::BAD_REQUEST,
-                "Request body exceeded max_body_size",
-            ));
+            return Err(StatusCode::BAD_REQUEST);
         }
     };
 
@@ -1652,10 +1618,7 @@ pub async fn idempotency_middleware(req: Request<Body>, next: Next) -> Result<Re
                 attempts = attempts,
                 "Exceeded max attempts waiting for in-flight idempotent request"
             );
-            let mut res = build_json_error_response(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "Max idempotency attempts exhausted",
-            );
+            let mut res = StatusCode::SERVICE_UNAVAILABLE.into_response();
             let retry_after = state
                 .config
                 .inflight_wait_timeout
@@ -1666,7 +1629,7 @@ pub async fn idempotency_middleware(req: Request<Body>, next: Next) -> Result<Re
                 res.headers_mut()
                     .insert(axum::http::header::RETRY_AFTER, val);
             }
-            return Err(res);
+            return Ok(res);
         }
 
         match store
@@ -1686,10 +1649,7 @@ pub async fn idempotency_middleware(req: Request<Body>, next: Next) -> Result<Re
                             key = %idempotency_key,
                             "Idempotency conflict detected (Completed)"
                         );
-                        return Err(build_json_error_response(
-                            StatusCode::CONFLICT,
-                            "Idempotency conflict detected",
-                        ));
+                        return Err(StatusCode::CONFLICT);
                     }
                     info!(key = %idempotency_key, "Replaying idempotent response");
                     return Ok(build_replay_response(&record));
@@ -1704,10 +1664,7 @@ pub async fn idempotency_middleware(req: Request<Body>, next: Next) -> Result<Re
                             key = %idempotency_key,
                             "Idempotency conflict detected (InFlight)"
                         );
-                        return Err(build_json_error_response(
-                            StatusCode::CONFLICT,
-                            "Idempotency conflict detected",
-                        ));
+                        return Err(StatusCode::CONFLICT);
                     }
 
                     let notified = notify.notified();
@@ -1723,10 +1680,7 @@ pub async fn idempotency_middleware(req: Request<Body>, next: Next) -> Result<Re
                             timeout_ms = state.config.inflight_wait_timeout.as_millis() as u64,
                             "Timed out waiting for in-flight idempotent request"
                         );
-                        let mut res = build_json_error_response(
-                            StatusCode::SERVICE_UNAVAILABLE,
-                            "Timed out waiting for in-flight request",
-                        );
+                        let mut res = StatusCode::SERVICE_UNAVAILABLE.into_response();
                         let retry_after = state
                             .config
                             .inflight_wait_timeout
@@ -1737,16 +1691,13 @@ pub async fn idempotency_middleware(req: Request<Body>, next: Next) -> Result<Re
                             res.headers_mut()
                                 .insert(axum::http::header::RETRY_AFTER, val);
                         }
-                        return Err(res);
+                        return Ok(res);
                     }
                 }
             },
             Err(IdempotencyStoreError::BackendUnavailable) => {
                 error!("Idempotency store unavailable during acquire");
-                return Err(build_json_error_response(
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    "Idempotency store unavailable during acquire",
-                ));
+                return Err(StatusCode::SERVICE_UNAVAILABLE);
             }
         }
     };
@@ -1821,13 +1772,12 @@ fn compute_body_hash(body: &[u8]) -> String {
 }
 
 fn sha256_hex(input: &[u8]) -> String {
+    use std::fmt::Write;
     let result = digest(&SHA256, input);
     let bytes = result.as_ref();
     let mut hex = String::with_capacity(bytes.len() * 2);
-    const HEX_CHARS: &[u8] = b"0123456789abcdef";
     for &b in bytes {
-        hex.push(HEX_CHARS[(b >> 4) as usize] as char);
-        hex.push(HEX_CHARS[(b & 0x0f) as usize] as char);
+        let _ = write!(hex, "{b:02x}");
     }
     hex
 }
@@ -1895,10 +1845,7 @@ pub async fn quota_middleware(req: Request<Body>, next: Next) -> Result<Response
         Some(ctx) => ctx,
         None => {
             warn!("Quota middleware missing TenantContext");
-            return Err(build_json_error_response(
-                StatusCode::UNAUTHORIZED,
-                "Missing authentication context",
-            ));
+            return Ok(StatusCode::UNAUTHORIZED.into_response());
         }
     };
 
@@ -1906,10 +1853,7 @@ pub async fn quota_middleware(req: Request<Body>, next: Next) -> Result<Response
         Some(s) => s,
         None => {
             error!("MiddlewareState missing");
-            return Err(build_json_error_response(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Middleware state missing",
-            ));
+            return Ok(StatusCode::INTERNAL_SERVER_ERROR.into_response());
         }
     };
 
@@ -1983,7 +1927,7 @@ pub fn violation_to_response(v: &QuotaViolation) -> Response {
         StatusCode::TOO_MANY_REQUESTS => "Rate limit exceeded",
         _ => "Quota limit exceeded",
     };
-    let mut res = build_json_error_response(status, message);
+    let mut res = (status, message).into_response();
 
     // Inject headers from violation
     let headers = res.headers_mut();

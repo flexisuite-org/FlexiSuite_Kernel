@@ -1,5 +1,6 @@
 use crate::{RuntimeOptions, SandboxError, SandboxRuntime};
 use async_trait::async_trait;
+use futures_util::StreamExt;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -17,6 +18,20 @@ pub struct WasmSandbox {
 }
 
 const DEFAULT_MAX_STDOUT: usize = 1 << 20; // 1MB default hard cap
+const MAX_FETCH_BODY_BYTES: usize = 10 * 1024 * 1024; // 10MB
+
+// Error codes for flexi_fetch
+const ERR_NO_MEMORY_EXPORT: i32 = -1;
+const ERR_READ_MEM: i32 = -2;
+const ERR_UTF8: i32 = -3;
+const ERR_CHECK_URL: i32 = -4;
+const ERR_REQUEST_FAIL: i32 = -6; // Skip -5 (unused)
+const ERR_READ_BODY_FAIL: i32 = -7;
+const ERR_WRITE_FAIL: i32 = -9; // Skip -8
+const ERR_INVALID_LEN: i32 = -10;
+const ERR_PARSE_METHOD: i32 = -11;
+const ERR_PARSE_HEADERS: i32 = -12;
+const ERR_RESPONSE_TOO_LARGE: i32 = -13;
 
 impl Drop for WasmSandbox {
     fn drop(&mut self) {
@@ -124,18 +139,18 @@ impl SandboxRuntime for WasmSandbox {
                     Box::new(async move {
                         let mem = match caller.get_export("memory") {
                             Some(wasmtime::Extern::Memory(m)) => m,
-                            _ => return Ok(-1),
+                            _ => return Ok(ERR_NO_MEMORY_EXPORT),
                         };
 
                         let read_string = |ptr: i32, len: i32| -> Result<String, i32> {
                             if len < 0 {
-                                return Err(-10);
+                                return Err(ERR_INVALID_LEN);
                             }
                             let mut buf = vec![0u8; len as usize];
                             if mem.read(&caller, ptr as usize, &mut buf).is_err() {
-                                return Err(-2);
+                                return Err(ERR_READ_MEM);
                             }
-                            String::from_utf8(buf).map_err(|_| -3)
+                            String::from_utf8(buf).map_err(|_| ERR_UTF8)
                         };
 
                         let url_str = match read_string(url_ptr, url_len) {
@@ -164,12 +179,12 @@ impl SandboxRuntime for WasmSandbox {
                         // Initial check to block IP literals if not explicitly allowed
                         let url = match crate::check_url(&url_str, &allowlist) {
                             Ok(u) => u,
-                            Err(_) => return Ok(-4),
+                            Err(_) => return Ok(ERR_CHECK_URL),
                         };
 
                         let method = match method_str.parse::<reqwest::Method>() {
                             Ok(m) => m,
-                            Err(_) => return Ok(-11),
+                            Err(_) => return Ok(ERR_PARSE_METHOD),
                         };
 
                         let mut builder = client.request(method, url);
@@ -178,7 +193,7 @@ impl SandboxRuntime for WasmSandbox {
                             let headers: std::collections::HashMap<String, String> =
                                 match serde_json::from_str(&headers_str) {
                                     Ok(h) => h,
-                                    Err(_) => return Ok(-12),
+                                    Err(_) => return Ok(ERR_PARSE_HEADERS),
                                 };
                             for (k, v) in headers {
                                 builder = builder.header(k, v);
@@ -191,13 +206,28 @@ impl SandboxRuntime for WasmSandbox {
 
                         let resp = match builder.send().await {
                             Ok(r) => r,
-                            Err(_) => return Ok(-6),
+                            Err(_) => return Ok(ERR_REQUEST_FAIL),
                         };
 
                         let status = resp.status().as_u16();
-                        let body = match resp.text().await {
-                            Ok(t) => t,
-                            Err(_) => return Ok(-7),
+
+                        // Streaming read with limit
+                        let mut body_bytes = Vec::new();
+                        let mut stream = resp.bytes_stream();
+                        while let Some(chunk_res) = stream.next().await {
+                            let chunk = match chunk_res {
+                                Ok(c) => c,
+                                Err(_) => return Ok(ERR_READ_BODY_FAIL),
+                            };
+                            if body_bytes.len() + chunk.len() > MAX_FETCH_BODY_BYTES {
+                                return Ok(ERR_RESPONSE_TOO_LARGE);
+                            }
+                            body_bytes.extend_from_slice(&chunk);
+                        }
+
+                        let body = match String::from_utf8(body_bytes) {
+                            Ok(s) => s,
+                            Err(_) => return Ok(ERR_UTF8),
                         };
 
                         let json_resp = serde_json::json!({
@@ -208,14 +238,14 @@ impl SandboxRuntime for WasmSandbox {
                         let json_bytes = json_str.as_bytes();
 
                         if json_bytes.len() > out_max_len as usize {
-                            return Ok(-8);
+                            return Ok(ERR_RESPONSE_TOO_LARGE);
                         }
 
                         if mem
                             .write(&mut caller, out_ptr as usize, json_bytes)
                             .is_err()
                         {
-                            return Ok(-9);
+                            return Ok(ERR_WRITE_FAIL);
                         }
 
                         Ok(json_bytes.len() as i32)
@@ -247,6 +277,7 @@ impl SandboxRuntime for WasmSandbox {
         ));
         let client = reqwest::Client::builder()
             .dns_resolver(resolver)
+            .timeout(Duration::from_secs(30))
             .build()
             .map_err(|e| SandboxError::InitError(e.to_string()))?;
 
@@ -312,12 +343,14 @@ impl SandboxRuntime for WasmSandbox {
         // Keep permit for the entire compile phase to avoid admitting unbounded
         // concurrent compiles while this task is active.
         let _compile_permit = compile_permit;
-        let module = match tokio::task::spawn_blocking(move || Module::new(&compile_engine, compile_code)).await
-        {
-            Ok(Ok(module)) => module,
-            Ok(Err(e)) => return Err(map_wasm_error(e)),
-            Err(e) => return Err(SandboxError::RuntimeError(e.to_string())),
-        };
+        let module =
+            match tokio::task::spawn_blocking(move || Module::new(&compile_engine, compile_code))
+                .await
+            {
+                Ok(Ok(module)) => module,
+                Ok(Err(e)) => return Err(map_wasm_error(e)),
+                Err(e) => return Err(SandboxError::RuntimeError(e.to_string())),
+            };
 
         if started_at.elapsed() > self.options.wall_clock_limit {
             return Err(SandboxError::Timeout);

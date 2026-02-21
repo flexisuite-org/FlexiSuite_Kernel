@@ -19,10 +19,25 @@ async fn start_mock_server() -> (String, Arc<Notify>) {
                 res = listener.accept() => {
                     match res {
                         Ok((mut socket, _)) => {
-                            let mut buf = [0; 1024];
-                            let _ = socket.read(&mut buf).await;
-                            let response = "HTTP/1.1 200 OK\r\nContent-Length: 13\r\n\r\nHello Network";
-                            let _ = socket.write_all(response.as_bytes()).await;
+                            tokio::spawn(async move {
+                                let mut buf = [0; 1024];
+                                let mut request_data = Vec::new();
+                                loop {
+                                    let n = match socket.read(&mut buf).await {
+                                        Ok(n) if n == 0 => return, // Connection closed
+                                        Ok(n) => n,
+                                        Err(_) => return,
+                                    };
+                                    request_data.extend_from_slice(&buf[..n]);
+                                    if request_data.windows(4).any(|window| window == b"\r\n\r\n") {
+                                        break;
+                                    }
+                                }
+                                let response = "HTTP/1.1 200 OK\r\nContent-Length: 13\r\nConnection: close\r\n\r\nHello Network";
+                                let _ = socket.write_all(response.as_bytes()).await;
+                                let _ = socket.flush().await;
+                                let _ = socket.shutdown().await;
+                            });
                         }
                         Err(_) => break,
                     }
@@ -41,14 +56,6 @@ async fn start_mock_server() -> (String, Arc<Notify>) {
 async fn test_deno_network_allowed() {
     let (url, stop_server) = start_mock_server().await;
     let _host = url.replace("http://", ""); // 127.0.0.1:port
-    // Allowlist expects host (e.g. 127.0.0.1). But url has port.
-    // check_url uses Url::host_str().
-    // If I pass "127.0.0.1:port" to allowlist, check_url check:
-    // url.host_str() returns "127.0.0.1".
-    // So allowlist should have "127.0.0.1".
-    // Wait, my check_url implementation: `if !allowlist.iter().any(|allowed| allowed == host)`
-    // host is from url.host_str().
-    // So allowlist must contain hostname without port.
     let hostname = "127.0.0.1";
 
     let mut options = RuntimeOptions::default();
@@ -80,46 +87,6 @@ async fn test_deno_network_denied() {
     let mut options = RuntimeOptions::default();
     options.permissions.network_allowlist = vec!["google.com".to_string()];
     let mut runtime = DenoSandbox::new(options);
-
-    // Use a valid URL that is NOT in the allowlist
-    // allowlist has "google.com".
-    // We try to fetch "http://example.com".
-    // Or we use `start_mock_server` url (127.0.0.1) but allowlist has google.com.
-    // Yes, that's better.
-    let _target_url = "http://127.0.0.1:12345"; // Port doesn't matter for allowlist check usually, but we need valid URL.
-    // Wait, if I use start_mock_server url, it is 127.0.0.1.
-    // Allowlist has google.com.
-    // So fetch(127.0.0.1) should fail.
-
-    // But previous test code used `url` variable which is 127.0.0.1.
-    // So why did it fail with invalid argument?
-    // Ah, I see: `options.permissions.network_allowlist = vec!["google.com".to_string()];`
-    // `let code = format!(..., url)`.
-    // `url` IS `http://127.0.0.1:...`.
-    // So `Url::parse` SHOULD succeed.
-    // So why `invalid_argument`?
-    // Maybe `op_fetch` args?
-    // `op_fetch` takes `url_str: String`.
-    // Maybe `check_url`?
-    // `crate::check_url` uses `Url::parse`.
-    // If `url` is `http://127.0.0.1:xxxx`, it parses fine.
-    // `host_str` is `127.0.0.1`.
-    // Allowlist has `google.com`.
-    // `any` returns false.
-    // Returns Err("Network access to '127.0.0.1' is not allowed").
-    // Mapped to `JsErrorBox::new("PermissionDenied", msg)`.
-    // So JS error should have that message.
-    // But test got "invalid_argument".
-    // This implies `JsErrorBox::new("PermissionDenied", msg)` creates an error with message "invalid_argument"?
-    // OR "PermissionDenied" class maps to `invalid_argument` code/message in Deno?
-    // "PermissionDenied" is standard Deno error.
-    // Maybe `deno_error` 0.7.3 maps it differently?
-    // Or maybe I should use `JsErrorBox::generic` for everything to preserve message?
-    // Or `JsErrorBox::new("Error", msg)`.
-    // I'll try `JsErrorBox::generic` in `deno_runtime.rs` for PermissionDenied case too, to be safe about message preservation.
-    // But wait, I need to distinguish types?
-    // For this test, I check message.
-    // I'll assume "PermissionDenied" class is doing something weird with message.
 
     let code = format!(
         r#"
@@ -248,11 +215,6 @@ async fn test_wasm_network_denied() {
     stop_server.notify_one();
 
     // We expect it to FAIL (RuntimeError or Trap) because of unreachable
-    assert!(
-        result.is_err(),
-        "Expected Wasm execution to fail (trap) on denied network"
-    );
-
     assert!(
         result.is_err(),
         "Expected Wasm execution to fail (trap) on denied network"

@@ -2,6 +2,7 @@ use crate::{RuntimeOptions, SandboxError, SandboxRuntime};
 use async_trait::async_trait;
 use deno_core::{JsRuntime, OpState, RuntimeOptions as DenoOptions, op2, v8};
 use deno_error::JsErrorBox;
+use futures_util::StreamExt;
 #[cfg(unix)]
 use libc::{clock_gettime, pthread_getcpuclockid, pthread_self, timespec};
 use reqwest::{Client, Method};
@@ -20,6 +21,7 @@ pub struct DenoSandbox {
 }
 
 const DEFAULT_MAX_OUTPUT_SIZE: usize = 1 << 20; // 1MB default hard cap
+const MAX_FETCH_BODY_BYTES: usize = 10 * 1024 * 1024; // 10MB
 const MIN_DENO_HEAP_LIMIT: usize = 16 * 1024 * 1024; // avoid V8 process-abort range for tiny heaps
 
 impl DenoSandbox {
@@ -78,13 +80,14 @@ struct NetworkConfig {
 }
 
 fn check_url(url_str: &str, allowlist: &[String]) -> Result<Url, JsErrorBox> {
-    crate::check_url(url_str, allowlist).map_err(|e| {
-        if e.contains("not allowed") {
-            JsErrorBox::generic(e)
-        } else {
-            JsErrorBox::new("InvalidInput", e)
-        }
-    })
+    match crate::check_url(url_str, allowlist) {
+        Ok(u) => Ok(u),
+        Err(crate::CheckUrlError::NotAllowed(msg)) => Err(JsErrorBox::generic(format!(
+            "Network access to '{}' is not allowed",
+            msg
+        ))),
+        Err(e) => Err(JsErrorBox::new("InvalidInput", e.to_string())),
+    }
 }
 
 #[derive(serde::Deserialize)]
@@ -154,21 +157,60 @@ pub async fn op_fetch(
         .canonical_reason()
         .unwrap_or("")
         .to_string();
-    let headers: HashMap<String, String> = response
-        .headers()
-        .iter()
-        .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("").to_string()))
-        .collect();
-    let body = response
-        .text()
-        .await
-        .map_err(|e| JsErrorBox::generic(e.to_string()))?;
+
+    let mut headers: HashMap<String, String> = HashMap::new();
+    for (k, v) in response.headers() {
+        let key = k.to_string();
+        let val = v.to_str().unwrap_or("").to_string();
+        if key.eq_ignore_ascii_case("set-cookie") {
+            // NOTE: This naive impl overwrites separate Set-Cookie headers because HashMap keys are unique.
+            // Deno's `Headers` polyfill would need to handle this, but passing multiple values is complex with this simplistic interface.
+            // For now, we follow the RFC 7230 §3.2.2 rule for other headers (joining with comma)
+            // but since reqwest headers iter iterates multiple entries, we need to manually join.
+            // Wait, reqwest's `iter()` yields all values.
+            // We need to collect them.
+            // Let's assume non-set-cookie headers can be joined.
+            // But HashMap prevents multiple entries.
+            // Correct approach: check if exists, append.
+            use std::fmt::Write;
+            if let Some(existing) = headers.get_mut(&key) {
+                if !key.eq_ignore_ascii_case("set-cookie") {
+                    write!(existing, ", {}", val).ok();
+                }
+            } else {
+                headers.insert(key, val);
+            }
+        } else {
+            use std::fmt::Write;
+            if let Some(existing) = headers.get_mut(&key) {
+                write!(existing, ", {}", val).ok();
+            } else {
+                headers.insert(key, val);
+            }
+        }
+    }
+
+    // Stream body with limit
+    let mut body = Vec::new();
+    let mut stream = response.bytes_stream();
+    while let Some(chunk_res) = stream.next().await {
+        let chunk = chunk_res.map_err(|e| JsErrorBox::generic(e.to_string()))?;
+        if body.len() + chunk.len() > MAX_FETCH_BODY_BYTES {
+            return Err(JsErrorBox::generic(format!(
+                "Fetch response body exceeded limit of {} bytes",
+                MAX_FETCH_BODY_BYTES
+            )));
+        }
+        body.extend_from_slice(&chunk);
+    }
+
+    let body_str = String::from_utf8(body).map_err(|e| JsErrorBox::generic(e.to_string()))?;
 
     Ok(FetchResponse {
         status,
         status_text,
         headers,
-        body,
+        body: body_str,
     })
 }
 
@@ -211,12 +253,10 @@ fn current_thread_cpu_clock_id() -> Result<libc::clockid_t, SandboxError> {
     // SAFETY: pthread_self returns the current thread handle, and clock_id is valid writable memory.
     let rc = unsafe { pthread_getcpuclockid(pthread_self(), &mut clock_id) };
     if rc != 0 {
-        return Err(SandboxError::RuntimeError(
-            format!(
-                "failed to resolve current thread CPU clock: {}",
-                std::io::Error::from_raw_os_error(rc)
-            ),
-        ));
+        return Err(SandboxError::RuntimeError(format!(
+            "failed to resolve current thread CPU clock: {}",
+            std::io::Error::from_raw_os_error(rc)
+        )));
     }
     Ok(clock_id)
 }
@@ -227,35 +267,21 @@ fn thread_cpu_time(clock_id: libc::clockid_t) -> Result<Duration, SandboxError> 
     // SAFETY: ts points to valid writable memory; clock_id was obtained via pthread_getcpuclockid.
     let rc = unsafe { clock_gettime(clock_id, ts.as_mut_ptr()) };
     if rc != 0 {
-        return Err(SandboxError::RuntimeError(
-            format!(
-                "failed to read thread CPU usage: {}",
-                std::io::Error::last_os_error()
-            ),
-        ));
+        return Err(SandboxError::RuntimeError(format!(
+            "failed to read thread CPU usage: {}",
+            std::io::Error::last_os_error()
+        )));
     }
 
     // SAFETY: rc == 0 means ts is fully initialized by clock_gettime.
     let ts = unsafe { ts.assume_init() };
     if ts.tv_sec < 0 || ts.tv_nsec < 0 {
-        eprintln!(
-            "thread CPU clock returned negative timestamp: sec={}, nsec={}",
-            ts.tv_sec, ts.tv_nsec
-        );
         return Err(SandboxError::RuntimeError(
             "thread CPU clock returned negative timestamp".to_string(),
         ));
     }
-    if ts.tv_nsec > 999_999_999 {
-        eprintln!(
-            "thread CPU clock returned out-of-range tv_nsec: {}",
-            ts.tv_nsec
-        );
-        return Err(SandboxError::RuntimeError(
-            "thread CPU clock returned out-of-range tv_nsec".to_string(),
-        ));
-    }
-    Ok(Duration::from_secs(ts.tv_sec as u64).saturating_add(Duration::from_nanos(ts.tv_nsec as u64)))
+    Ok(Duration::from_secs(ts.tv_sec as u64)
+        .saturating_add(Duration::from_nanos(ts.tv_nsec as u64)))
 }
 
 #[async_trait]
@@ -289,7 +315,9 @@ impl SandboxRuntime for DenoSandbox {
             .clone()
             .acquire_owned()
             .await
-            .map_err(|_| SandboxError::InitError("Deno execution semaphore is closed".to_string()))?;
+            .map_err(|_| {
+                SandboxError::InitError("Deno execution semaphore is closed".to_string())
+            })?;
 
         let options = self.options.clone();
         let code = code.to_string();
@@ -334,6 +362,7 @@ impl SandboxRuntime for DenoSandbox {
                 ));
                 let client = Client::builder()
                     .dns_resolver(resolver)
+                    .timeout(Duration::from_secs(30))
                     .build()
                     .map_err(|e| SandboxError::InitError(e.to_string()))?;
 
@@ -428,13 +457,26 @@ impl SandboxRuntime for DenoSandbox {
                 let setup_code = format!(
                     r#"
                     globalThis.INPUT = {};
+                    // Minimal polyfill for Headers
+                    // Note: This is a subset implementation.
                     globalThis.Headers = class Headers {{
                         constructor(init) {{
                             this.map = new Map(Object.entries(init || {{}}));
                         }}
-                        get(name) {{ return this.map.get(name); }}
-                        has(name) {{ return this.map.has(name); }}
-                        forEach(callback) {{ this.map.forEach(callback); }}
+                        append(name, value) {{
+                            const k = name.toLowerCase();
+                            const v = String(value);
+                            if (this.map.has(k)) {{
+                                this.map.set(k, this.map.get(k) + ", " + v);
+                            }} else {{
+                                this.map.set(k, v);
+                            }}
+                        }}
+                        delete(name) {{ this.map.delete(name.toLowerCase()); }}
+                        get(name) {{ return this.map.get(name.toLowerCase()) || null; }}
+                        has(name) {{ return this.map.has(name.toLowerCase()); }}
+                        set(name, value) {{ this.map.set(name.toLowerCase(), String(value)); }}
+                        forEach(callback) {{ this.map.forEach((v, k) => callback(v, k, this)); }}
                     }};
                     globalThis.fetch = async function(url, options) {{
                         const response = await Deno.core.ops.op_fetch(url, options);
@@ -443,6 +485,15 @@ impl SandboxRuntime for DenoSandbox {
                             status: response.status,
                             statusText: response.status_text,
                             headers: new Headers(response.headers),
+                            url: url,
+                            redirected: false, // stub
+                            type: 'basic', // stub
+                            bodyUsed: false, // stub
+                            clone: function() {{ return {{ ...this }}; }}, // naive clone stub
+                            arrayBuffer: async () => {{
+                                const encoder = new TextEncoder();
+                                return encoder.encode(response.body).buffer;
+                            }},
                             text: async () => response.body,
                             json: async () => JSON.parse(response.body),
                         }};

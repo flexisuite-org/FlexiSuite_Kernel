@@ -58,14 +58,29 @@ pub struct Permissions {
     pub network_allowlist: Vec<String>,
 }
 
-pub(crate) fn check_url(url_str: &str, allowlist: &[String]) -> Result<Url, String> {
-    let url = Url::parse(url_str).map_err(|e| e.to_string())?;
-    let host = url
-        .host_str()
-        .ok_or_else(|| "URL must have a host".to_string())?;
+#[derive(Debug, Error)]
+pub enum CheckUrlError {
+    #[error("Parse error: {0}")]
+    ParseError(String),
+    #[error("URL must have a host")]
+    NoHost,
+    #[error("Network access to '{0}' is not allowed")]
+    NotAllowed(String),
+    #[error("Unsupported URL scheme: {0}")]
+    UnsupportedScheme(String),
+}
+
+pub(crate) fn check_url(url_str: &str, allowlist: &[String]) -> Result<Url, CheckUrlError> {
+    let url = Url::parse(url_str).map_err(|e| CheckUrlError::ParseError(e.to_string()))?;
+
+    if url.scheme() != "http" && url.scheme() != "https" {
+        return Err(CheckUrlError::UnsupportedScheme(url.scheme().to_string()));
+    }
+
+    let host = url.host_str().ok_or(CheckUrlError::NoHost)?;
 
     if !allowlist.iter().any(|allowed| allowed == host) {
-        return Err(format!("Network access to '{}' is not allowed", host));
+        return Err(CheckUrlError::NotAllowed(host.to_string()));
     }
     Ok(url)
 }
@@ -90,6 +105,7 @@ impl Resolve for AllowlistResolver {
 
         Box::pin(async move {
             // 1. Check allowlist (hostname)
+            // We use check_url logic but repurposed since name is just host
             if !allowlist.iter().any(|allowed| allowed == &name_str) {
                 return Err(Box::new(std::io::Error::new(
                     std::io::ErrorKind::PermissionDenied,
@@ -153,9 +169,99 @@ fn is_safe_ip(ip: &IpAddr, host: &str, allowlist: &[String]) -> bool {
 }
 
 fn is_global(ip: &IpAddr) -> bool {
+    let ip = match ip {
+        IpAddr::V6(ipv6) => {
+            if let Some(ipv4) = ipv6.to_ipv4_mapped() {
+                IpAddr::V4(ipv4)
+            } else {
+                *ip
+            }
+        }
+        _ => *ip,
+    };
+
     match ip {
-        IpAddr::V4(ipv4) => !ipv4.is_private() && !ipv4.is_loopback() && !ipv4.is_link_local(),
-        IpAddr::V6(ipv6) => !ipv6.is_loopback() && ((ipv6.segments()[0] & 0xfe00) != 0xfc00),
+        IpAddr::V4(ipv4) => {
+            // Check private, loopback, and link-local using standard methods first
+            if ipv4.is_private() || ipv4.is_loopback() || ipv4.is_link_local() {
+                return false;
+            }
+
+            // Explicitly deny additional ranges:
+            // 0.0.0.0/8 (Current network)
+            if ipv4.octets()[0] == 0 {
+                return false;
+            }
+            // 100.64.0.0/10 (Shared Address Space / CGNAT)
+            if ipv4.octets()[0] == 100 && (ipv4.octets()[1] & 0xC0) == 0x40 {
+                return false;
+            }
+            // 192.0.0.0/24 (IETF Protocol Assignments) - partially covered by is_private but explicit
+            if ipv4.octets()[0] == 192 && ipv4.octets()[1] == 0 && ipv4.octets()[2] == 0 {
+                return false;
+            }
+            // 192.0.2.0/24 (TEST-NET-1) - documentation
+            if ipv4.octets()[0] == 192 && ipv4.octets()[1] == 0 && ipv4.octets()[2] == 2 {
+                return false;
+            }
+            // 198.18.0.0/15 (Benchmarking)
+            if ipv4.octets()[0] == 198 && (ipv4.octets()[1] & 0xFE) == 0x12 {
+                return false;
+            }
+            // 198.51.100.0/24 (TEST-NET-2) - documentation
+            if ipv4.octets()[0] == 198 && ipv4.octets()[1] == 51 && ipv4.octets()[2] == 100 {
+                return false;
+            }
+            // 203.0.113.0/24 (TEST-NET-3) - documentation
+            if ipv4.octets()[0] == 203 && ipv4.octets()[1] == 0 && ipv4.octets()[2] == 113 {
+                return false;
+            }
+            // 224.0.0.0/4 (Multicast) - covered by is_multicast but ensure
+            if ipv4.is_multicast() {
+                return false;
+            }
+            // 240.0.0.0/4 (Reserved)
+            if (ipv4.octets()[0] & 0xF0) == 0xF0 {
+                return false;
+            }
+            // 255.255.255.255 (Broadcast) - covered by is_broadcast
+            if ipv4.is_broadcast() {
+                return false;
+            }
+
+            true
+        }
+        IpAddr::V6(ipv6) => {
+            if ipv6.is_loopback() {
+                return false;
+            }
+            // Unspecified ::
+            if ipv6.is_unspecified() {
+                return false;
+            }
+            // Unique Local fc00::/7
+            if (ipv6.segments()[0] & 0xfe00) == 0xfc00 {
+                return false;
+            }
+            // Link-local fe80::/10
+            if (ipv6.segments()[0] & 0xffc0) == 0xfe80 {
+                return false;
+            }
+            // Multicast ff00::/8
+            if ipv6.is_multicast() {
+                return false;
+            }
+            // Discard Prefix 100::/64
+            if ipv6.segments()[0] == 0x0100 {
+                return false;
+            }
+            // Documentation 2001:db8::/32
+            if ipv6.segments()[0] == 0x2001 && ipv6.segments()[1] == 0x0db8 {
+                return false;
+            }
+
+            true
+        }
     }
 }
 
