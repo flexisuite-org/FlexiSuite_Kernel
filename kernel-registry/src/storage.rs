@@ -3,20 +3,18 @@ use crate::model::{Dependencies, DistManifest, Kind, Route};
 use base64::Engine;
 use base64::prelude::BASE64_URL_SAFE_NO_PAD;
 use bytes::Bytes;
-use ed25519_dalek::{Signature, VerifyingKey, Verifier};
+use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use kernel_core::auth::TenantContext;
-use object_store::ObjectStore;
 use object_store::path::Path;
-use once_cell::sync::Lazy;
-use regex::Regex;
+use object_store::ObjectStore;
 use serde::Serialize;
 use sha2::{Digest, Sha384};
 use std::collections::{BTreeMap, HashMap};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, LazyLock, RwLock};
 use tracing::{error, info, instrument, warn};
 
 // Cached Trust Roots
-static TRUST_ROOTS: Lazy<RwLock<HashMap<String, VerifyingKey>>> = Lazy::new(|| {
+static TRUST_ROOTS: LazyLock<RwLock<HashMap<String, VerifyingKey>>> = LazyLock::new(|| {
     let map = load_trust_roots_from_env();
     RwLock::new(map)
 });
@@ -28,14 +26,34 @@ fn load_trust_roots_from_env() -> HashMap<String, VerifyingKey> {
             if kid_suffix.is_empty() {
                 continue;
             }
-            // The suffix is the NORMALIZED KID (uppercase, alphanumeric + underscore).
-            // We store it as-is for lookup.
+            // Normalize checks: The suffix MUST be alphanumeric + underscore only.
+            // We reuse normalize_kid logic or just check it directly.
+            // Since this comes from environment keys (often shell constrained), uppercase is expected.
+            // We validate to prevent garbage keys.
+            if !kid_suffix
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_')
+            {
+                warn!("Ignoring invalid trust root env key suffix: {}", kid_suffix);
+                continue;
+            }
+
             match BASE64_URL_SAFE_NO_PAD.decode(&val) {
                 Ok(bytes) => {
-                    if let Ok(vk) = VerifyingKey::from_bytes(bytes.as_slice().try_into().unwrap_or(&[0u8; 32])) {
-                         map.insert(kid_suffix.to_string(), vk);
+                    if bytes.len() != 32 {
+                        warn!(
+                            "Invalid Ed25519 public key length for env var {}: expected 32, got {}",
+                            key,
+                            bytes.len()
+                        );
+                        continue;
+                    }
+                    if let Ok(vk) = VerifyingKey::from_bytes(
+                        bytes.as_slice().try_into().expect("Checked length is 32"),
+                    ) {
+                        map.insert(kid_suffix.to_string(), vk);
                     } else {
-                        warn!("Invalid Ed25519 public key for env var {}", key);
+                        warn!("Invalid Ed25519 public key format for env var {}", key);
                     }
                 }
                 Err(_) => {
@@ -53,7 +71,45 @@ fn load_trust_roots_from_env() -> HashMap<String, VerifyingKey> {
 pub fn reload_trust_root_keys() {
     let new_map = load_trust_roots_from_env();
     let mut write_guard = TRUST_ROOTS.write().expect("Trust root lock poisoned");
+
+    // Calculate diff for logging
+    let old_keys: Vec<_> = write_guard.keys().cloned().collect();
+    let new_keys: Vec<_> = new_map.keys().cloned().collect();
+
+    let added: Vec<_> = new_keys
+        .iter()
+        .filter(|k| !write_guard.contains_key(*k))
+        .collect();
+    let removed: Vec<_> = old_keys
+        .iter()
+        .filter(|k| !new_map.contains_key(*k))
+        .collect();
+
+    if !added.is_empty() || !removed.is_empty() {
+        info!(
+            "Reloading trust roots. Added: {:?}, Removed: {:?}",
+            added, removed
+        );
+    } else {
+        info!("Reloading trust roots. No changes detected.");
+    }
+
     *write_guard = new_map;
+}
+
+pub(crate) fn normalize_kid(kid: &str) -> String {
+    // Alphanumeric -> Uppercase
+    // Others -> Underscore
+    // This matches the ENV var pattern FLEXI_REGISTRY_TRUST_ROOT_KEY_B64URL_{NORMALIZED}
+    kid.chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() {
+                ch.to_ascii_uppercase()
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>()
 }
 
 pub struct RegistryStorage {
@@ -198,32 +254,29 @@ impl RegistryStorage {
     fn verify_signature(kid: &str, digest: &str, signature: &str) -> Result<(), RegistryError> {
         // 1. Validate KID Format
         // Strict allowlist: Alphanumeric, hyphen, underscore only.
-        static KID_REGEX: Lazy<Regex> = Lazy::new(|| Regex::new(r"^[A-Za-z0-9_-]+$").unwrap());
-        if !KID_REGEX.is_match(kid) {
+        // Replaced Regex with manual check for reduced dependency.
+        if !kid
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+        {
             warn!(kid = %kid, "Invalid KID format rejected");
-            return Err(RegistryError::KeyNotFound(format!("Invalid KID format: {}", kid)));
+            return Err(RegistryError::KeyNotFound(format!(
+                "Invalid KID format: {}",
+                kid
+            )));
         }
 
         // 2. Normalize KID for Lookup
-        // Convert to uppercase, replacing non-alphanumerics with underscore is NOT needed
-        // because we already validated strict charset [A-Za-z0-9_-].
-        // However, the ENV VAR convention (FLEXI_REGISTRY_TRUST_ROOT_KEY_B64URL_{NORMALIZED})
-        // typically implies uppercase transformation for shell variable compatibility.
-        // We replicate the normalization logic: Alphanumeric -> Uppercase, others -> Underscore.
-        let normalized_kid = kid
-            .chars()
-            .map(|ch| {
-                if ch.is_ascii_alphanumeric() {
-                    ch.to_ascii_uppercase()
-                } else {
-                    '_'
-                }
-            })
-            .collect::<String>();
+        let normalized_kid = normalize_kid(kid);
 
         // 3. Lookup Public Key from Cache
-        let trust_roots = TRUST_ROOTS.read().expect("Trust root lock poisoned");
-        let public_key = trust_roots.get(&normalized_kid).ok_or_else(|| {
+        // Extract the key OUT of the lock scope to avoid holding lock during crypto
+        let public_key = {
+            let trust_roots = TRUST_ROOTS.read().expect("Trust root lock poisoned");
+            trust_roots.get(&normalized_kid).cloned()
+        };
+
+        let public_key = public_key.ok_or_else(|| {
             warn!(kid = %kid, normalized = %normalized_kid, "Trust root key not found");
             RegistryError::KeyNotFound(format!("Public key for kid '{kid}' not found"))
         })?;
@@ -245,10 +298,13 @@ impl RegistryStorage {
             RegistryError::InvalidManifest(format!("Invalid digest hex: {e}"))
         })?;
 
-        public_key.verify(&digest_bytes, &signature_obj).map_err(|_| {
-            warn!(kid = %kid, digest = %digest, "Signature verification failed");
-            RegistryError::SignatureVerificationFailed("Invalid signature".to_string())
-        })
+        // Use verify_strict to reject weak keys
+        public_key
+            .verify_strict(&digest_bytes, &signature_obj)
+            .map_err(|_| {
+                warn!(kid = %kid, digest = %digest, "Signature verification failed");
+                RegistryError::SignatureVerificationFailed("Invalid signature".to_string())
+            })
     }
 
     /// Saves binary data and returns the SHA-384 digest (hex string).

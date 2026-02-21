@@ -3,7 +3,7 @@ use base64::prelude::BASE64_URL_SAFE_NO_PAD;
 use kernel_core::auth::{TenantContext, TenantId};
 use kernel_registry::error::RegistryError;
 use kernel_registry::model::{Dependencies, DistManifest, Kind, Route, Security};
-use kernel_registry::storage::{RegistryStorage, reload_trust_root_keys};
+use kernel_registry::storage::{normalize_kid, reload_trust_root_keys, RegistryStorage};
 use object_store::memory::InMemory;
 use object_store::path::Path;
 use object_store::ObjectStore;
@@ -57,9 +57,7 @@ struct TestKey {
 impl TestKey {
     fn new(kid: &str) -> Self {
         let mut csprng = OsRng;
-        let mut bytes = [0u8; 32];
-        rand::RngCore::fill_bytes(&mut csprng, &mut bytes);
-        let signing_key = SigningKey::from_bytes(&bytes);
+        let signing_key = SigningKey::generate(&mut csprng);
         let verifying_key = VerifyingKey::from(&signing_key);
         let public_key_bytes = verifying_key.as_bytes();
         let public_key_b64 = BASE64_URL_SAFE_NO_PAD.encode(public_key_bytes);
@@ -80,19 +78,40 @@ impl TestKey {
     }
 
     fn env_var_name(&self) -> String {
-        let normalized = self
-            .kid
-            .chars()
-            .map(|ch| {
-                if ch.is_ascii_alphanumeric() {
-                    ch.to_ascii_uppercase()
-                } else {
-                    '_'
-                }
-            })
-            .collect::<String>();
+        let normalized = normalize_kid(&self.kid);
         format!("FLEXI_REGISTRY_TRUST_ROOT_KEY_B64URL_{}", normalized)
     }
+}
+
+/// Helper to run registry tests with a specific trust root key configured.
+/// Handles environment variable setting, trust root reloading, and async runtime.
+fn with_test_key<F>(key: &TestKey, test_fn: F)
+where
+    F: FnOnce(&TestKey, RegistryStorage) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>,
+{
+    temp_env::with_var(key.env_var_name(), Some(&key.public_key_b64), || {
+        reload_trust_root_keys();
+        let store = Arc::new(InMemory::new());
+        let registry = RegistryStorage::new(store, &test_tenant_ctx());
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(test_fn(key, registry));
+    });
+}
+
+/// Helper to run registry tests with a specific trust root key UNSET.
+fn with_test_key_unset<F>(key: &TestKey, test_fn: F)
+where
+    F: FnOnce(&TestKey, RegistryStorage) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>,
+{
+    temp_env::with_var(key.env_var_name(), None::<&str>, || {
+        reload_trust_root_keys();
+        let store = Arc::new(InMemory::new());
+        let registry = RegistryStorage::new(store, &test_tenant_ctx());
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(test_fn(key, registry));
+    });
 }
 
 #[tokio::test]
@@ -125,108 +144,83 @@ async fn test_save_and_get_artifact() {
 
 #[test]
 fn test_save_and_get_manifest() {
-    let store = Arc::new(InMemory::new());
-    let registry = RegistryStorage::new(store, &test_tenant_ctx());
     let key = TestKey::new("test-key-1");
+    with_test_key(&key, |key, registry| Box::pin(async move {
+        let mut manifest = test_manifest("app_test", "1.0.0");
+        key.sign(&mut manifest);
 
-    temp_env::with_var(key.env_var_name(), Some(&key.public_key_b64), || {
-        // Explicitly reload keys because temp_env only sets env vars,
-        // it doesn't notify our lazy static cache.
-        reload_trust_root_keys();
+        let (digest, persisted) = registry.save_manifest(&manifest).await.unwrap();
+        assert_eq!(digest.len(), 96);
+        assert_eq!(persisted.security.manifest_digest, digest);
 
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        rt.block_on(async {
-            let mut manifest = test_manifest("app_test", "1.0.0");
-            key.sign(&mut manifest);
-
-            let (digest, persisted) = registry.save_manifest(&manifest).await.unwrap();
-            assert_eq!(digest.len(), 96);
-            assert_eq!(persisted.security.manifest_digest, digest);
-
-            let retrieved = registry.get_manifest("app_test", "1.0.0").await.unwrap();
-            assert_eq!(retrieved.security.manifest_digest, digest);
-            assert_eq!(
-                retrieved.security.manifest_signature,
-                manifest.security.manifest_signature
-            );
-        })
-    });
+        let retrieved = registry.get_manifest("app_test", "1.0.0").await.unwrap();
+        assert_eq!(retrieved.security.manifest_digest, digest);
+        assert_eq!(
+            retrieved.security.manifest_signature,
+            manifest.security.manifest_signature
+        );
+    }));
 }
 
 #[test]
 fn test_manifest_digest_excludes_security_section() {
-    let store_a = Arc::new(InMemory::new());
-    let registry_a = RegistryStorage::new(store_a, &test_tenant_ctx());
-
-    let store_b = Arc::new(InMemory::new());
-    let registry_b = RegistryStorage::new(store_b, &test_tenant_ctx());
-
     let key = TestKey::new("test-key-digest");
+    with_test_key(&key, |key, registry_a| Box::pin(async move {
+        // Need a second registry instance? Actually the helper gives one.
+        // We can just use the same registry instance since it's just an object store wrapper.
+        // Or we can create another one if we really want to simulate "two registries".
+        // Let's just use one registry for simplicity, or manually create another if needed.
+        // But wait, the test wants to compare digests from two saves.
+        // Let's create a second store/registry manually inside if we must,
+        // or just use the same one (saving to different paths? No, same path overwrites).
+        // Actually, we just need to verify the digests match.
+        // We can save to the same registry twice.
 
-    temp_env::with_var(key.env_var_name(), Some(&key.public_key_b64), || {
-        reload_trust_root_keys();
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        rt.block_on(async {
-            let mut manifest_a = test_manifest("app_security_digest", "1.0.0");
-            manifest_a.name = "Security Digest Test".to_string();
-            key.sign(&mut manifest_a);
+        let mut manifest_a = test_manifest("app_security_digest", "1.0.0");
+        manifest_a.name = "Security Digest Test".to_string();
+        key.sign(&mut manifest_a);
 
-            let mut manifest_b = manifest_a.clone();
-            manifest_b.security.trust_root_version = "v2".to_string();
+        let mut manifest_b = manifest_a.clone();
+        manifest_b.security.trust_root_version = "v2".to_string();
 
-            let (digest_a, _) = registry_a.save_manifest(&manifest_a).await.unwrap();
-            let (digest_b, _) = registry_b.save_manifest(&manifest_b).await.unwrap();
+        let (digest_a, _) = registry_a.save_manifest(&manifest_a).await.unwrap();
+        // Save B (overwrites A, but we just want the returned digest)
+        let (digest_b, _) = registry_a.save_manifest(&manifest_b).await.unwrap();
 
-            assert_eq!(digest_a, digest_b);
-        })
-    });
+        assert_eq!(digest_a, digest_b);
+    }));
 }
 
 #[test]
 fn test_save_manifest_rejects_invalid_signature() {
-    let store = Arc::new(InMemory::new());
-    let registry = RegistryStorage::new(store, &test_tenant_ctx());
     let key = TestKey::new("test-key-invalid");
+    with_test_key(&key, |key, registry| Box::pin(async move {
+        let mut manifest = test_manifest("app_invalid_sig", "1.0.0");
+        key.sign(&mut manifest);
+        // Tamper with signature
+        manifest.security.manifest_signature = BASE64_URL_SAFE_NO_PAD.encode(b"bad_sig");
 
-    temp_env::with_var(key.env_var_name(), Some(&key.public_key_b64), || {
-        reload_trust_root_keys();
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        rt.block_on(async {
-            let mut manifest = test_manifest("app_invalid_sig", "1.0.0");
-            key.sign(&mut manifest);
-            // Tamper with signature
-            manifest.security.manifest_signature = BASE64_URL_SAFE_NO_PAD.encode(b"bad_sig");
-
-            let result = registry.save_manifest(&manifest).await;
-            match result {
-                Err(RegistryError::SignatureVerificationFailed(_)) => {}
-                other => panic!("expected SignatureVerificationFailed, got {other:?}"),
-            }
-        })
-    });
+        let result = registry.save_manifest(&manifest).await;
+        match result {
+            Err(RegistryError::SignatureVerificationFailed(_)) => {}
+            other => panic!("expected SignatureVerificationFailed, got {other:?}"),
+        }
+    }));
 }
 
 #[test]
 fn test_save_manifest_rejects_unknown_kid() {
-    let store = Arc::new(InMemory::new());
-    let registry = RegistryStorage::new(store, &test_tenant_ctx());
     let key = TestKey::new("test-key-unknown");
+    with_test_key_unset(&key, |key, registry| Box::pin(async move {
+        let mut manifest = test_manifest("app_unknown_kid", "1.0.0");
+        key.sign(&mut manifest);
 
-    // Explicitly UNSET the key to ensure it's unknown even if env leaked
-    temp_env::with_var(key.env_var_name(), None::<&str>, || {
-        reload_trust_root_keys();
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        rt.block_on(async {
-            let mut manifest = test_manifest("app_unknown_kid", "1.0.0");
-            key.sign(&mut manifest);
-
-            let result = registry.save_manifest(&manifest).await;
-            match result {
-                Err(RegistryError::KeyNotFound(_)) => {}
-                other => panic!("expected KeyNotFound, got {other:?}"),
-            }
-        })
-    });
+        let result = registry.save_manifest(&manifest).await;
+        match result {
+            Err(RegistryError::KeyNotFound(_)) => {}
+            other => panic!("expected KeyNotFound, got {other:?}"),
+        }
+    }));
 }
 
 #[tokio::test]
@@ -297,13 +291,17 @@ async fn test_save_manifest_rejects_empty_trust_root_version() {
 
 #[test]
 fn test_get_manifest_detects_tampered_stored_json() {
-    let store = Arc::new(InMemory::new());
-    let tenant_ctx = test_tenant_ctx();
-    let registry = RegistryStorage::new(store.clone(), &tenant_ctx);
     let key = TestKey::new("test-key-tamper");
+
+    // We can't easily use with_test_key helper because we need to tamper with the store.
+    // So we replicate the setup but keeping access to the store.
 
     temp_env::with_var(key.env_var_name(), Some(&key.public_key_b64), || {
         reload_trust_root_keys();
+        let store = Arc::new(InMemory::new());
+        let tenant_ctx = test_tenant_ctx();
+        let registry = RegistryStorage::new(store.clone(), &tenant_ctx);
+
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
             let mut manifest = test_manifest("app_tamper_test", "1.0.0");
@@ -336,68 +334,50 @@ fn test_get_manifest_detects_tampered_stored_json() {
 
 #[test]
 fn test_manifest_digest_numeric_normalization() {
-    let store_a = Arc::new(InMemory::new());
-    let registry_a = RegistryStorage::new(store_a, &test_tenant_ctx());
-
-    let store_b = Arc::new(InMemory::new());
-    let registry_b = RegistryStorage::new(store_b, &test_tenant_ctx());
-
     let key = TestKey::new("test-key-numeric");
+    with_test_key(&key, |key, registry| Box::pin(async move {
+        let mut manifest_int = test_manifest("app_numeric", "1.0.0");
+        manifest_int
+            .configuration
+            .insert("count".to_string(), serde_json::json!(1));
+        // Sign AFTER modification
+        key.sign(&mut manifest_int);
 
-    temp_env::with_var(key.env_var_name(), Some(&key.public_key_b64), || {
-        reload_trust_root_keys();
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        rt.block_on(async {
-            let mut manifest_int = test_manifest("app_numeric", "1.0.0");
-            manifest_int
-                .configuration
-                .insert("count".to_string(), serde_json::json!(1));
-            // Sign AFTER modification
-            key.sign(&mut manifest_int);
+        let mut manifest_float = test_manifest("app_numeric", "1.0.0");
+        manifest_float
+            .configuration
+            .insert("count".to_string(), serde_json::json!(1.0));
 
-            let mut manifest_float = test_manifest("app_numeric", "1.0.0");
-            manifest_float
-                .configuration
-                .insert("count".to_string(), serde_json::json!(1.0));
-            // Reuse same signature? No, because json!(1.0) might affect digest if not normalized.
-            // But we test that digest IS normalized.
-            // If normalized, payloads are identical.
-            // So we can use the signature from manifest_int for manifest_float?
-            // Yes, if digest logic works.
-            manifest_float.security.manifest_signature = manifest_int.security.manifest_signature.clone();
-            manifest_float.security.manifest_signature_kid = manifest_int.security.manifest_signature_kid.clone();
+        // Assert normalization matches BEFORE signing/saving
+        assert_eq!(compute_digest(&manifest_int), compute_digest(&manifest_float));
 
-            let (digest_int, _) = registry_a.save_manifest(&manifest_int).await.unwrap();
-            let (digest_float, _) = registry_b.save_manifest(&manifest_float).await.unwrap();
+        // Reuse same signature from int for float version
+        manifest_float.security.manifest_signature = manifest_int.security.manifest_signature.clone();
+        manifest_float.security.manifest_signature_kid = manifest_int.security.manifest_signature_kid.clone();
 
-            assert_eq!(digest_int, digest_float);
-        })
-    });
+        let (digest_int, _) = registry.save_manifest(&manifest_int).await.unwrap();
+        let (digest_float, _) = registry.save_manifest(&manifest_float).await.unwrap();
+
+        assert_eq!(digest_int, digest_float);
+    }));
 }
 
 #[test]
 fn test_manifest_digest_big_int_normalization() {
-    let store_a = Arc::new(InMemory::new());
-    let registry_a = RegistryStorage::new(store_a, &test_tenant_ctx());
     let key = TestKey::new("test-key-bigint");
+    with_test_key(&key, |key, registry| Box::pin(async move {
+        let mut manifest_big = test_manifest("app_big_int", "1.0.0");
+        manifest_big
+            .configuration
+            .insert("big_i64".to_string(), serde_json::json!(i64::MAX));
+        manifest_big
+            .configuration
+            .insert("big_u64".to_string(), serde_json::json!(u64::MAX));
+        key.sign(&mut manifest_big);
 
-    temp_env::with_var(key.env_var_name(), Some(&key.public_key_b64), || {
-        reload_trust_root_keys();
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        rt.block_on(async {
-            let mut manifest_big = test_manifest("app_big_int", "1.0.0");
-            manifest_big
-                .configuration
-                .insert("big_i64".to_string(), serde_json::json!(i64::MAX));
-            manifest_big
-                .configuration
-                .insert("big_u64".to_string(), serde_json::json!(u64::MAX));
-            key.sign(&mut manifest_big);
-
-            let (digest, _) = registry_a.save_manifest(&manifest_big).await.unwrap();
-            assert_eq!(digest.len(), 96);
-        })
-    });
+        let (digest, _) = registry.save_manifest(&manifest_big).await.unwrap();
+        assert_eq!(digest.len(), 96);
+    }));
 }
 
 #[tokio::test]

@@ -16,9 +16,7 @@ bytes = "1.5"
 kernel-core = { path = "../kernel-core" }
 tracing = "=0.1.43"
 base64 = "0.22"
-ed25519-dalek = { version = "2.1", features = ["std"] }
-once_cell = "1.19"
-regex = "1.10"
+ed25519-dalek = { version = "2.1", features = ["std", "rand_core"] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full"] }
