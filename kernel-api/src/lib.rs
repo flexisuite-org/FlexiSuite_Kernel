@@ -155,5 +155,108 @@ pub async fn get_action_status(
         .into_response();
     }
 
-    error::build_json_error_response(StatusCode::NOT_FOUND, "Action not found")
+    
+error::build_json_error_response(StatusCode::NOT_FOUND, "Action not found")
+}
+
+#[cfg(test)]
+mod security_header_tests {
+    use super::*;
+    use axum::{
+        body::Body,
+        http::{Request, StatusCode},
+    };
+    use sea_orm::{DatabaseBackend, MockDatabase};
+    use tower::ServiceExt;
+
+    async fn make_test_app() -> Router {
+        let db = Arc::new(MockDatabase::new(DatabaseBackend::Postgres).into_connection());
+        let mut config = MiddlewareConfig::default();
+        config.require_redis = false;
+        config.redis_url = "redis://0.0.0.0:0".to_string();
+
+        let state = MiddlewareState::new(config)
+            .await
+            .expect("Failed to create state");
+        let (app, _cleanup) = build_app_with_state(state, db);
+        app
+    }
+
+    async fn assert_security_headers(response: Response) {
+        assert_eq!(
+            response
+                .headers()
+                .get("cross-origin-opener-policy")
+                .and_then(|v| v.to_str().ok()),
+            Some("same-origin")
+        );
+        assert_eq!(
+            response
+                .headers()
+                .get("cross-origin-embedder-policy")
+                .and_then(|v| v.to_str().ok()),
+            Some("require-corp")
+        );
+        assert_eq!(
+            response
+                .headers()
+                .get("cross-origin-resource-policy")
+                .and_then(|v| v.to_str().ok()),
+            Some("same-origin")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_security_headers_health() {
+        let app = make_test_app().await;
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_security_headers(response).await;
+    }
+
+    #[tokio::test]
+    async fn test_security_headers_protected() {
+        let app = make_test_app().await;
+        // Call protected route without auth to trigger a response (even if it's 401/error, headers should still be there)
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/test")
+                    .method("POST")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        // Should be 401 Unauthorized because we didn't provide any auth headers
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert_security_headers(response).await;
+    }
+
+    #[tokio::test]
+    async fn test_security_headers_error() {
+        let app = make_test_app().await;
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/non-existent")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        assert_security_headers(response).await;
+    }
 }
