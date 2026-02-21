@@ -3,7 +3,6 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
-use serde_json::json;
 
 #[derive(serde::Serialize)]
 pub struct JsonError {
