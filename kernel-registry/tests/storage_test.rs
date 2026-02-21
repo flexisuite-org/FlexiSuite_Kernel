@@ -220,6 +220,38 @@ fn test_save_manifest_rejects_unknown_kid() {
     }));
 }
 
+#[test]
+fn test_normalized_kid_collision_rejects_ambiguous_keys() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let key_a = TestKey::new("abc");
+    let key_b = TestKey::new("ABC");
+    let env_a = "FLEXI_REGISTRY_TRUST_ROOT_KEY_B64URL_abc";
+    let env_b = "FLEXI_REGISTRY_TRUST_ROOT_KEY_B64URL_ABC";
+
+    temp_env::with_vars(
+        [
+            (env_a, Some(key_a.public_key_b64.as_str())),
+            (env_b, Some(key_b.public_key_b64.as_str())),
+        ],
+        || {
+            reload_trust_root_keys();
+            let store = Arc::new(InMemory::new());
+            let registry = RegistryStorage::new(store, &test_tenant_ctx());
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            rt.block_on(async {
+                let mut manifest = test_manifest("app_collision", "1.0.0");
+                key_a.sign(&mut manifest);
+
+                let result = registry.save_manifest(&manifest).await;
+                match result {
+                    Err(RegistryError::KeyNotFound(_)) => {}
+                    other => panic!("expected KeyNotFound for normalized KID collision, got {other:?}"),
+                }
+            });
+        },
+    );
+}
+
 #[tokio::test]
 async fn test_get_missing_manifest_returns_manifest_not_found() {
     let store = Arc::new(InMemory::new());
@@ -309,7 +341,12 @@ fn test_get_manifest_detects_tampered_stored_json() {
             let mut tampered = persisted.clone();
             tampered.name = "Tampered Name".to_string();
             let tampered_bytes = serde_json::to_vec(&tampered).unwrap();
-            let tampered_path = registry.manifest_path(&manifest.id, &manifest.version);
+            let tampered_path = Path::from(format!(
+                "tenants/{}/manifests/{}/{}/manifest.json",
+                tenant_ctx.tenant_id().as_str(),
+                manifest.id,
+                manifest.version
+            ));
             store
                 .put(&tampered_path, tampered_bytes.into())
                 .await

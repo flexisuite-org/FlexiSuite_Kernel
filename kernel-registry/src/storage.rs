@@ -9,7 +9,7 @@ use object_store::path::Path;
 use object_store::ObjectStore;
 use serde::Serialize;
 use sha2::{Digest, Sha384};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::{Arc, LazyLock, RwLock};
 use tracing::{error, info, instrument, warn};
 
@@ -21,11 +21,31 @@ static TRUST_ROOTS: LazyLock<RwLock<HashMap<String, VerifyingKey>>> = LazyLock::
 
 fn load_trust_roots_from_env() -> HashMap<String, VerifyingKey> {
     let mut map = HashMap::new();
-    for (key, val) in std::env::vars() {
+    let mut source_suffixes = HashMap::<String, String>::new();
+    let mut collisions = HashSet::<String>::new();
+
+    for (key, val) in std::env::vars_os() {
+        let key = match key.into_string() {
+            Ok(v) => v,
+            Err(_) => {
+                warn!("Skipping non-UTF-8 environment variable name while loading trust roots");
+                continue;
+            }
+        };
         if let Some(kid_suffix) = key.strip_prefix("FLEXI_REGISTRY_TRUST_ROOT_KEY_B64URL_") {
             if kid_suffix.is_empty() {
                 continue;
             }
+            let val = match val.into_string() {
+                Ok(v) => v,
+                Err(_) => {
+                    warn!(
+                        "Ignoring trust root env var {} because value is not valid UTF-8",
+                        key
+                    );
+                    continue;
+                }
+            };
             // Normalize checks: The suffix MUST be alphanumeric + underscore only.
             // We reuse normalize_kid logic or just check it directly.
             // Since this comes from environment keys (often shell constrained), uppercase is expected.
@@ -36,6 +56,30 @@ fn load_trust_roots_from_env() -> HashMap<String, VerifyingKey> {
             {
                 warn!("Ignoring invalid trust root env key suffix: {}", kid_suffix);
                 continue;
+            }
+
+            let normalized_kid = normalize_kid(kid_suffix);
+            if collisions.contains(&normalized_kid) {
+                warn!(
+                    kid_suffix = %kid_suffix,
+                    normalized_kid = %normalized_kid,
+                    "Ignoring trust root key because this normalized KID is in collision state"
+                );
+                continue;
+            }
+            if let Some(existing_suffix) = source_suffixes.get(&normalized_kid) {
+                if existing_suffix != kid_suffix {
+                    warn!(
+                        existing_suffix = %existing_suffix,
+                        conflicting_suffix = %kid_suffix,
+                        normalized_kid = %normalized_kid,
+                        "Rejecting normalized KID collision in trust root env vars"
+                    );
+                    map.remove(&normalized_kid);
+                    source_suffixes.remove(&normalized_kid);
+                    collisions.insert(normalized_kid);
+                    continue;
+                }
             }
 
             match BASE64_URL_SAFE_NO_PAD.decode(&val) {
@@ -51,7 +95,8 @@ fn load_trust_roots_from_env() -> HashMap<String, VerifyingKey> {
                     if let Ok(vk) = VerifyingKey::from_bytes(
                         bytes.as_slice().try_into().expect("Checked length is 32"),
                     ) {
-                        map.insert(normalize_kid(kid_suffix), vk);
+                        source_suffixes.insert(normalized_kid.clone(), kid_suffix.to_string());
+                        map.insert(normalized_kid, vk);
                     } else {
                         warn!("Invalid Ed25519 public key format for env var {}", key);
                     }
@@ -61,6 +106,12 @@ fn load_trust_roots_from_env() -> HashMap<String, VerifyingKey> {
                 }
             }
         }
+    }
+    if !collisions.is_empty() {
+        warn!(
+            collisions = ?collisions,
+            "Detected trust root key normalization collisions; affected KIDs were rejected"
+        );
     }
     info!("Loaded {} trust root keys from environment", map.len());
     map
