@@ -115,7 +115,7 @@ impl TestAuth {
     pub async fn revoke_active_hmac_key(
         db: &DatabaseConnection,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        use sea_orm::{ColumnTrait, QueryFilter, Set};
+        use sea_orm::{ColumnTrait, QueryFilter};
 
         let key_model = key_record::Entity::find()
             .filter(key_record::Column::KeyType.eq(KeyType::Hmac))
