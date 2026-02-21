@@ -21,9 +21,9 @@ use crate::middleware::{
 
 pub mod auth;
 pub mod diagnostics;
-pub mod error;
 pub mod middleware;
 pub mod profile;
+pub mod error;
 
 #[derive(Serialize)]
 pub struct TestWriteResponse {
