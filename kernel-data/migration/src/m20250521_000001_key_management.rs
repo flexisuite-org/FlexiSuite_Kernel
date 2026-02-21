@@ -39,7 +39,8 @@ impl MigrationTrait for Migration {
         // 2. Update Authorize Function to use Key Record
         // Instead of relying on GUC 'flexi.hmac_secret' for the external token, lookup in key_record.
         // We still use 'flexi.hmac_secret' for the internal context integrity (ctx_sig).
-        let sql = r#"
+        db.execute_unprepared(
+            r#"
             CREATE OR REPLACE FUNCTION flexi.authorize_tenant(token_val text) RETURNS void AS $$
             DECLARE
                 parts text[];
@@ -99,7 +100,7 @@ impl MigrationTrait for Migration {
                   AND (state != 'retired' OR retired_at > now() - interval '48 hours');
 
                 IF secret_key IS NULL THEN
-                    RAISE EXCEPTION '"#.to_string() + kernel_data::error::INVALID_OR_EXPIRED_KEY_ID + r#": %', kid_val;
+                    RAISE EXCEPTION 'Invalid or expired key ID: %', kid_val;
                 END IF;
 
                 -- Real HMAC verification (fail-closed if not verified)
@@ -133,8 +134,8 @@ impl MigrationTrait for Migration {
                 PERFORM set_config('flexi.ctx_sig', encode(hmac(tenant_id_val, internal_secret, 'sha256'), 'hex'), true);
             END;
             $$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = flexi, pg_catalog, pg_temp;
-            "#;
-        db.execute_unprepared(sql.as_str()).await?;
+            "#
+        ).await?;
 
         db.execute_unprepared(
             r#"
