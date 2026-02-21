@@ -19,7 +19,7 @@ use kernel_data::entities::key_record;
 use kernel_data::repository::TenantRepository;
 use sea_orm::{
     ActiveValue, ConnectionTrait, Database, DatabaseConnection, DbBackend, Statement,
-    TransactionTrait, ColumnTrait, QueryFilter, EntityTrait, ActiveModelTrait
+    TransactionTrait, QueryFilter,
 };
 use std::sync::OnceLock;
 use testcontainers::{RunnableImage, clients};
@@ -71,6 +71,17 @@ async fn setup_test_db() -> (DatabaseConnection, PostgresNode) {
     let db = Database::connect(&connection_string)
         .await
         .expect("Failed to reconnect to DB");
+
+    // 5. Re-initialize Admin for verification (the old admin was tied to the dropped connection)
+    let admin = TestAdminTenantContext::new(&db);
+
+    // Verify pgcrypto extension is enabled (as per acceptance criteria)
+    let pgcrypto_exists = admin
+        .query_all_check("SELECT 1 FROM pg_extension WHERE extname = 'pgcrypto'")
+        .await
+        .expect("Failed to query extensions");
+    assert_eq!(pgcrypto_exists.len(), 1, "pgcrypto extension should be enabled");
+
     (db, node)
 }
 
@@ -420,22 +431,22 @@ async fn test_authorize_rejects_revoked_key() {
         .await
         .expect("First token usage should succeed");
 
-    // Verify pgcrypto extension is enabled (as per acceptance criteria)
-    let admin = TestAdminTenantContext::new(&db);
-    let pgcrypto_exists = admin
-        .query_all_check("SELECT 1 FROM pg_extension WHERE extname = 'pgcrypto'")
-        .await
-        .expect("Failed to query extensions");
-    assert_eq!(pgcrypto_exists.len(), 1, "pgcrypto extension should be enabled");
-
-    // Revoke key using TestAuth helper to simulate KeyManager logic
+    // Revoke key using TestAuth helper to simulate only the revocation step;
+    // does not promote the Next key or create a successor.
     TestAuth::revoke_active_hmac_key(&db)
         .await
         .expect("Failed to revoke active key");
 
+    // Generate a fresh token (new nonce) so authorize_tenant sees revocation rather than a spent nonce.
+    // We must use the Revoked key explicitly here as TestAuth::generate_tenant_token only looks for Active keys.
+    use kernel_data::entities::key_record::KeyState;
+    let fresh_token = TestAuth::generate_tenant_token_with_state(&db, &tenant_id, KeyState::Revoked)
+        .await
+        .expect("Failed to generate fresh token");
+
     // NOTE: This test verifies functional correctness (security contract).
     // Latency SLO (p95 < 60s) must be verified via load testing (see ops/slo_profile.yaml).
-    let second = with_tenant_tx(&db, &ctx, &token, |_| Box::pin(async { Ok(()) })).await;
+    let second = with_tenant_tx(&db, &ctx, &fresh_token, |_| Box::pin(async { Ok(()) })).await;
     assert!(
         second.is_err(),
         "Token usage with revoked key must fail"
