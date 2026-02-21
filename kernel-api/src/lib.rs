@@ -183,27 +183,43 @@ mod security_header_tests {
     }
 
     async fn assert_security_headers(response: Response) {
+        let headers = response.headers();
         assert_eq!(
-            response
-                .headers()
+            headers
                 .get("cross-origin-opener-policy")
                 .and_then(|v| v.to_str().ok()),
             Some("same-origin")
         );
         assert_eq!(
-            response
-                .headers()
+            headers
                 .get("cross-origin-embedder-policy")
                 .and_then(|v| v.to_str().ok()),
             Some("require-corp")
         );
         assert_eq!(
-            response
-                .headers()
+            headers
                 .get("cross-origin-resource-policy")
                 .and_then(|v| v.to_str().ok()),
             Some("same-origin")
         );
+
+        // Verify existing security headers are present
+        assert!(headers
+            .get("x-content-type-options")
+            .and_then(|v| v.to_str().ok())
+            .is_some());
+        assert!(headers
+            .get("x-frame-options")
+            .and_then(|v| v.to_str().ok())
+            .is_some());
+        assert!(headers
+            .get("content-security-policy")
+            .and_then(|v| v.to_str().ok())
+            .is_some());
+        assert!(headers
+            .get("strict-transport-security")
+            .and_then(|v| v.to_str().ok())
+            .is_some());
     }
 
     #[tokio::test]
