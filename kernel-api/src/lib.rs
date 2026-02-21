@@ -4,7 +4,6 @@ use axum::{
     http::{HeaderName, HeaderValue, StatusCode, header},
     middleware::{from_fn, from_fn_with_state},
     routing::{get, post},
-    response::{IntoResponse, Response},
 };
 use sea_orm::DatabaseConnection;
 use serde::Serialize;
@@ -22,7 +21,6 @@ use crate::middleware::{
 
 pub mod auth;
 pub mod diagnostics;
-pub mod error;
 pub mod middleware;
 pub mod profile;
 pub mod error;
@@ -160,8 +158,7 @@ pub async fn get_action_status(
         .into_response();
     }
 
-    
-error::build_json_error_response(StatusCode::NOT_FOUND, "Action not found")
+    error::build_json_error_response("Action not found", StatusCode::NOT_FOUND)
 }
 
 #[cfg(test)]

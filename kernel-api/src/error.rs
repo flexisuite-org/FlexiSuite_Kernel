@@ -3,33 +3,28 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
-use serde::Serialize;
+use serde_json::json;
 
-#[derive(Serialize)]
+#[derive(serde::Serialize)]
 pub struct JsonError {
-    pub error: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub details: Option<serde_json::Value>,
+    pub error: JsonErrorBody,
 }
 
-pub fn build_json_error_response(status: StatusCode, message: impl Into<String>) -> Response {
-    let body = build_json_error(message);
+#[derive(serde::Serialize)]
+pub struct JsonErrorBody {
+    pub code: u16,
+    pub message: String,
+    pub timestamp: String,
+}
+
+pub fn build_json_error_response(message: impl Into<String>, status: StatusCode) -> Response {
+    let now = chrono::Utc::now().to_rfc3339();
+    let body = JsonError {
+        error: JsonErrorBody {
+            code: status.as_u16(),
+            message: message.into(),
+            timestamp: now,
+        },
+    };
     (status, Json(body)).into_response()
-}
-
-pub fn build_json_error(message: impl Into<String>) -> JsonError {
-    JsonError {
-        error: message.into(),
-        details: None,
-    }
-}
-
-pub fn build_json_error_with_details(
-    message: impl Into<String>,
-    details: Option<serde_json::Value>,
-) -> JsonError {
-    JsonError {
-        error: message.into(),
-        details,
-    }
 }
