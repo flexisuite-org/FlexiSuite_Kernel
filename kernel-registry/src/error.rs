@@ -22,4 +22,10 @@ pub enum RegistryError {
 
     #[error("Invalid manifest: {0}")]
     InvalidManifest(String),
+
+    #[error("Signature verification failed: {0}")]
+    SignatureVerificationFailed(String),
+
+    #[error("Trust root key not found: {0}")]
+    KeyNotFound(String),
 }

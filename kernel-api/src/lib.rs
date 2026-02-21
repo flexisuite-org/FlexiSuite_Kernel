@@ -1,15 +1,16 @@
 use axum::{
     Json, Router,
     extract::{Extension, Path},
-    http::{HeaderName, HeaderValue, StatusCode},
+    http::{HeaderMap, HeaderName, HeaderValue, StatusCode, header},
     middleware::{from_fn, from_fn_with_state},
-    routing::{get, post},
     response::{IntoResponse, Response},
+    routing::{get, post},
 };
 use sea_orm::DatabaseConnection;
 use serde::Serialize;
 use std::sync::Arc;
 use tokio::task::JoinHandle;
+use tower::ServiceBuilder;
 use tower_http::set_header::SetResponseHeaderLayer;
 use uuid::Uuid;
 
@@ -21,9 +22,9 @@ use crate::middleware::{
 
 pub mod auth;
 pub mod diagnostics;
-pub mod error;
 pub mod middleware;
 pub mod profile;
+pub mod error;
 
 #[derive(Serialize)]
 pub struct TestWriteResponse {
@@ -68,37 +69,40 @@ pub fn build_app_with_state(
         Router::new()
             .merge(public_router)
             .merge(protected_router)
-            // COOP/COEP headers for cross-origin isolation
-            .layer(SetResponseHeaderLayer::overriding(
-                HeaderName::from_static("cross-origin-opener-policy"),
-                HeaderValue::from_static("same-origin"),
-            ))
-            .layer(SetResponseHeaderLayer::overriding(
-                HeaderName::from_static("cross-origin-embedder-policy"),
-                HeaderValue::from_static("require-corp"),
-            ))
-            .layer(SetResponseHeaderLayer::overriding(
-                HeaderName::from_static("cross-origin-resource-policy"),
-                HeaderValue::from_static("same-origin"),
-            ))
-            // Existing security headers
-            .layer(SetResponseHeaderLayer::overriding(
-                HeaderName::from_static("x-content-type-options"),
-                HeaderValue::from_static("nosniff"),
-            ))
-            .layer(SetResponseHeaderLayer::overriding(
-                HeaderName::from_static("x-frame-options"),
-                HeaderValue::from_static("DENY"),
-            ))
-            .layer(SetResponseHeaderLayer::overriding(
-                HeaderName::from_static("content-security-policy"),
-                HeaderValue::from_static("default-src 'none'; frame-ancestors 'none'"),
-            ))
-            .layer(SetResponseHeaderLayer::overriding(
-                HeaderName::from_static("strict-transport-security"),
-                HeaderValue::from_static("max-age=63072000; includeSubDomains; preload"),
-            ))
-            .layer(Extension(state)),
+            .layer(Extension(state))
+            .layer(
+                ServiceBuilder::new()
+                    // COOP/COEP/CORP headers for cross-origin isolation
+                    .layer(SetResponseHeaderLayer::overriding(
+                        HeaderName::from_static("cross-origin-opener-policy"),
+                        HeaderValue::from_static("same-origin"),
+                    ))
+                    .layer(SetResponseHeaderLayer::overriding(
+                        HeaderName::from_static("cross-origin-embedder-policy"),
+                        HeaderValue::from_static("require-corp"),
+                    ))
+                    .layer(SetResponseHeaderLayer::overriding(
+                        HeaderName::from_static("cross-origin-resource-policy"),
+                        HeaderValue::from_static("same-origin"),
+                    ))
+                    // Standard security headers
+                    .layer(SetResponseHeaderLayer::overriding(
+                        header::X_CONTENT_TYPE_OPTIONS,
+                        HeaderValue::from_static("nosniff"),
+                    ))
+                    .layer(SetResponseHeaderLayer::overriding(
+                        header::X_FRAME_OPTIONS,
+                        HeaderValue::from_static("DENY"),
+                    ))
+                    .layer(SetResponseHeaderLayer::overriding(
+                        header::CONTENT_SECURITY_POLICY,
+                        HeaderValue::from_static("default-src 'none'; frame-ancestors 'none'"),
+                    ))
+                    .layer(SetResponseHeaderLayer::overriding(
+                        header::STRICT_TRANSPORT_SECURITY,
+                        HeaderValue::from_static("max-age=63072000; includeSubDomains"),
+                    )),
+            ),
         cleanup_handle,
     )
 }
@@ -144,6 +148,7 @@ pub async fn write_test(
 
 pub async fn get_action_status(
     Path(action_id): Path<String>,
+    headers: HeaderMap,
     Extension(state): Extension<MiddlewareState>,
     Extension(ctx): Extension<TenantContext>,
 ) -> Response {
@@ -155,8 +160,12 @@ pub async fn get_action_status(
         .into_response();
     }
 
-    
-error::build_json_error_response(StatusCode::NOT_FOUND, "Action not found")
+    let request_id = headers
+        .get("x-request-id")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+
+    error::build_json_error_response("Action not found", StatusCode::NOT_FOUND, request_id)
 }
 
 #[cfg(test)]

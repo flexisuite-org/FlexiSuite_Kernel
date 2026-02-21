@@ -160,11 +160,9 @@ mod tests {
 
         // Deterministic rejection of invalid characters
         assert!(TenantId::new("tenant/a").is_err());
-        assert!(validate_stream_key(
-            "tenant-a:stream:0",
-            &TenantId::new("tenant-a").unwrap()
-        )
-        .is_ok());
+        assert!(
+            validate_stream_key("tenant-a:stream:0", &TenantId::new("tenant-a").unwrap()).is_ok()
+        );
     }
 
     #[test]
