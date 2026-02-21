@@ -100,6 +100,17 @@ impl TestAuth {
     }
 
     /// Revokes the currently active HMAC key.
+    ///
+    /// NOTE: This helper directly mutates the database state via SeaORM and bypasses the `KeyManager`
+    /// application layer. This is necessary because `kernel-data` cannot depend on `kernel-core`
+    /// (where `KeyManager` resides) due to circular dependency constraints
+    /// (`kernel-data` → `kernel-core` → `kernel-data`).
+    ///
+    /// Because it bypasses `KeyManager`, this helper does NOT exercise logic like audit logging
+    /// or cache invalidation. Tests using this (e.g., `test_authorize_rejects_revoked_key`) only
+    /// verify database-state enforcement, not the end-to-end revocation path.
+    ///
+    /// Tracking Issue: `docs/tech_debt/issue_kernel_token_extraction.md`
     /// Used for testing REQ-KEY-REVOCATION-SLO.
     pub async fn revoke_active_hmac_key(
         db: &DatabaseConnection,
