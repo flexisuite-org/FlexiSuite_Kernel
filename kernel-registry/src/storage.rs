@@ -250,7 +250,7 @@ impl RegistryStorage {
         Path::from(format!("{}artifacts/{}", self.prefix, key))
     }
 
-    pub(crate) fn manifest_path(&self, id: &str, version: &str) -> Path {
+    pub fn manifest_path(&self, id: &str, version: &str) -> Path {
         Path::from(format!(
             "{}manifests/{}/{}/manifest.json",
             self.prefix, id, version
