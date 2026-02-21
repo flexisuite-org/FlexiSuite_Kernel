@@ -66,6 +66,20 @@ pub fn build_app_with_state(
         Router::new()
             .merge(public_router)
             .merge(protected_router)
+            // COOP/COEP headers for cross-origin isolation
+            .layer(SetResponseHeaderLayer::overriding(
+                HeaderName::from_static("cross-origin-opener-policy"),
+                HeaderValue::from_static("same-origin"),
+            ))
+            .layer(SetResponseHeaderLayer::overriding(
+                HeaderName::from_static("cross-origin-embedder-policy"),
+                HeaderValue::from_static("require-corp"),
+            ))
+            .layer(SetResponseHeaderLayer::overriding(
+                HeaderName::from_static("cross-origin-resource-policy"),
+                HeaderValue::from_static("same-origin"),
+            ))
+            // Existing security headers
             .layer(SetResponseHeaderLayer::overriding(
                 HeaderName::from_static("x-content-type-options"),
                 HeaderValue::from_static("nosniff"),
