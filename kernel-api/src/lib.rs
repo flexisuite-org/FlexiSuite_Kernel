@@ -243,7 +243,7 @@ mod security_header_tests {
         let response = app
             .oneshot(
                 Request::builder()
-                    .uri("/health")
+                    .uri("/health/liveness")
                     .body(Body::empty())
                     .unwrap(),
             )
