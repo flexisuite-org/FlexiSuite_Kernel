@@ -15,7 +15,6 @@ use common::auth::TestAuth;
 use kernel_data::DataError;
 use kernel_data::connection::{RawConnection, TenantScoped, with_tenant_tx};
 use kernel_data::entities::entity_record;
-use kernel_data::entities::key_record;
 use kernel_data::repository::TenantRepository;
 use sea_orm::{
     ConnectionTrait, Database, DatabaseConnection, DbBackend, Statement, TransactionTrait, Set,
@@ -72,7 +71,11 @@ async fn setup_test_db() -> (DatabaseConnection, PostgresNode) {
         .expect("Failed to reconnect to DB");
 
     // 5. Re-initialize Admin for verification (the old admin was tied to the dropped connection)
-    let _admin = TestAdminTenantContext::new(&db);
+    let admin = TestAdminTenantContext::new(&db);
+    admin
+        .query_all_check("SELECT 1")
+        .await
+        .expect("Admin verification failed after reconnection");
 
     (db, node)
 }
@@ -423,29 +426,30 @@ async fn test_authorize_rejects_revoked_key() {
 
     let tenant_id = TenantId::new("revocation-tenant").unwrap();
     let ctx = TenantContext::new(tenant_id.clone(), Some(UserId::new("user-1").unwrap()));
-    let token = TestAuth::generate_tenant_token(&db, &tenant_id)
+    
+    // Generate two tokens while the key is Active
+    let pre_revoke_token = TestAuth::generate_tenant_token(&db, &tenant_id)
         .await
-        .expect("Failed to generate token");
+        .expect("Failed to generate first token");
+    let pre_revoke_token2 = TestAuth::generate_tenant_token(&db, &tenant_id)
+        .await
+        .expect("Failed to generate second token");
 
-    with_tenant_tx(&db, &ctx, &token, |_| Box::pin(async { Ok(()) }))
+    with_tenant_tx(&db, &ctx, &pre_revoke_token, |_| Box::pin(async { Ok(()) }))
         .await
         .expect("First token usage should succeed");
 
-    // Revoke key using TestAuth helper to simulate only the revocation step;
-    // does not promote the Next key or create a successor.
+    // Revoke key using TestAuth helper to simulate only the revocation step
     TestAuth::revoke_active_hmac_key(&db)
         .await
         .expect("Failed to revoke active key");
 
-    // Generate a fresh token (new nonce) so authorize_tenant sees revocation rather than a spent nonce.
-    // We must use the Revoked key explicitly here as TestAuth::generate_tenant_token only looks for Active keys.
-    let fresh_token = TestAuth::generate_tenant_token_with_state(&db, &tenant_id, key_record::KeyState::Revoked)
-        .await
-        .expect("Failed to generate fresh token");
+    // Use the second pre-generated token; authorize_tenant should now reject it 
+    // because the key it references (KID) is now Revoked.
 
     // NOTE: This test verifies functional correctness (security contract).
     // Latency SLO (p95 < 60s) must be verified via load testing (see ops/slo_profile.yaml).
-    let second = with_tenant_tx(&db, &ctx, &fresh_token, |_| Box::pin(async { Ok(()) })).await;
+    let second = with_tenant_tx(&db, &ctx, &pre_revoke_token2, |_| Box::pin(async { Ok(()) })).await;
     assert!(
         second.is_err(),
         "Token usage with revoked key must fail"
