@@ -23,7 +23,6 @@ pub mod auth;
 pub mod diagnostics;
 pub mod middleware;
 pub mod profile;
-pub mod error;
 
 #[derive(Serialize)]
 pub struct TestWriteResponse {
