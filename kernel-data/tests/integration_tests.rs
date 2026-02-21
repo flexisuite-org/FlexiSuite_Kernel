@@ -459,8 +459,9 @@ async fn test_authorize_rejects_revoked_key() {
     // Error message is defined in migration m20250521_000001_key_management.rs
     // If this assertion fails, ensure the migration and this test are in sync.
     assert!(
-        err.contains("Invalid or expired key ID"),
-        "Expected 'Invalid or expired key ID' error, got: {}",
+        err.contains(kernel_data::error::INVALID_OR_EXPIRED_KEY_ID),
+        "Expected '{}' error, got: {}",
+        kernel_data::error::INVALID_OR_EXPIRED_KEY_ID,
         err
     );
 }
