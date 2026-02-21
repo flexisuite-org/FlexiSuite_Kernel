@@ -26,7 +26,7 @@ struct Checks {
     redis: Health,
 }
 
-#[derive(Serialize, Clone, Copy, PartialEq)]
+#[derive(Serialize, Clone, Copy, PartialEq, Debug)]
 #[serde(rename_all = "lowercase")]
 enum Health {
     Up,
