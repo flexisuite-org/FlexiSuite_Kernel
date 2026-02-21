@@ -95,7 +95,7 @@ impl IdempotencyStore for NotifyingStore {
         self.inner.cleanup().await
     }
 
-    async fn ping(&self) -> Result<(), IdempotencyStoreError> {
+    async fn ping(&self) -> Result<kernel_api::middleware::PingStatus, IdempotencyStoreError> {
         self.inner.ping().await
     }
 }
