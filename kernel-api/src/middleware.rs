@@ -212,6 +212,13 @@ pub enum IdempotencyStoreError {
     BackendUnavailable,
 }
 
+#[derive(Clone, Copy, Debug, Serialize, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum PingStatus {
+    Ok,
+    Degraded,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub struct IdempotencyScopeKey {
     pub tenant_id: kernel_core::auth::TenantId,
@@ -245,7 +252,7 @@ pub trait IdempotencyStore: Send + Sync {
         lease: &IdempotencyLease,
     ) -> Result<(), IdempotencyStoreError>;
     async fn cleanup(&self);
-    async fn ping(&self) -> Result<(), IdempotencyStoreError>;
+    async fn ping(&self) -> Result<PingStatus, IdempotencyStoreError>;
 }
 
 pub struct InMemoryIdempotencyStore {
@@ -405,8 +412,8 @@ impl IdempotencyStore for InMemoryIdempotencyStore {
         }
     }
 
-    async fn ping(&self) -> Result<(), IdempotencyStoreError> {
-        Ok(())
+    async fn ping(&self) -> Result<PingStatus, IdempotencyStoreError> {
+        Ok(PingStatus::Degraded)
     }
 }
 
@@ -871,16 +878,19 @@ impl IdempotencyStore for RedisIdempotencyStore {
 
     async fn cleanup(&self) {}
 
-    async fn ping(&self) -> Result<(), IdempotencyStoreError> {
+    /// Checks the health of the Redis backend.
+    ///
+    /// The manager (`ConnectionManager`) is a multiplexed asynchronous connection with
+    /// automatic reconnection. Cloning it returns a handle to the same multiplexed connection.
+    /// We use `redis::cmd("PING").query_async` to exercise that multiplexed connection
+    /// and check backend availability.
+    async fn ping(&self) -> Result<PingStatus, IdempotencyStoreError> {
         let mut conn = self.manager.clone();
-        // Use a low-level command invocation to utilize the connection pool efficiently
-        // and avoid potential overhead of high-level abstractions if they exist.
-        // The ConnectionManager handles multiplexing and reconnection.
         match redis::cmd("PING")
             .query_async::<String>(&mut conn)
             .await
         {
-            Ok(_) => Ok(()),
+            Ok(_) => Ok(PingStatus::Ok),
             Err(e) => {
                 error!("Redis ping error: {}", e);
                 Err(IdempotencyStoreError::BackendUnavailable)
