@@ -97,7 +97,7 @@ pub fn reload_trust_root_keys() {
     *write_guard = new_map;
 }
 
-pub(crate) fn normalize_kid(kid: &str) -> String {
+pub fn normalize_kid(kid: &str) -> String {
     // Alphanumeric -> Uppercase
     // Others -> Underscore
     // This matches the ENV var pattern FLEXI_REGISTRY_TRUST_ROOT_KEY_B64URL_{NORMALIZED}

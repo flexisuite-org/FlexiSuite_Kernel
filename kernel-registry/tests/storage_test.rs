@@ -87,7 +87,7 @@ impl TestKey {
 /// Handles environment variable setting, trust root reloading, and async runtime.
 fn with_test_key<F>(key: &TestKey, test_fn: F)
 where
-    F: FnOnce(&TestKey, RegistryStorage) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>,
+    F: for<'a> FnOnce(&'a TestKey, RegistryStorage) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>>,
 {
     temp_env::with_var(key.env_var_name(), Some(&key.public_key_b64), || {
         reload_trust_root_keys();
@@ -102,7 +102,7 @@ where
 /// Helper to run registry tests with a specific trust root key UNSET.
 fn with_test_key_unset<F>(key: &TestKey, test_fn: F)
 where
-    F: FnOnce(&TestKey, RegistryStorage) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>,
+    F: for<'a> FnOnce(&'a TestKey, RegistryStorage) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>>,
 {
     temp_env::with_var(key.env_var_name(), None::<&str>, || {
         reload_trust_root_keys();

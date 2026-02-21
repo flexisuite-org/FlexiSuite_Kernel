@@ -1938,7 +1938,7 @@ pub async fn quota_middleware(req: Request<Body>, next: Next) -> Result<Response
         }
     }
 
-    if let Err(v) = state
+    if let Err(mut v) = state
         .quota_store
         .check_and_update_multi(
             tenant_ctx.tenant_id(),
@@ -1950,6 +1950,10 @@ pub async fn quota_middleware(req: Request<Body>, next: Next) -> Result<Response
         )
         .await
     {
+        // REQ-QUOTA-HTTP-CONTRACT: Clamp SystemHardLimit Retry-After to 30s to avoid thundering herd
+        if v.layer == QuotaLayer::SystemHardLimit {
+            v.retry_after_s = v.retry_after_s.min(30);
+        }
         return Err(violation_to_response(&v));
     }
 
