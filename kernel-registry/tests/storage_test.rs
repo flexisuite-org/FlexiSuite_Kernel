@@ -43,7 +43,6 @@ fn test_manifest(id: &str, version: &str) -> DistManifest {
     }
 }
 
-// Replaced local compute_digest with call to RegistryStorage implementation
 fn compute_digest(manifest: &DistManifest) -> String {
     RegistryStorage::manifest_payload_digest(manifest).expect("Digest computation failed")
 }
@@ -166,25 +165,16 @@ fn test_save_and_get_manifest() {
 fn test_manifest_digest_excludes_security_section() {
     let key = TestKey::new("test-key-digest");
     with_test_key(&key, |key, registry_a| Box::pin(async move {
-        // Need a second registry instance? Actually the helper gives one.
-        // We can just use the same registry instance since it's just an object store wrapper.
-        // Or we can create another one if we really want to simulate "two registries".
-        // Let's just use one registry for simplicity, or manually create another if needed.
-        // But wait, the test wants to compare digests from two saves.
-        // Let's create a second store/registry manually inside if we must,
-        // or just use the same one (saving to different paths? No, same path overwrites).
-        // Actually, we just need to verify the digests match.
-        // We can save to the same registry twice.
-
         let mut manifest_a = test_manifest("app_security_digest", "1.0.0");
         manifest_a.name = "Security Digest Test".to_string();
         key.sign(&mut manifest_a);
 
         let mut manifest_b = manifest_a.clone();
+        // Modify a security field. The digest (payload) should remain unchanged.
         manifest_b.security.trust_root_version = "v2".to_string();
 
         let (digest_a, _) = registry_a.save_manifest(&manifest_a).await.unwrap();
-        // Save B (overwrites A, but we just want the returned digest)
+        // Saving manifest_b should produce the same digest since only security fields differ.
         let (digest_b, _) = registry_a.save_manifest(&manifest_b).await.unwrap();
 
         assert_eq!(digest_a, digest_b);

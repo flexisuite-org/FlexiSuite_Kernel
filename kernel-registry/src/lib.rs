@@ -10,7 +10,7 @@ pub mod storage;
 /// Returns a `tokio::task::JoinHandle` that can be awaited or dropped.
 pub fn start_trust_root_reloader() -> tokio::task::JoinHandle<()> {
     use std::time::Duration;
-    use tracing::info;
+    use tracing::{error, info};
 
     tokio::spawn(async {
         info!("Starting trust root reloader background task");
@@ -20,7 +20,15 @@ pub fn start_trust_root_reloader() -> tokio::task::JoinHandle<()> {
 
         loop {
             interval.tick().await;
-            storage::reload_trust_root_keys();
+            // Use spawn_blocking because reload_trust_root_keys acquires a RwLock and does env I/O
+            let result = tokio::task::spawn_blocking(move || {
+                storage::reload_trust_root_keys();
+            })
+            .await;
+
+            if let Err(e) = result {
+                error!("Trust root reloader task panicked or failed: {}", e);
+            }
         }
     })
 }

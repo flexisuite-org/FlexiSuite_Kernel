@@ -3,7 +3,7 @@ use crate::model::{Dependencies, DistManifest, Kind, Route};
 use base64::Engine;
 use base64::prelude::BASE64_URL_SAFE_NO_PAD;
 use bytes::Bytes;
-use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+use ed25519_dalek::{Signature, VerifyingKey};
 use kernel_core::auth::TenantContext;
 use object_store::path::Path;
 use object_store::ObjectStore;
@@ -101,6 +101,11 @@ pub fn normalize_kid(kid: &str) -> String {
     // Alphanumeric -> Uppercase
     // Others -> Underscore
     // This matches the ENV var pattern FLEXI_REGISTRY_TRUST_ROOT_KEY_B64URL_{NORMALIZED}
+    //
+    // Note: This mapping treats '-' (hyphen) and '_' (underscore) as equivalent ('_').
+    // This means "key-1" and "key_1" will resolve to the same trust root key
+    // (FLEXI_REGISTRY_TRUST_ROOT_KEY_B64URL_KEY_1).
+    // Operators should not rely on hyphen vs underscore distinction for KIDs.
     kid.chars()
         .map(|ch| {
             if ch.is_ascii_alphanumeric() {
