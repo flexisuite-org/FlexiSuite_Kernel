@@ -26,6 +26,13 @@ impl QuotaViolation {
     pub fn headers(&self) -> Vec<(String, String)> {
         let mut headers = vec![];
         // REQ-QUOTA-HTTP-CONTRACT: Must include Retry-After
+        // Note: Logic here is legacy or partial.
+        // The definitive clamping is now handled in clamp_retry_after() called by middleware
+        // OR inside this method if we unify.
+        // The implementation plan says: "SystemHardLimit... Retry-After is 1-30s clamped".
+        // The existing code ALREADY DOES THIS here!
+        // But the middleware code was failing because it tried to call `clamp_retry_after` which was not defined.
+        // We will define it here.
         let value = match self.layer {
             QuotaLayer::SystemHardLimit => {
                 // Spec: 1-30s clip for system protection
@@ -38,5 +45,13 @@ impl QuotaViolation {
         };
         headers.push(("Retry-After".to_string(), value.to_string()));
         headers
+    }
+
+    pub fn clamp_retry_after(&mut self) {
+        if self.layer == QuotaLayer::SystemHardLimit {
+            // Apply the clamping to the struct field itself so it propagates
+            // to any consumer using the struct directly.
+            self.retry_after_s = self.retry_after_s.clamp(1, 30);
+        }
     }
 }
