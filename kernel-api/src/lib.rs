@@ -220,16 +220,27 @@ mod security_header_tests {
 
         // Verify standard security headers
         assert_eq!(
-            headers.get(header::X_CONTENT_TYPE_OPTIONS).unwrap(),
+            headers
+                .get(header::X_CONTENT_TYPE_OPTIONS)
+                .expect("x-content-type-options must be present"),
             "nosniff"
         );
-        assert_eq!(headers.get(header::X_FRAME_OPTIONS).unwrap(), "DENY");
         assert_eq!(
-            headers.get(header::CONTENT_SECURITY_POLICY).unwrap(),
+            headers
+                .get(header::X_FRAME_OPTIONS)
+                .expect("x-frame-options must be present"),
+            "DENY"
+        );
+        assert_eq!(
+            headers
+                .get(header::CONTENT_SECURITY_POLICY)
+                .expect("content-security-policy must be present"),
             "default-src 'none'; frame-ancestors 'none'"
         );
         assert_eq!(
-            headers.get(header::STRICT_TRANSPORT_SECURITY).unwrap(),
+            headers
+                .get(header::STRICT_TRANSPORT_SECURITY)
+                .expect("strict-transport-security must be present"),
             "max-age=63072000; includeSubDomains"
         );
     }
