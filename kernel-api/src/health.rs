@@ -6,6 +6,7 @@ use axum::{
 };
 use sea_orm::DatabaseConnection;
 use std::sync::Arc;
+use std::time::Duration;
 use serde::Serialize;
 use crate::middleware::{MiddlewareState, PingStatus};
 use crate::auth::SystemTenantContext;
@@ -38,24 +39,39 @@ pub async fn readiness(
     Extension(state): Extension<MiddlewareState>,
     Extension(db): Extension<Arc<DatabaseConnection>>,
 ) -> Response {
-    // Check DB via tenant-scoped accessor (Infrastructure layer)
+    // Check DB and Redis concurrently with timeouts
+    let db_timeout = Duration::from_secs(5);
+    let redis_timeout = Duration::from_secs(5);
+
     let ctx = crate::auth::TenantContext::from(SystemTenantContext).with_db(db);
-    let db_health = match ctx.check_connection().await {
-        Ok(_) => Health::Up,
-        Err(e) => {
+    let db_future = tokio::time::timeout(db_timeout, ctx.check_connection());
+    let redis_future = tokio::time::timeout(redis_timeout, state.idempotency_store.ping());
+
+    let (db_res, redis_res) = tokio::join!(db_future, redis_future);
+
+    let db_health = match db_res {
+        Ok(Ok(_)) => Health::Up,
+        Ok(Err(e)) => {
             tracing::error!(error = ?e, "Readiness check failed (database)");
             Health::Down
-        },
+        }
+        Err(_) => {
+            tracing::error!("Readiness check timed out after {}s (database)", db_timeout.as_secs());
+            Health::Down
+        }
     };
 
-    // Check Redis (via IdempotencyStore)
-    let redis_health = match state.idempotency_store.ping().await {
-        Ok(PingStatus::Ok) => Health::Up,
-        Ok(PingStatus::Degraded) => Health::Degraded,
-        Err(e) => {
+    let redis_health = match redis_res {
+        Ok(Ok(PingStatus::Ok)) => Health::Up,
+        Ok(Ok(PingStatus::Degraded)) => Health::Degraded,
+        Ok(Err(e)) => {
             tracing::error!(error = ?e, "Readiness check failed (redis)");
             Health::Down
-        },
+        }
+        Err(_) => {
+            tracing::error!("Readiness check timed out after {}s (redis)", redis_timeout.as_secs());
+            Health::Down
+        }
     };
 
     let status_code = if db_health == Health::Up && redis_health != Health::Down {
@@ -88,7 +104,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_readiness_structure() {
-        // MockDatabase::ping() defaults to failing (DbErr::Connection("Ping failed"))
+        // MockDatabase::ping() defaults to OK (returns Ok(()))
         let db = MockDatabase::new(DatabaseBackend::Postgres)
             .into_connection();
         let db = Arc::new(db);
