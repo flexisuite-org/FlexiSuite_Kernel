@@ -10,7 +10,10 @@ use object_store::ObjectStore;
 use ed25519_dalek::{Signer, SigningKey, VerifyingKey};
 use rand::rngs::OsRng;
 use std::collections::BTreeMap;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock, Mutex};
+
+// Global lock to serialize tests that modify process-global environment variables.
+static ENV_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
 fn test_tenant_ctx() -> TenantContext {
     TenantContext::new(TenantId::new("tenant_test").expect("valid tenant id"), None)
@@ -88,6 +91,8 @@ fn with_test_key<F>(key: &TestKey, test_fn: F)
 where
     F: for<'a> FnOnce(&'a TestKey, RegistryStorage) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>>,
 {
+    // Serialize execution to prevent env var races
+    let _guard = ENV_LOCK.lock().unwrap();
     temp_env::with_var(key.env_var_name(), Some(&key.public_key_b64), || {
         reload_trust_root_keys();
         let store = Arc::new(InMemory::new());
@@ -103,6 +108,8 @@ fn with_test_key_unset<F>(key: &TestKey, test_fn: F)
 where
     F: for<'a> FnOnce(&'a TestKey, RegistryStorage) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>>,
 {
+    // Serialize execution to prevent env var races
+    let _guard = ENV_LOCK.lock().unwrap();
     temp_env::with_var(key.env_var_name(), None::<&str>, || {
         reload_trust_root_keys();
         let store = Arc::new(InMemory::new());
@@ -302,12 +309,7 @@ fn test_get_manifest_detects_tampered_stored_json() {
             let mut tampered = persisted.clone();
             tampered.name = "Tampered Name".to_string();
             let tampered_bytes = serde_json::to_vec(&tampered).unwrap();
-            let tampered_path = Path::from(format!(
-                "tenants/{}/manifests/{}/{}/manifest.json",
-                tenant_ctx.tenant_id().as_str(),
-                manifest.id,
-                manifest.version
-            ));
+            let tampered_path = registry.manifest_path(&manifest.id, &manifest.version);
             store
                 .put(&tampered_path, tampered_bytes.into())
                 .await

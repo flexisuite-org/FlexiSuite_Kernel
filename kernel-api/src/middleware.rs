@@ -1534,6 +1534,11 @@ pub async fn idempotency_middleware(
 ) -> Result<Response, Response> {
     let (parts, body) = req.into_parts();
     let method = parts.method.clone();
+    let request_id = parts
+        .headers
+        .get("x-request-id")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
 
     let idempotency_key = match parts.headers.get("Idempotency-Key") {
         Some(val) => {
@@ -1541,12 +1546,20 @@ pub async fn idempotency_middleware(
                 Ok(k) => k,
                 Err(_) => {
                     warn!("Invalid Idempotency-Key encoding");
-                    return Err(build_json_error_response("Invalid Idempotency-Key encoding", StatusCode::BAD_REQUEST));
+                    return Err(build_json_error_response(
+                        "Invalid Idempotency-Key encoding",
+                        StatusCode::BAD_REQUEST,
+                        request_id,
+                    ));
                 }
             };
             if validate_idempotency_key(key).is_err() {
                 warn!(key = %key, "Invalid Idempotency-Key format");
-                return Err(build_json_error_response("Invalid Idempotency-Key format", StatusCode::BAD_REQUEST));
+                return Err(build_json_error_response(
+                    "Invalid Idempotency-Key format",
+                    StatusCode::BAD_REQUEST,
+                    request_id,
+                ));
             }
             key.to_string()
         }
@@ -1557,16 +1570,19 @@ pub async fn idempotency_middleware(
                 || method == Method::PATCH
             {
                 warn!(method = %method, "Missing Idempotency-Key for write operation");
-                return Err(build_json_error_response("Missing Idempotency-Key for write operation", StatusCode::BAD_REQUEST));
+                return Err(build_json_error_response(
+                    "Missing Idempotency-Key for write operation",
+                    StatusCode::BAD_REQUEST,
+                    request_id,
+                ));
             }
             return Ok(next.run(Request::from_parts(parts, body)).await);
         }
     };
 
-    let tenant_ctx = parts
-        .extensions
-        .get::<TenantContext>()
-        .ok_or(build_json_error_response("Unauthorized", StatusCode::UNAUTHORIZED))?;
+    let tenant_ctx = parts.extensions.get::<TenantContext>().ok_or(
+        build_json_error_response("Unauthorized", StatusCode::UNAUTHORIZED, request_id.clone()),
+    )?;
 
     tracing::Span::current().record("tenant_id", &tenant_ctx.tenant_id().to_string());
     tracing::Span::current().record("method", method.as_str());
@@ -1592,7 +1608,11 @@ pub async fn idempotency_middleware(
         .extensions
         .get::<MiddlewareState>()
         .cloned()
-        .ok_or(build_json_error_response("Internal Server Error", StatusCode::INTERNAL_SERVER_ERROR))?;
+        .ok_or(build_json_error_response(
+            "Internal Server Error",
+            StatusCode::INTERNAL_SERVER_ERROR,
+            request_id.clone(),
+        ))?;
 
     let body_bytes = match to_bytes(body, state.config.max_body_size).await {
         Ok(b) => b,
@@ -1601,7 +1621,11 @@ pub async fn idempotency_middleware(
                 "Request body exceeded max_body_size ({})",
                 state.config.max_body_size
             );
-            return Err(build_json_error_response("Request body exceeded max_body_size", StatusCode::BAD_REQUEST));
+            return Err(build_json_error_response(
+                "Request body exceeded max_body_size",
+                StatusCode::BAD_REQUEST,
+                request_id.clone(),
+            ));
         }
     };
 
@@ -1619,7 +1643,11 @@ pub async fn idempotency_middleware(
                 attempts = attempts,
                 "Exceeded max attempts waiting for in-flight idempotent request"
             );
-            let mut res = build_json_error_response("Service Unavailable", StatusCode::SERVICE_UNAVAILABLE);
+            let mut res = build_json_error_response(
+                "Service Unavailable",
+                StatusCode::SERVICE_UNAVAILABLE,
+                request_id.clone(),
+            );
             let retry_after = state
                 .config
                 .inflight_wait_timeout
@@ -1630,7 +1658,7 @@ pub async fn idempotency_middleware(
                 res.headers_mut()
                     .insert(axum::http::header::RETRY_AFTER, val);
             }
-            return Ok(res);
+            return Err(res);
         }
 
         match store
@@ -1650,7 +1678,11 @@ pub async fn idempotency_middleware(
                             key = %idempotency_key,
                             "Idempotency conflict detected (Completed)"
                         );
-                        return Err(build_json_error_response("Idempotency conflict", StatusCode::CONFLICT));
+                        return Err(build_json_error_response(
+                            "Idempotency conflict",
+                            StatusCode::CONFLICT,
+                            request_id.clone(),
+                        ));
                     }
                     info!(key = %idempotency_key, "Replaying idempotent response");
                     return Ok(build_replay_response(&record));
@@ -1665,7 +1697,11 @@ pub async fn idempotency_middleware(
                             key = %idempotency_key,
                             "Idempotency conflict detected (InFlight)"
                         );
-                        return Err(build_json_error_response("Idempotency conflict", StatusCode::CONFLICT));
+                        return Err(build_json_error_response(
+                            "Idempotency conflict",
+                            StatusCode::CONFLICT,
+                            request_id.clone(),
+                        ));
                     }
 
                     let notified = notify.notified();
@@ -1681,7 +1717,11 @@ pub async fn idempotency_middleware(
                             timeout_ms = state.config.inflight_wait_timeout.as_millis() as u64,
                             "Timed out waiting for in-flight idempotent request"
                         );
-                        let mut res = build_json_error_response("Service Unavailable", StatusCode::SERVICE_UNAVAILABLE);
+                        let mut res = build_json_error_response(
+                            "Service Unavailable",
+                            StatusCode::SERVICE_UNAVAILABLE,
+                            request_id.clone(),
+                        );
                         let retry_after = state
                             .config
                             .inflight_wait_timeout
@@ -1692,13 +1732,17 @@ pub async fn idempotency_middleware(
                             res.headers_mut()
                                 .insert(axum::http::header::RETRY_AFTER, val);
                         }
-                        return Ok(res);
+                        return Err(res);
                     }
                 }
             },
             Err(IdempotencyStoreError::BackendUnavailable) => {
                 error!("Idempotency store unavailable during acquire");
-                return Err(build_json_error_response("Service Unavailable", StatusCode::SERVICE_UNAVAILABLE));
+                return Err(build_json_error_response(
+                    "Service Unavailable",
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    request_id.clone(),
+                ));
             }
         }
     };
@@ -1842,12 +1886,21 @@ fn build_replay_response(record: &IdempotencyRecord) -> Response {
 
 pub async fn quota_middleware(req: Request<Body>, next: Next) -> Result<Response, Response> {
     let (parts, body) = req.into_parts();
+    let request_id = parts
+        .headers
+        .get("x-request-id")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
 
     let tenant_ctx = match parts.extensions.get::<TenantContext>() {
         Some(ctx) => ctx,
         None => {
             warn!("Quota middleware missing TenantContext");
-            return Err(build_json_error_response("Unauthorized", StatusCode::UNAUTHORIZED));
+            return Err(build_json_error_response(
+                "Unauthorized",
+                StatusCode::UNAUTHORIZED,
+                request_id,
+            ));
         }
     };
 
@@ -1855,7 +1908,11 @@ pub async fn quota_middleware(req: Request<Body>, next: Next) -> Result<Response
         Some(s) => s,
         None => {
             error!("MiddlewareState missing");
-            return Err(build_json_error_response("Internal Server Error", StatusCode::INTERNAL_SERVER_ERROR));
+            return Err(build_json_error_response(
+                "Internal Server Error",
+                StatusCode::INTERNAL_SERVER_ERROR,
+                request_id,
+            ));
         }
     };
 
@@ -1868,7 +1925,7 @@ pub async fn quota_middleware(req: Request<Body>, next: Next) -> Result<Response
             };
             violation.clamp_retry_after();
             warn!("System Hard Limit exceeded (Mock)");
-            return Err(violation_to_response(&violation));
+            return Err(violation_to_response(&violation, request_id));
         }
 
         if parts.headers.contains_key("X-Mock-Quota-Tenant") {
@@ -1878,7 +1935,7 @@ pub async fn quota_middleware(req: Request<Body>, next: Next) -> Result<Response
             };
             violation.clamp_retry_after();
             warn!("Tenant Budget exceeded (Mock)");
-            return Err(violation_to_response(&violation));
+            return Err(violation_to_response(&violation, request_id));
         }
 
         if parts.headers.contains_key("X-Mock-Quota-Api") {
@@ -1888,7 +1945,7 @@ pub async fn quota_middleware(req: Request<Body>, next: Next) -> Result<Response
             };
             violation.clamp_retry_after();
             warn!("API Rate Limit exceeded (Mock)");
-            return Err(violation_to_response(&violation));
+            return Err(violation_to_response(&violation, request_id));
         }
     }
 
@@ -1905,7 +1962,7 @@ pub async fn quota_middleware(req: Request<Body>, next: Next) -> Result<Response
         .await
     {
         v.clamp_retry_after();
-        return Err(violation_to_response(&v));
+        return Err(violation_to_response(&v, request_id));
     }
 
     Ok(next.run(Request::from_parts(parts, body)).await)
@@ -1927,7 +1984,7 @@ pub fn violation_to_status(v: &QuotaViolation) -> StatusCode {
     }
 }
 
-pub fn violation_to_response(v: &QuotaViolation) -> Response {
+pub fn violation_to_response(v: &QuotaViolation, request_id: Option<String>) -> Response {
     let status = violation_to_status(v);
     let message = match status {
         StatusCode::TOO_MANY_REQUESTS => "Rate limit exceeded",
@@ -1935,7 +1992,7 @@ pub fn violation_to_response(v: &QuotaViolation) -> Response {
     };
 
     // Construct the standard JSON error
-    let mut res = build_json_error_response(message, status);
+    let mut res = build_json_error_response(message, status, request_id);
 
     // Inject headers from violation
     let headers = res.headers_mut();
