@@ -3,39 +3,61 @@ use axum::{
     http::{Response, StatusCode, header},
     response::IntoResponse,
 };
-use prometheus::{Encoder, TextEncoder, CounterVec, Histogram, register_counter_vec, register_histogram};
+use prometheus::{Encoder, TextEncoder, CounterVec, Histogram, Registry, register_counter_vec_with_registry, register_histogram_with_registry};
 use std::sync::OnceLock;
 
 pub fn init_metrics() {
-    // Force initialization of metrics
-    let _ = QUOTA_REJECT_TOTAL.get_or_init(|| {
-        register_counter_vec!(
+    init_metrics_with_registry(prometheus::default_registry());
+}
+
+pub fn init_metrics_with_registry(registry: &Registry) {
+    let _ = METRICS.get_or_init(|| Metrics::new(registry));
+}
+
+struct Metrics {
+    quota_reject_total: CounterVec,
+    sandbox_duration_seconds: Histogram,
+    token_validation_total: CounterVec,
+}
+
+impl Metrics {
+    fn new(registry: &Registry) -> Self {
+        let quota_reject_total = register_counter_vec_with_registry!(
             "quota_reject_total",
             "Total number of requests rejected by quota system",
-            &["layer"]
-        ).unwrap()
-    });
+            &["layer"],
+            registry
+        ).unwrap();
 
-    let _ = SANDBOX_DURATION_SECONDS.get_or_init(|| {
-        register_histogram!(
+        let sandbox_duration_seconds = register_histogram_with_registry!(
             "sandbox_duration_seconds",
             "Duration of sandbox execution in seconds",
-            vec![0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 2.0, 5.0, 10.0]
-        ).unwrap()
-    });
+            vec![0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 2.0, 5.0, 10.0],
+            registry
+        ).unwrap();
 
-    let _ = TOKEN_VALIDATION_TOTAL.get_or_init(|| {
-        register_counter_vec!(
+        let token_validation_total = register_counter_vec_with_registry!(
             "token_validation_total",
             "Total number of token validations",
-            &["status"]
-        ).unwrap()
-    });
+            &["status"],
+            registry
+        ).unwrap();
+
+        Self {
+            quota_reject_total,
+            sandbox_duration_seconds,
+            token_validation_total,
+        }
+    }
 }
 
 pub async fn metrics_handler() -> impl IntoResponse {
+    metrics_handler_with_registry(prometheus::default_registry()).await
+}
+
+async fn metrics_handler_with_registry(registry: &Registry) -> impl IntoResponse {
     let encoder = TextEncoder::new();
-    let metric_families = prometheus::gather();
+    let metric_families = registry.gather();
     let mut buffer = vec![];
 
     if let Err(e) = encoder.encode(&metric_families, &mut buffer) {
@@ -61,29 +83,27 @@ pub async fn metrics_handler() -> impl IntoResponse {
         })
 }
 
-static QUOTA_REJECT_TOTAL: OnceLock<CounterVec> = OnceLock::new();
-static SANDBOX_DURATION_SECONDS: OnceLock<Histogram> = OnceLock::new();
-static TOKEN_VALIDATION_TOTAL: OnceLock<CounterVec> = OnceLock::new();
+static METRICS: OnceLock<Metrics> = OnceLock::new();
 
 pub fn record_quota_reject(layer: &str) {
-    let counter = QUOTA_REJECT_TOTAL
+    let metrics = METRICS
         .get()
         .expect("metrics not initialized — call init_metrics() at startup");
-    counter.with_label_values(&[layer]).inc();
+    metrics.quota_reject_total.with_label_values(&[layer]).inc();
 }
 
 pub fn record_sandbox_duration(duration_seconds: f64) {
-    let histogram = SANDBOX_DURATION_SECONDS
+    let metrics = METRICS
         .get()
         .expect("metrics not initialized — call init_metrics() at startup");
-    histogram.observe(duration_seconds);
+    metrics.sandbox_duration_seconds.observe(duration_seconds);
 }
 
 pub fn record_token_validation(status: &str) {
-    let counter = TOKEN_VALIDATION_TOTAL
+    let metrics = METRICS
         .get()
         .expect("metrics not initialized — call init_metrics() at startup");
-    counter.with_label_values(&[status]).inc();
+    metrics.token_validation_total.with_label_values(&[status]).inc();
 }
 
 #[cfg(test)]
@@ -92,13 +112,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_metrics_initialization_and_recording() {
-        init_metrics();
+        let registry = Registry::new();
+        let metrics = Metrics::new(&registry);
 
-        record_quota_reject("test_layer");
-        record_sandbox_duration(0.5);
-        record_token_validation("success");
+        metrics.quota_reject_total.with_label_values(&["test_layer"]).inc();
+        metrics.sandbox_duration_seconds.observe(0.5);
+        metrics.token_validation_total.with_label_values(&["success"]).inc();
 
-        let response = metrics_handler().await.into_response();
+        let response = metrics_handler_with_registry(&registry).await.into_response();
         assert_eq!(response.status(), StatusCode::OK);
 
         let body = response.into_body();
