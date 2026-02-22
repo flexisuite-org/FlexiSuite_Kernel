@@ -101,40 +101,37 @@ async fn main() {
     });
     tracing::info!("Listening on http://{} (API)", addr);
 
+    let ctrl_c_future = async {
+        if let Err(e) = tokio::signal::ctrl_c().await {
+            tracing::error!("Failed to install CTRL+C handler: {e}");
+            std::future::pending::<()>().await;
+        }
+    };
+
+    #[cfg(unix)]
+    let terminate_future = async {
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut stream) => {
+                stream.recv().await;
+            }
+            Err(e) => {
+                tracing::error!("Failed to install SIGTERM handler: {e}");
+                std::future::pending::<()>().await;
+            }
+        }
+    };
+
+    #[cfg(not(unix))]
+    let terminate_future = std::future::pending::<()>();
+
     axum::serve(listener, app)
         .with_graceful_shutdown(async move {
-            let ctrl_c = async {
-                tokio::signal::ctrl_c()
-                    .await
-                    .map_err(|e| format!("failed to install CTRL+C handler: {e}"))
-            };
-
-            #[cfg(unix)]
-            let terminate = async {
-                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-                    .map_err(|e| format!("failed to install SIGTERM handler: {e}"))?
-                    .recv()
-                    .await;
-                Ok::<(), String>(())
-            };
-
-            #[cfg(not(unix))]
-            let terminate = std::future::pending::<Result<(), String>>();
-
             tokio::select! {
-                res = ctrl_c => {
-                    if let Err(e) = res {
-                        tracing::error!("{e}");
-                    } else {
-                        tracing::info!("Shutdown signal (SIGINT) received, stopping API server");
-                    }
+                _ = ctrl_c_future => {
+                    tracing::info!("Shutdown signal (SIGINT) received, stopping API server");
                 },
-                res = terminate => {
-                    if let Err(e) = res {
-                        tracing::error!("{e}");
-                    } else {
-                        tracing::info!("Shutdown signal (SIGTERM) received, stopping API server");
-                    }
+                _ = terminate_future => {
+                    tracing::info!("Shutdown signal (SIGTERM) received, stopping API server");
                 },
             }
         })

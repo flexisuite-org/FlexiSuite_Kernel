@@ -7,11 +7,15 @@ use prometheus::{Encoder, TextEncoder, CounterVec, Histogram, Registry, register
 use std::sync::OnceLock;
 
 pub fn init_metrics() {
-    init_metrics_with_registry(prometheus::default_registry());
+    let _ = init_metrics_with_registry(prometheus::default_registry());
 }
 
-pub fn init_metrics_with_registry(registry: &Registry) {
-    let _ = METRICS.get_or_init(|| Metrics::new(registry));
+pub fn init_metrics_with_registry(registry: &Registry) -> Result<(), prometheus::Error> {
+    let metrics = Metrics::new(registry)?;
+    if let Err(_) = METRICS.set(metrics) {
+        // Already initialized, which is fine for subsequent calls.
+    }
+    Ok(())
 }
 
 struct Metrics {
@@ -21,33 +25,33 @@ struct Metrics {
 }
 
 impl Metrics {
-    fn new(registry: &Registry) -> Self {
+    fn new(registry: &Registry) -> Result<Self, prometheus::Error> {
         let quota_reject_total = register_counter_vec_with_registry!(
             "quota_reject_total",
             "Total number of requests rejected by quota system",
             &["layer"],
             registry
-        ).unwrap();
+        )?;
 
         let sandbox_duration_seconds = register_histogram_with_registry!(
             "sandbox_duration_seconds",
             "Duration of sandbox execution in seconds",
             vec![0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 2.0, 5.0, 10.0],
             registry
-        ).unwrap();
+        )?;
 
         let token_validation_total = register_counter_vec_with_registry!(
             "token_validation_total",
             "Total number of token validations",
             &["status"],
             registry
-        ).unwrap();
+        )?;
 
-        Self {
+        Ok(Self {
             quota_reject_total,
             sandbox_duration_seconds,
             token_validation_total,
-        }
+        })
     }
 }
 
@@ -83,27 +87,38 @@ async fn metrics_handler_with_registry(registry: &Registry) -> impl IntoResponse
         })
 }
 
+use std::sync::atomic::{AtomicBool, Ordering};
 static METRICS: OnceLock<Metrics> = OnceLock::new();
+static WARNED_UNINITIALIZED: AtomicBool = AtomicBool::new(false);
+
+fn warn_uninitialized() {
+    if !WARNED_UNINITIALIZED.swap(true, Ordering::Relaxed) {
+        tracing::warn!("Metrics not initialized — recording calls will be no-ops. Call init_metrics() at startup.");
+    }
+}
 
 pub fn record_quota_reject(layer: &str) {
-    let metrics = METRICS
-        .get()
-        .expect("metrics not initialized — call init_metrics() at startup");
-    metrics.quota_reject_total.with_label_values(&[layer]).inc();
+    if let Some(metrics) = METRICS.get() {
+        metrics.quota_reject_total.with_label_values(&[layer]).inc();
+    } else {
+        warn_uninitialized();
+    }
 }
 
 pub fn record_sandbox_duration(duration_seconds: f64) {
-    let metrics = METRICS
-        .get()
-        .expect("metrics not initialized — call init_metrics() at startup");
-    metrics.sandbox_duration_seconds.observe(duration_seconds);
+    if let Some(metrics) = METRICS.get() {
+        metrics.sandbox_duration_seconds.observe(duration_seconds);
+    } else {
+        warn_uninitialized();
+    }
 }
 
 pub fn record_token_validation(status: &str) {
-    let metrics = METRICS
-        .get()
-        .expect("metrics not initialized — call init_metrics() at startup");
-    metrics.token_validation_total.with_label_values(&[status]).inc();
+    if let Some(metrics) = METRICS.get() {
+        metrics.token_validation_total.with_label_values(&[status]).inc();
+    } else {
+        warn_uninitialized();
+    }
 }
 
 #[cfg(test)]
@@ -113,13 +128,13 @@ mod tests {
     #[tokio::test]
     async fn test_metrics_initialization_and_recording() {
         let registry = Registry::new();
-        // Exercise the init_metrics_with_registry path which sets the static METRICS
-        init_metrics_with_registry(&registry);
+        // Since METRICS is a OnceLock, we can only initialize it once per process.
+        // For testing, we use a local Metrics instance with its own registry to avoid races.
+        let metrics = Metrics::new(&registry).unwrap();
 
-        // Record using the global record_* functions which use the static METRICS
-        record_quota_reject("test_layer");
-        record_sandbox_duration(0.5);
-        record_token_validation("success");
+        metrics.quota_reject_total.with_label_values(&["test_layer"]).inc();
+        metrics.sandbox_duration_seconds.observe(0.5);
+        metrics.token_validation_total.with_label_values(&["success"]).inc();
 
         let response = metrics_handler_with_registry(&registry).await.into_response();
         assert_eq!(response.status(), StatusCode::OK);
