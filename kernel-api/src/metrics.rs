@@ -19,7 +19,8 @@ pub fn init_metrics() {
     let _ = SANDBOX_DURATION_SECONDS.get_or_init(|| {
         register_histogram!(
             "sandbox_duration_seconds",
-            "Duration of sandbox execution in seconds"
+            "Duration of sandbox execution in seconds",
+            vec![0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 2.0, 5.0, 10.0]
         ).unwrap()
     });
 
@@ -38,6 +39,7 @@ pub async fn metrics_handler() -> impl IntoResponse {
     let mut buffer = vec![];
 
     if let Err(e) = encoder.encode(&metric_families, &mut buffer) {
+        tracing::error!(error = %e, "Failed to encode Prometheus metrics");
         return Response::builder()
             .status(StatusCode::INTERNAL_SERVER_ERROR)
             .header("content-type", "text/plain")
@@ -63,34 +65,23 @@ static SANDBOX_DURATION_SECONDS: OnceLock<Histogram> = OnceLock::new();
 static TOKEN_VALIDATION_TOTAL: OnceLock<CounterVec> = OnceLock::new();
 
 pub fn record_quota_reject(layer: &str) {
-    let counter = QUOTA_REJECT_TOTAL.get_or_init(|| {
-        register_counter_vec!(
-            "quota_reject_total",
-            "Total number of requests rejected by quota system",
-            &["layer"]
-        ).unwrap()
-    });
+    let counter = QUOTA_REJECT_TOTAL
+        .get()
+        .expect("metrics not initialized — call init_metrics() at startup");
     counter.with_label_values(&[layer]).inc();
 }
 
 pub fn record_sandbox_duration(duration_seconds: f64) {
-    let histogram = SANDBOX_DURATION_SECONDS.get_or_init(|| {
-        register_histogram!(
-            "sandbox_duration_seconds",
-            "Duration of sandbox execution in seconds"
-        ).unwrap()
-    });
+    let histogram = SANDBOX_DURATION_SECONDS
+        .get()
+        .expect("metrics not initialized — call init_metrics() at startup");
     histogram.observe(duration_seconds);
 }
 
 pub fn record_token_validation(status: &str) {
-    let counter = TOKEN_VALIDATION_TOTAL.get_or_init(|| {
-        register_counter_vec!(
-            "token_validation_total",
-            "Total number of token validations",
-            &["status"]
-        ).unwrap()
-    });
+    let counter = TOKEN_VALIDATION_TOTAL
+        .get()
+        .expect("metrics not initialized — call init_metrics() at startup");
     counter.with_label_values(&[status]).inc();
 }
 
