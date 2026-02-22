@@ -75,16 +75,22 @@ async fn main() {
         std::process::exit(1);
     });
 
-    tracing::info!("Listening on http://{} (API)", addr);
-    tracing::info!("Listening on http://{} (Metrics)", metrics_addr);
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
 
     let metrics_listener = TcpListener::bind(metrics_addr).await.unwrap_or_else(|e| {
         eprintln!("Failed to bind metrics to {metrics_addr}: {e}");
         std::process::exit(1);
     });
+    tracing::info!("Listening on http://{} (Metrics)", metrics_addr);
 
     tokio::spawn(async move {
-        if let Err(e) = axum::serve(metrics_listener, metrics_app).await {
+        let server = axum::serve(metrics_listener, metrics_app);
+        if let Err(e) = server
+            .with_graceful_shutdown(async move {
+                let _ = shutdown_rx.await;
+            })
+            .await
+        {
             tracing::error!("Metrics server error: {e}");
         }
     });
@@ -93,8 +99,12 @@ async fn main() {
         eprintln!("Failed to bind to {addr}: {e}");
         std::process::exit(1);
     });
+    tracing::info!("Listening on http://{} (API)", addr);
+
     axum::serve(listener, app).await.unwrap_or_else(|e| {
         eprintln!("Server error: {e}");
         std::process::exit(1);
     });
+
+    let _ = shutdown_tx.send(());
 }
