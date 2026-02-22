@@ -5,7 +5,7 @@ edition = "2024" # Required for modern async and language features
 rust-version = "1.85"
 
 [dependencies]
-anyhow = "1.0.101"
+anyhow = "1.0.102"
 async-trait = "0.1.89"
 deno_core = "0.385.0"
 libc = "0.2.177"
