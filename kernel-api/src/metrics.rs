@@ -1,6 +1,6 @@
 use axum::{
     body::Body,
-    http::{Response, StatusCode},
+    http::{Response, StatusCode, header},
     response::IntoResponse,
 };
 use prometheus::{Encoder, TextEncoder, CounterVec, Histogram, register_counter_vec, register_histogram};
@@ -40,23 +40,24 @@ pub async fn metrics_handler() -> impl IntoResponse {
 
     if let Err(e) = encoder.encode(&metric_families, &mut buffer) {
         tracing::error!(error = %e, "Failed to encode Prometheus metrics");
-        return Response::builder()
-            .status(StatusCode::INTERNAL_SERVER_ERROR)
-            .header("content-type", "text/plain")
-            .body(Body::from(format!("Failed to encode metrics: {}", e)))
-            .unwrap_or_else(|_| Response::new(Body::from("Internal Server Error")));
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            [(header::CONTENT_TYPE, "text/plain")],
+            format!("Failed to encode metrics: {}", e),
+        ).into_response();
     }
 
     Response::builder()
         .status(StatusCode::OK)
-        .header("content-type", encoder.format_type())
+        .header(header::CONTENT_TYPE, encoder.format_type())
         .body(Body::from(buffer))
         .unwrap_or_else(|e| {
-            Response::builder()
-                .status(StatusCode::INTERNAL_SERVER_ERROR)
-                .header("content-type", "text/plain")
-                .body(Body::from(format!("Failed to build response: {}", e)))
-                .unwrap_or_else(|_| Response::new(Body::from("Internal Server Error")))
+            tracing::error!(error = %e, "Failed to build Prometheus response");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                [(header::CONTENT_TYPE, "text/plain")],
+                format!("Failed to build response: {}", e),
+            ).into_response()
         })
 }
 

@@ -46,7 +46,6 @@ pub async fn build_app(
     config: MiddlewareConfig,
     db: Arc<DatabaseConnection>,
 ) -> Result<(Router, Router, JoinHandle<()>), String> {
-    metrics::init_metrics();
     let state = MiddlewareState::new(config).await?;
     Ok(build_app_with_state(state, db))
 }
@@ -127,7 +126,6 @@ pub async fn write_test(
     Json<TestWriteResponse>,
 ) {
     let action_id = Uuid::now_v7().to_string();
-    let start = std::time::Instant::now();
     record_action(
         &state,
         ctx.tenant_id().clone(),
@@ -136,8 +134,7 @@ pub async fn write_test(
     )
     .await;
 
-    // Measurement of sandbox duration (simulated as record_action call time here)
-    metrics::record_sandbox_duration(start.elapsed().as_secs_f64());
+    // TODO: record sandbox duration via kernel-runtime execution hook when integrated
 
     let body = TestWriteResponse {
         action_id: action_id.clone(),
