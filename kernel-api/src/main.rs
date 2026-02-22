@@ -101,10 +101,18 @@ async fn main() {
     });
     tracing::info!("Listening on http://{} (API)", addr);
 
-    axum::serve(listener, app).await.unwrap_or_else(|e| {
-        eprintln!("Server error: {e}");
-        std::process::exit(1);
-    });
+    axum::serve(listener, app)
+        .with_graceful_shutdown(async move {
+            tokio::signal::ctrl_c()
+                .await
+                .expect("failed to install CTRL+C handler");
+            tracing::info!("Shutdown signal received, stopping API server");
+        })
+        .await
+        .unwrap_or_else(|e| {
+            eprintln!("Server error: {e}");
+            std::process::exit(1);
+        });
 
     let _ = shutdown_tx.send(());
 }
