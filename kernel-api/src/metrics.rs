@@ -12,8 +12,16 @@ pub fn init_metrics() {
 
 pub fn init_metrics_with_registry(registry: &Registry) -> Result<(), prometheus::Error> {
     let metrics = Metrics::new(registry)?;
-    if let Err(_) = METRICS.set(metrics) {
-        // Already initialized, which is fine for subsequent calls.
+    if let Err(metrics) = METRICS.set(metrics) {
+        // Already initialized. To avoid leaving orphaned metrics in the passed registry,
+        // we attempt to unregister them.
+        let _ = registry.unregister(Box::new(metrics.quota_reject_total));
+        let _ = registry.unregister(Box::new(metrics.sandbox_duration_seconds));
+        let _ = registry.unregister(Box::new(metrics.token_validation_total));
+
+        return Err(prometheus::Error::Msg(
+            "Metrics already initialized".to_string(),
+        ));
     }
     Ok(())
 }
@@ -147,5 +155,18 @@ mod tests {
         assert!(output.contains("sandbox_duration_seconds"));
         assert!(output.contains("token_validation_total"));
         assert!(output.contains("layer=\"test_layer\""));
+    }
+
+    #[tokio::test]
+    async fn test_multiple_initialization_fails() {
+        let registry = Registry::new();
+        let _ = init_metrics_with_registry(&registry);
+        
+        // Second initialization must fail
+        let res2 = init_metrics_with_registry(&registry);
+        assert!(res2.is_err());
+        if let Err(prometheus::Error::Msg(msg)) = res2 {
+            assert_eq!(msg, "Metrics already initialized");
+        }
     }
 }
