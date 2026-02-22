@@ -103,10 +103,40 @@ async fn main() {
 
     axum::serve(listener, app)
         .with_graceful_shutdown(async move {
-            tokio::signal::ctrl_c()
-                .await
-                .expect("failed to install CTRL+C handler");
-            tracing::info!("Shutdown signal received, stopping API server");
+            let ctrl_c = async {
+                tokio::signal::ctrl_c()
+                    .await
+                    .map_err(|e| format!("failed to install CTRL+C handler: {e}"))
+            };
+
+            #[cfg(unix)]
+            let terminate = async {
+                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                    .map_err(|e| format!("failed to install SIGTERM handler: {e}"))?
+                    .recv()
+                    .await;
+                Ok::<(), String>(())
+            };
+
+            #[cfg(not(unix))]
+            let terminate = std::future::pending::<Result<(), String>>();
+
+            tokio::select! {
+                res = ctrl_c => {
+                    if let Err(e) = res {
+                        tracing::error!("{e}");
+                    } else {
+                        tracing::info!("Shutdown signal (SIGINT) received, stopping API server");
+                    }
+                },
+                res = terminate => {
+                    if let Err(e) = res {
+                        tracing::error!("{e}");
+                    } else {
+                        tracing::info!("Shutdown signal (SIGTERM) received, stopping API server");
+                    }
+                },
+            }
         })
         .await
         .unwrap_or_else(|e| {

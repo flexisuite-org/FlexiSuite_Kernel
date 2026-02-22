@@ -113,11 +113,13 @@ mod tests {
     #[tokio::test]
     async fn test_metrics_initialization_and_recording() {
         let registry = Registry::new();
-        let metrics = Metrics::new(&registry);
+        // Exercise the init_metrics_with_registry path which sets the static METRICS
+        init_metrics_with_registry(&registry);
 
-        metrics.quota_reject_total.with_label_values(&["test_layer"]).inc();
-        metrics.sandbox_duration_seconds.observe(0.5);
-        metrics.token_validation_total.with_label_values(&["success"]).inc();
+        // Record using the global record_* functions which use the static METRICS
+        record_quota_reject("test_layer");
+        record_sandbox_duration(0.5);
+        record_token_validation("success");
 
         let response = metrics_handler_with_registry(&registry).await.into_response();
         assert_eq!(response.status(), StatusCode::OK);
