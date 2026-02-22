@@ -212,6 +212,13 @@ pub enum IdempotencyStoreError {
     BackendUnavailable,
 }
 
+#[derive(Clone, Copy, Debug, Serialize, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum PingStatus {
+    Ok,
+    Degraded,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub struct IdempotencyScopeKey {
     pub tenant_id: kernel_core::auth::TenantId,
@@ -245,6 +252,7 @@ pub trait IdempotencyStore: Send + Sync {
         lease: &IdempotencyLease,
     ) -> Result<(), IdempotencyStoreError>;
     async fn cleanup(&self);
+    async fn ping(&self) -> Result<PingStatus, IdempotencyStoreError>;
 }
 
 pub struct InMemoryIdempotencyStore {
@@ -402,6 +410,10 @@ impl IdempotencyStore for InMemoryIdempotencyStore {
         for notify in expired_inflight_notifies {
             notify.notify_waiters();
         }
+    }
+
+    async fn ping(&self) -> Result<PingStatus, IdempotencyStoreError> {
+        Ok(PingStatus::Degraded)
     }
 }
 
@@ -865,6 +877,26 @@ impl IdempotencyStore for RedisIdempotencyStore {
     }
 
     async fn cleanup(&self) {}
+
+    /// Checks the health of the Redis backend.
+    ///
+    /// The manager (`ConnectionManager`) is a multiplexed asynchronous connection with
+    /// automatic reconnection. Cloning it returns a handle to the same multiplexed connection.
+    /// We use `redis::cmd("PING").query_async` to exercise that multiplexed connection
+    /// and check backend availability.
+    async fn ping(&self) -> Result<PingStatus, IdempotencyStoreError> {
+        let mut conn = self.manager.clone();
+        match redis::cmd("PING")
+            .query_async::<String>(&mut conn)
+            .await
+        {
+            Ok(_) => Ok(PingStatus::Ok),
+            Err(e) => {
+                error!("Redis ping error: {}", e);
+                Err(IdempotencyStoreError::BackendUnavailable)
+            }
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
@@ -2021,6 +2053,7 @@ pub fn violation_to_response(v: &QuotaViolation, request_id: Option<String>) -> 
 
     res
 }
+
 
 
 #[cfg(test)]
