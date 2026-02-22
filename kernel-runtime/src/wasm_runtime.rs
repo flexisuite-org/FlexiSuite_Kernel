@@ -69,9 +69,17 @@ impl WasmSandbox {
 }
 
 struct SyncWasi(pub WasiP1Ctx);
-// SAFETY: WasiP1Ctx contains Box<dyn StdinStream> which is !Sync by trait definition,
-// but we only inject MemoryInputPipe/MemoryOutputPipe which are Sync.
-// Also, Store is !Sync, ensuring single-threaded access to Ctx.
+/// # Safety
+///
+/// `WasiP1Ctx` contains `Box<dyn StdinStream>` which is `!Sync` by trait definition.
+/// However, `WasmSandbox` only injects `MemoryInputPipe` and `MemoryOutputPipe` which are `Sync`.
+/// Additionally, `Store` is `!Sync` and `!Send` (unless `T: Send`), ensuring single-threaded access to `Ctx`
+/// within the store. `SyncWasi` wrapper is used to satisfy `Sync` bounds required by
+/// `func_wrap_async` / `add_to_linker_async` when using `async` runtimes, but access is guarded
+/// by the single-threaded nature of the `Store` and `Engine` usage in `execute`.
+///
+/// **Invariant:** `WasiCtxBuilder` MUST NOT be configured with non-Sync streams (e.g. file streams)
+/// when using this wrapper.
 unsafe impl Sync for SyncWasi {}
 
 struct Ctx {
@@ -190,6 +198,11 @@ impl SandboxRuntime for WasmSandbox {
                         let mut builder = client.request(method, url);
 
                         if !headers_str.is_empty() {
+                            // Note: We deserialize to HashMap<String, String>, which means if the input JSON
+                            // contained duplicate keys (multi-value headers), they might be lost or overwritten
+                            // depending on serde_json behavior. Wasm callers should pre-join multi-value headers
+                            // (e.g. "Header: val1, val2") or we need a more complex structure.
+                            // For this iteration, we accept this limitation.
                             let headers: std::collections::HashMap<String, String> =
                                 match serde_json::from_str(&headers_str) {
                                     Ok(h) => h,

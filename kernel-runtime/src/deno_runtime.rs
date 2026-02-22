@@ -479,6 +479,14 @@ impl SandboxRuntime for DenoSandbox {
                         forEach(callback) {{ this.map.forEach((v, k) => callback(v, k, this)); }}
                     }};
                     globalThis.fetch = async function(url, options) {{
+                        // Convert Headers instance to plain object
+                        if (options && options.headers instanceof Headers) {{
+                            const plainHeaders = {{}};
+                            options.headers.forEach((v, k) => {{
+                                plainHeaders[k] = v;
+                            }});
+                            options = {{ ...options, headers: plainHeaders }};
+                        }}
                         const response = await Deno.core.ops.op_fetch(url, options);
                         return {{
                             ok: response.status >= 200 && response.status < 300,
