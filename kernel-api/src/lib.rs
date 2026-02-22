@@ -2,6 +2,7 @@ use axum::{
     Json, Router,
     extract::{Extension, Path},
     http::{HeaderMap, HeaderName, HeaderValue, StatusCode, header},
+
     middleware::{from_fn, from_fn_with_state},
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -22,6 +23,7 @@ use crate::middleware::{
 
 pub mod auth;
 pub mod diagnostics;
+pub mod health;
 pub mod middleware;
 pub mod profile;
 pub mod error;
@@ -53,7 +55,9 @@ pub fn build_app_with_state(
 ) -> (Router, JoinHandle<()>) {
     let cleanup_handle = state.start_cleanup_task();
 
-    let public_router = Router::new().route("/health", get(|| async { "OK" }));
+    let public_router = Router::new()
+        .route("/health/liveness", get(health::liveness))
+        .route("/health/readiness", get(health::readiness));
 
     let protected_router = Router::new()
         .route("/test", post(write_test).put(write_test))
@@ -70,6 +74,7 @@ pub fn build_app_with_state(
             .merge(public_router)
             .merge(protected_router)
             .layer(Extension(state))
+            .layer(Extension(db))
             .layer(
                 ServiceBuilder::new()
                     // COOP/COEP/CORP headers for cross-origin isolation
@@ -103,6 +108,7 @@ pub fn build_app_with_state(
                         HeaderValue::from_static("max-age=63072000; includeSubDomains"),
                     )),
             ),
+
         cleanup_handle,
     )
 }
@@ -212,23 +218,31 @@ mod security_header_tests {
             Some("same-origin")
         );
 
-        // Verify existing security headers are present
-        assert!(headers
-            .get("x-content-type-options")
-            .and_then(|v| v.to_str().ok())
-            .is_some());
-        assert!(headers
-            .get("x-frame-options")
-            .and_then(|v| v.to_str().ok())
-            .is_some());
-        assert!(headers
-            .get("content-security-policy")
-            .and_then(|v| v.to_str().ok())
-            .is_some());
-        assert!(headers
-            .get("strict-transport-security")
-            .and_then(|v| v.to_str().ok())
-            .is_some());
+        // Verify standard security headers
+        assert_eq!(
+            headers
+                .get(header::X_CONTENT_TYPE_OPTIONS)
+                .expect("x-content-type-options must be present"),
+            "nosniff"
+        );
+        assert_eq!(
+            headers
+                .get(header::X_FRAME_OPTIONS)
+                .expect("x-frame-options must be present"),
+            "DENY"
+        );
+        assert_eq!(
+            headers
+                .get(header::CONTENT_SECURITY_POLICY)
+                .expect("content-security-policy must be present"),
+            "default-src 'none'; frame-ancestors 'none'"
+        );
+        assert_eq!(
+            headers
+                .get(header::STRICT_TRANSPORT_SECURITY)
+                .expect("strict-transport-security must be present"),
+            "max-age=63072000; includeSubDomains"
+        );
     }
 
     #[tokio::test]
@@ -237,7 +251,7 @@ mod security_header_tests {
         let response = app
             .oneshot(
                 Request::builder()
-                    .uri("/health")
+                    .uri("/health/liveness")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -285,3 +299,5 @@ mod security_header_tests {
         assert_security_headers(response).await;
     }
 }
+
+

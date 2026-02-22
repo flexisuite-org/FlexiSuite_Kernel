@@ -139,6 +139,7 @@ fn thread_cpu_time(clock_id: libc::clockid_t) -> Result<Duration, SandboxError> 
             "thread CPU clock tv_nsec out of range".to_string(),
         ));
     }
+
     Ok(Duration::from_secs(ts.tv_sec as u64)
         .saturating_add(Duration::from_nanos(ts.tv_nsec as u64)))
 }
