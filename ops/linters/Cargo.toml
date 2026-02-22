@@ -7,4 +7,4 @@ edition = "2021"
 walkdir = "2.5"
 regex = "1.10"
 anyhow = "1.0"
-clap = { version = "4.4", features = ["derive"] }
+clap = { version = "4.5", features = ["derive"] }
