@@ -51,10 +51,11 @@ async fn main() {
         });
 
     let config = MiddlewareConfig::default();
-    let (app, _cleanup_handle) = build_app(config, db.clone()).await.unwrap_or_else(|e| {
-        eprintln!("kernel-api startup error (middleware): {e}");
-        std::process::exit(1);
-    });
+    let (app, metrics_app, _cleanup_handle) =
+        build_app(config, db.clone()).await.unwrap_or_else(|e| {
+            eprintln!("kernel-api startup error (middleware): {e}");
+            std::process::exit(1);
+        });
 
     let host = std::env::var("KERNEL_API_HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
     let port = std::env::var("KERNEL_API_PORT").unwrap_or_else(|_| "3000".to_string());
@@ -63,7 +64,30 @@ async fn main() {
         eprintln!("Invalid bind address: {addr_str}");
         std::process::exit(1);
     });
-    tracing::info!("Listening on http://{}", addr);
+
+    let metrics_host =
+        std::env::var("KERNEL_API_METRICS_HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
+    let metrics_port =
+        std::env::var("KERNEL_API_METRICS_PORT").unwrap_or_else(|_| "9091".to_string());
+    let metrics_addr_str = format!("{metrics_host}:{metrics_port}");
+    let metrics_addr: SocketAddr = metrics_addr_str.parse().unwrap_or_else(|_| {
+        eprintln!("Invalid metrics bind address: {metrics_addr_str}");
+        std::process::exit(1);
+    });
+
+    tracing::info!("Listening on http://{} (API)", addr);
+    tracing::info!("Listening on http://{} (Metrics)", metrics_addr);
+
+    let metrics_listener = TcpListener::bind(metrics_addr).await.unwrap_or_else(|e| {
+        eprintln!("Failed to bind metrics to {metrics_addr}: {e}");
+        std::process::exit(1);
+    });
+
+    tokio::spawn(async move {
+        if let Err(e) = axum::serve(metrics_listener, metrics_app).await {
+            tracing::error!("Metrics server error: {e}");
+        }
+    });
 
     let listener = TcpListener::bind(addr).await.unwrap_or_else(|e| {
         eprintln!("Failed to bind to {addr}: {e}");

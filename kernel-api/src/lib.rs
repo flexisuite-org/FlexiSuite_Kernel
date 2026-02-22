@@ -45,7 +45,8 @@ pub struct ActionStatusResponse {
 pub async fn build_app(
     config: MiddlewareConfig,
     db: Arc<DatabaseConnection>,
-) -> Result<(Router, JoinHandle<()>), String> {
+) -> Result<(Router, Router, JoinHandle<()>), String> {
+    metrics::init_metrics();
     let state = MiddlewareState::new(config).await?;
     Ok(build_app_with_state(state, db))
 }
@@ -53,14 +54,15 @@ pub async fn build_app(
 pub fn build_app_with_state(
     state: MiddlewareState,
     db: Arc<DatabaseConnection>,
-) -> (Router, JoinHandle<()>) {
+) -> (Router, Router, JoinHandle<()>) {
     metrics::init_metrics();
     let cleanup_handle = state.start_cleanup_task();
 
+    let metrics_router = Router::new().route("/metrics", get(metrics::metrics_handler));
+
     let public_router = Router::new()
         .route("/health/liveness", get(health::liveness))
-        .route("/health/readiness", get(health::readiness))
-        .route("/metrics", get(metrics::metrics_handler));
+        .route("/health/readiness", get(health::readiness));
 
     let protected_router = Router::new()
         .route("/test", post(write_test).put(write_test))
@@ -111,7 +113,7 @@ pub fn build_app_with_state(
                         HeaderValue::from_static("max-age=63072000; includeSubDomains"),
                     )),
             ),
-
+        metrics_router,
         cleanup_handle,
     )
 }
@@ -125,6 +127,7 @@ pub async fn write_test(
     Json<TestWriteResponse>,
 ) {
     let action_id = Uuid::now_v7().to_string();
+    let start = std::time::Instant::now();
     record_action(
         &state,
         ctx.tenant_id().clone(),
@@ -133,8 +136,8 @@ pub async fn write_test(
     )
     .await;
 
-    // Simulate sandbox duration for metrics
-    metrics::record_sandbox_duration(0.05);
+    // Measurement of sandbox duration (simulated as record_action call time here)
+    metrics::record_sandbox_duration(start.elapsed().as_secs_f64());
 
     let body = TestWriteResponse {
         action_id: action_id.clone(),
@@ -199,7 +202,7 @@ mod security_header_tests {
         let state = MiddlewareState::new(config)
             .await
             .expect("Failed to create state");
-        let (app, _cleanup) = build_app_with_state(state, db);
+        let (app, _metrics, _cleanup) = build_app_with_state(state, db);
         app
     }
 
