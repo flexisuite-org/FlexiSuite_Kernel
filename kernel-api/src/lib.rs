@@ -6,7 +6,6 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{get, post},
 };
-use kernel_data::auth_context::{SystemTenantContext, TenantContext as DataTenantContext};
 use sea_orm::DatabaseConnection;
 use serde::Serialize;
 use std::sync::Arc;
@@ -178,7 +177,7 @@ struct JsonError {
     request_id: Option<String>,
 }
 
-fn build_json_error_response(
+pub fn build_json_error_response(
     message: impl Into<String>,
     status: StatusCode,
     request_id: Option<String>,
@@ -222,10 +221,8 @@ async fn readiness(
     let db_timeout = Duration::from_secs(5);
     let redis_timeout = Duration::from_secs(5);
 
-    let system_ctx = DataTenantContext::from(SystemTenantContext).with_db(db);
     let db_future = tokio::time::timeout(db_timeout, async move {
-        let conn = system_ctx.db().map_err(|e| e.to_string())?;
-        conn.ping().await.map_err(|e| e.to_string())
+        db.ping().await.map_err(|e| e.to_string())
     });
     let redis_future = tokio::time::timeout(redis_timeout, state.idempotency_store.ping());
 

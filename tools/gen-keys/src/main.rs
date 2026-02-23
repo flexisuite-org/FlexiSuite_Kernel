@@ -53,15 +53,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let verifying_key: VerifyingKey = signing_key.verifying_key();
 
     let pub_hex = hex::encode(verifying_key.to_bytes());
-    let now_duration = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| (d.as_secs(), d.subsec_nanos()))
-        .unwrap_or((0, 0));
-    let now_secs = now_duration.0;
+    let now_duration = SystemTime::now().duration_since(UNIX_EPOCH)?;
+    let now_secs = now_duration.as_secs();
     let now_dt = Utc
-        .timestamp_opt(now_secs as i64, now_duration.1)
+        .timestamp_opt(now_secs as i64, now_duration.subsec_nanos())
         .single()
-        .unwrap_or_else(|| Utc.timestamp_opt(0, 0).single().expect("unix epoch must be valid"));
+        .expect("SystemTime::now() and UNIX_EPOCH must produce a valid UTC timestamp");
     let generated_at = now_dt.to_rfc3339();
 
     let validity_secs = args.validity_days.saturating_mul(24 * 60 * 60);
@@ -93,7 +90,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let json = serde_json::to_string_pretty(&trust_root)?;
-    let output_path = args.output.unwrap_or_else(default_output_path);
+    let output_path = match args.output {
+        Some(path) => path,
+        None => default_output_path()?,
+    };
 
     if let Some(parent) = output_path.parent() {
         if !parent.exists() {
@@ -109,6 +109,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn default_output_path() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../ops/trust/manifest_trust_root.json")
+fn default_output_path() -> Result<PathBuf, std::io::Error> {
+    let cwd = std::env::current_dir()?;
+    Ok(cwd.join("ops/trust/manifest_trust_root.json"))
 }

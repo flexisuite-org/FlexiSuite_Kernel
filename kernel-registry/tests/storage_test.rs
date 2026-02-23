@@ -532,6 +532,27 @@ async fn test_save_manifest_verifies_signature() {
 }
 
 #[tokio::test]
+async fn test_save_manifest_rejects_unknown_kid() {
+    let store = Arc::new(InMemory::new());
+    let trust_provider = Arc::new(MockTrustProvider::new());
+    let registry =
+        RegistryStorage::new_with_trust_provider(store, &test_tenant_ctx(), trust_provider);
+
+    let mut manifest = test_manifest("app_unknown_kid", "1.0.0");
+    manifest.security.manifest_signature = "dummy-signature".to_string();
+    manifest.security.manifest_signature_kid = "missing-key-id".to_string();
+
+    let result = registry.save_manifest(&manifest).await;
+    match result {
+        Err(RegistryError::TrustRootError(msg)) => {
+            assert!(msg.contains("Key not found"));
+            assert!(msg.contains("missing-key-id"));
+        }
+        other => panic!("expected TrustRootError for unknown kid, got {other:?}"),
+    }
+}
+
+#[tokio::test]
 async fn test_save_manifest_rejects_revoked_key() {
     let store = Arc::new(InMemory::new());
     let (registry, signing_key, kid) =
