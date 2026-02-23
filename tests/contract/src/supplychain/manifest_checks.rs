@@ -1,7 +1,8 @@
 #[cfg(test)]
 mod tests {
     // SigningKey/Signer/OsRng are from ed25519-dalek, while production verification uses ring.
-    // This cross-library setup is intentional and safe via RFC 8032 compatibility (no prehash/context).
+    // Tests MUST use plain RFC 8032 Ed25519 (no Ed25519ph, no context): the exact bytes passed to
+    // SigningKey.sign(...) must be identical to the bytes verify_manifest checks as expected_digest.
     use ed25519_dalek::{Signer, SigningKey};
     use kernel_core::supplychain::{
         BreakGlassContext, KeyStatus, Manifest, TrustedKey, VerificationResult, verify_break_glass,
@@ -35,8 +36,14 @@ mod tests {
         };
 
         let digest_456 = "sha256-456";
-        let signature_456_active =
-            hex::encode(signing_key_active.sign(digest_456.as_bytes()).to_bytes());
+        let digest_456_bytes = digest_456.as_bytes();
+        let signature_456_active_bytes = signing_key_active.sign(digest_456_bytes).to_bytes();
+        assert_eq!(
+            signature_456_active_bytes.len(),
+            64,
+            "Ed25519 signatures must be exactly 64 bytes (RFC 8032)"
+        );
+        let signature_456_active = hex::encode(signature_456_active_bytes);
         let manifest_ok = Manifest {
             id: "pkg-b".to_string(),
             digest: digest_456.to_string(),
@@ -142,7 +149,7 @@ mod tests {
 
         // Success case
         assert!(matches!(
-            verify_manifest("tenant_test", &manifest_ok, &key_active, "sha256-456", now),
+            verify_manifest("tenant_test", &manifest_ok, &key_active, digest_456, now),
             VerificationResult::Ok
         ));
 

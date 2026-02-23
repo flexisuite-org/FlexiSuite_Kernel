@@ -577,7 +577,7 @@ async fn test_save_manifest_accepts_retired_in_window() {
     let now = unix_now();
     let store = Arc::new(InMemory::new());
     let (registry, signing_key, kid) =
-        setup_registry_with_key_status(store, KeyStatus::Retired, Some(now + 2), None, None);
+        setup_registry_with_key_status(store, KeyStatus::Retired, Some(now - 10), None, None);
     let mut manifest = test_manifest("app_retired_ok", "1.0.0");
     manifest.security.manifest_signature_kid = kid;
     let digest = compute_digest(&manifest);
@@ -629,6 +629,133 @@ async fn test_save_manifest_rejects_key_expired() {
     match result {
         Err(RegistryError::InvalidManifest(msg)) => assert!(msg.contains("KeyExpired")),
         other => panic!("expected KeyExpired invalid manifest, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn test_get_manifest_rejects_revoked_key() {
+    let store = Arc::new(InMemory::new());
+    let (registry, signing_key, kid) =
+        setup_registry_with_key_status(store.clone(), KeyStatus::Revoked, None, None, None);
+    let mut manifest = test_manifest("app_get_revoked", "1.0.0");
+    manifest.security.manifest_signature_kid = kid;
+    let digest = compute_digest(&manifest);
+    manifest.security.manifest_digest = digest.clone();
+    manifest.security.manifest_signature =
+        hex::encode(signing_key.sign(digest.as_bytes()).to_bytes());
+
+    let path = registry.manifest_path(&manifest.id, &manifest.version);
+    let data = serde_json::to_vec(&manifest).expect("serialize test manifest");
+    store.put(&path, data.into()).await.expect("store manifest");
+
+    let result = registry.get_manifest(&manifest.id, &manifest.version).await;
+    match result {
+        Err(RegistryError::InvalidManifest(msg)) => assert!(msg.contains("KeyRevoked")),
+        other => panic!("expected KeyRevoked invalid manifest on get, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn test_get_manifest_rejects_retired_out_of_window() {
+    let now = unix_now();
+    let store = Arc::new(InMemory::new());
+    let (registry, signing_key, kid) = setup_registry_with_key_status(
+        store.clone(),
+        KeyStatus::Retired,
+        Some(now - 172_800),
+        None,
+        None,
+    );
+    let mut manifest = test_manifest("app_get_retired_old", "1.0.0");
+    manifest.security.manifest_signature_kid = kid;
+    let digest = compute_digest(&manifest);
+    manifest.security.manifest_digest = digest.clone();
+    manifest.security.manifest_signature =
+        hex::encode(signing_key.sign(digest.as_bytes()).to_bytes());
+
+    let path = registry.manifest_path(&manifest.id, &manifest.version);
+    let data = serde_json::to_vec(&manifest).expect("serialize test manifest");
+    store.put(&path, data.into()).await.expect("store manifest");
+
+    let result = registry.get_manifest(&manifest.id, &manifest.version).await;
+    match result {
+        Err(RegistryError::InvalidManifest(msg)) => {
+            assert!(msg.contains("KeyRetiredOutOfWindow"))
+        }
+        other => panic!("expected KeyRetiredOutOfWindow invalid manifest on get, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn test_get_manifest_accepts_retired_in_window() {
+    let now = unix_now();
+    let store = Arc::new(InMemory::new());
+    let (registry, signing_key, kid) =
+        setup_registry_with_key_status(store, KeyStatus::Retired, Some(now - 10), None, None);
+    let mut manifest = test_manifest("app_get_retired_ok", "1.0.0");
+    manifest.security.manifest_signature_kid = kid;
+    let digest = compute_digest(&manifest);
+    manifest.security.manifest_digest = digest.clone();
+    manifest.security.manifest_signature =
+        hex::encode(signing_key.sign(digest.as_bytes()).to_bytes());
+
+    registry
+        .save_manifest(&manifest)
+        .await
+        .expect("retired key in grace window should be storable");
+
+    let result = registry.get_manifest(&manifest.id, &manifest.version).await;
+    assert!(
+        result.is_ok(),
+        "expected retired key in grace window to pass on get"
+    );
+}
+
+#[tokio::test]
+async fn test_get_manifest_rejects_key_not_yet_valid() {
+    let now = unix_now();
+    let store = Arc::new(InMemory::new());
+    let (registry, signing_key, kid) =
+        setup_registry_with_key_status(store.clone(), KeyStatus::Active, None, Some(now + 3_600), None);
+    let mut manifest = test_manifest("app_get_not_yet_valid", "1.0.0");
+    manifest.security.manifest_signature_kid = kid;
+    let digest = compute_digest(&manifest);
+    manifest.security.manifest_digest = digest.clone();
+    manifest.security.manifest_signature =
+        hex::encode(signing_key.sign(digest.as_bytes()).to_bytes());
+
+    let path = registry.manifest_path(&manifest.id, &manifest.version);
+    let data = serde_json::to_vec(&manifest).expect("serialize test manifest");
+    store.put(&path, data.into()).await.expect("store manifest");
+
+    let result = registry.get_manifest(&manifest.id, &manifest.version).await;
+    match result {
+        Err(RegistryError::InvalidManifest(msg)) => assert!(msg.contains("KeyNotYetValid")),
+        other => panic!("expected KeyNotYetValid invalid manifest on get, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn test_get_manifest_rejects_key_expired() {
+    let now = unix_now();
+    let store = Arc::new(InMemory::new());
+    let (registry, signing_key, kid) =
+        setup_registry_with_key_status(store.clone(), KeyStatus::Active, None, None, Some(now - 3_600));
+    let mut manifest = test_manifest("app_get_expired", "1.0.0");
+    manifest.security.manifest_signature_kid = kid;
+    let digest = compute_digest(&manifest);
+    manifest.security.manifest_digest = digest.clone();
+    manifest.security.manifest_signature =
+        hex::encode(signing_key.sign(digest.as_bytes()).to_bytes());
+
+    let path = registry.manifest_path(&manifest.id, &manifest.version);
+    let data = serde_json::to_vec(&manifest).expect("serialize test manifest");
+    store.put(&path, data.into()).await.expect("store manifest");
+
+    let result = registry.get_manifest(&manifest.id, &manifest.version).await;
+    match result {
+        Err(RegistryError::InvalidManifest(msg)) => assert!(msg.contains("KeyExpired")),
+        other => panic!("expected KeyExpired invalid manifest on get, got {other:?}"),
     }
 }
 
