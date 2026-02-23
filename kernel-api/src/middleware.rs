@@ -2037,6 +2037,12 @@ pub fn violation_to_response(v: &QuotaViolation, request_id: Option<String>) -> 
         StatusCode::TOO_MANY_REQUESTS => "Rate limit exceeded",
         _ => "Quota limit exceeded",
     };
+    let quota_headers = v.headers();
+    let retry_after = quota_headers
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case("Retry-After"))
+        .and_then(|(_, value)| value.parse::<u64>().ok())
+        .unwrap_or(v.retry_after_s);
 
     let body = serde_json::json!({
         "status": status.as_u16(),
@@ -2044,14 +2050,14 @@ pub fn violation_to_response(v: &QuotaViolation, request_id: Option<String>) -> 
         "limit": serde_json::Value::Null,
         "remaining": serde_json::Value::Null,
         "period": serde_json::Value::Null,
-        "retry_after": v.retry_after_s,
+        "retry_after": retry_after,
         "request_id": request_id,
     });
     let mut res = (status, Json(body)).into_response();
 
     // Inject headers from violation
     let headers = res.headers_mut();
-    for (name, value) in v.headers() {
+    for (name, value) in quota_headers {
         if let Ok(hname) = HeaderName::from_bytes(name.as_bytes()) {
             if let Ok(hval) = HeaderValue::from_str(&value) {
                 headers.insert(hname, hval);
