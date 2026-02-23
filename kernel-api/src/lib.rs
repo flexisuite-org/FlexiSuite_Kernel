@@ -6,7 +6,6 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{get, post},
 };
-use chrono::Utc;
 use kernel_data::auth_context::{SystemTenantContext, TenantContext as DataTenantContext};
 use sea_orm::DatabaseConnection;
 use serde::Serialize;
@@ -173,15 +172,8 @@ pub async fn get_action_status(
 
 #[derive(Serialize)]
 struct JsonError {
+    status: u16,
     error: String,
-    details: JsonErrorBody,
-}
-
-#[derive(Serialize)]
-struct JsonErrorBody {
-    code: u16,
-    message: String,
-    timestamp: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     request_id: Option<String>,
 }
@@ -191,15 +183,10 @@ fn build_json_error_response(
     status: StatusCode,
     request_id: Option<String>,
 ) -> Response {
-    let message = message.into();
     let body = JsonError {
-        error: message.clone(),
-        details: JsonErrorBody {
-            code: status.as_u16(),
-            message,
-            timestamp: Utc::now().to_rfc3339(),
-            request_id,
-        },
+        status: status.as_u16(),
+        error: message.into(),
+        request_id,
     };
     (status, Json(body)).into_response()
 }

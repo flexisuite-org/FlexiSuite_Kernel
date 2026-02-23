@@ -12,6 +12,7 @@ use rand::rngs::OsRng;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 struct MockTrustProvider {
     keys: HashMap<String, TrustedKey>,
@@ -97,6 +98,43 @@ fn setup_registry_with_keys(store: Arc<dyn ObjectStore>) -> (RegistryStorage, Si
 fn setup_registry(store: Arc<dyn ObjectStore>) -> RegistryStorage {
     let (registry, _, _) = setup_registry_with_keys(store);
     registry
+}
+
+fn unix_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system time after unix epoch")
+        .as_secs()
+}
+
+fn setup_registry_with_key_status(
+    store: Arc<dyn ObjectStore>,
+    status: KeyStatus,
+    retired_at: Option<u64>,
+    not_before: Option<u64>,
+    not_after: Option<u64>,
+) -> (RegistryStorage, SigningKey, String) {
+    let mut csprng = OsRng;
+    let signing_key = SigningKey::generate(&mut csprng);
+    let verifying_key = signing_key.verifying_key();
+    let kid = format!("status_{status:?}");
+
+    let trusted_key = TrustedKey {
+        kid: kid.clone(),
+        alg: "Ed25519".to_string(),
+        public_key: hex::encode(verifying_key.to_bytes()),
+        status,
+        retired_at,
+        not_before,
+        not_after,
+    };
+
+    let mut mock_trust = MockTrustProvider::new();
+    mock_trust.add(trusted_key);
+
+    let registry =
+        RegistryStorage::new_with_trust_provider(store, &test_tenant_ctx(), Arc::new(mock_trust));
+    (registry, signing_key, kid)
 }
 
 #[tokio::test]
@@ -490,6 +528,107 @@ async fn test_save_manifest_verifies_signature() {
     match result {
         Err(RegistryError::InvalidManifest(_)) => {}
         other => panic!("Expected InvalidManifest for bad sig, got {:?}", other),
+    }
+}
+
+#[tokio::test]
+async fn test_save_manifest_rejects_revoked_key() {
+    let store = Arc::new(InMemory::new());
+    let (registry, signing_key, kid) =
+        setup_registry_with_key_status(store, KeyStatus::Revoked, None, None, None);
+    let mut manifest = test_manifest("app_revoked", "1.0.0");
+    manifest.security.manifest_signature_kid = kid;
+    let digest = compute_digest(&manifest);
+    manifest.security.manifest_digest = digest.clone();
+    manifest.security.manifest_signature =
+        hex::encode(signing_key.sign(digest.as_bytes()).to_bytes());
+
+    let result = registry.save_manifest(&manifest).await;
+    match result {
+        Err(RegistryError::InvalidManifest(msg)) => assert!(msg.contains("KeyRevoked")),
+        other => panic!("expected KeyRevoked invalid manifest, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn test_save_manifest_rejects_retired_out_of_window() {
+    let now = unix_now();
+    let store = Arc::new(InMemory::new());
+    let (registry, signing_key, kid) =
+        setup_registry_with_key_status(store, KeyStatus::Retired, Some(now - 172_800), None, None);
+    let mut manifest = test_manifest("app_retired_old", "1.0.0");
+    manifest.security.manifest_signature_kid = kid;
+    let digest = compute_digest(&manifest);
+    manifest.security.manifest_digest = digest.clone();
+    manifest.security.manifest_signature =
+        hex::encode(signing_key.sign(digest.as_bytes()).to_bytes());
+
+    let result = registry.save_manifest(&manifest).await;
+    match result {
+        Err(RegistryError::InvalidManifest(msg)) => {
+            assert!(msg.contains("KeyRetiredOutOfWindow"))
+        }
+        other => panic!("expected KeyRetiredOutOfWindow invalid manifest, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn test_save_manifest_accepts_retired_in_window() {
+    let now = unix_now();
+    let store = Arc::new(InMemory::new());
+    let (registry, signing_key, kid) =
+        setup_registry_with_key_status(store, KeyStatus::Retired, Some(now), None, None);
+    let mut manifest = test_manifest("app_retired_ok", "1.0.0");
+    manifest.security.manifest_signature_kid = kid;
+    let digest = compute_digest(&manifest);
+    manifest.security.manifest_digest = digest.clone();
+    manifest.security.manifest_signature =
+        hex::encode(signing_key.sign(digest.as_bytes()).to_bytes());
+
+    let result = registry.save_manifest(&manifest).await;
+    assert!(
+        result.is_ok(),
+        "expected retired key in grace window to pass"
+    );
+}
+
+#[tokio::test]
+async fn test_save_manifest_rejects_key_not_yet_valid() {
+    let now = unix_now();
+    let store = Arc::new(InMemory::new());
+    let (registry, signing_key, kid) =
+        setup_registry_with_key_status(store, KeyStatus::Active, None, Some(now + 3_600), None);
+    let mut manifest = test_manifest("app_not_yet_valid", "1.0.0");
+    manifest.security.manifest_signature_kid = kid;
+    let digest = compute_digest(&manifest);
+    manifest.security.manifest_digest = digest.clone();
+    manifest.security.manifest_signature =
+        hex::encode(signing_key.sign(digest.as_bytes()).to_bytes());
+
+    let result = registry.save_manifest(&manifest).await;
+    match result {
+        Err(RegistryError::InvalidManifest(msg)) => assert!(msg.contains("KeyNotYetValid")),
+        other => panic!("expected KeyNotYetValid invalid manifest, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn test_save_manifest_rejects_key_expired() {
+    let now = unix_now();
+    let store = Arc::new(InMemory::new());
+    let (registry, signing_key, kid) =
+        setup_registry_with_key_status(store, KeyStatus::Active, None, None, Some(now - 3_600));
+    let mut manifest = test_manifest("app_expired", "1.0.0");
+    manifest.security.manifest_signature_kid = kid;
+    let digest = compute_digest(&manifest);
+    manifest.security.manifest_digest = digest.clone();
+    manifest.security.manifest_signature =
+        hex::encode(signing_key.sign(digest.as_bytes()).to_bytes());
+
+    let result = registry.save_manifest(&manifest).await;
+    match result {
+        Err(RegistryError::InvalidManifest(msg)) => assert!(msg.contains("KeyExpired")),
+        other => panic!("expected KeyExpired invalid manifest, got {other:?}"),
     }
 }
 
