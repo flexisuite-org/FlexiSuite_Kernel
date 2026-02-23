@@ -1,4 +1,12 @@
 use ring::signature;
+use tracing::warn;
+
+/// REQ-SUPPLYCHAIN-RETIRED-KEY-GRACE:
+/// Retired key signatures are accepted for up to 24 hours after `retired_at`.
+pub const RETIRED_KEY_GRACE_PERIOD_SECS: u64 = 86_400;
+/// REQ-SUPPLYCHAIN-CLOCK-DRIFT-TOLERANCE:
+/// Allow small clock drift when evaluating key validity windows.
+pub const CLOCK_DRIFT_TOLERANCE_SECS: u64 = 30;
 
 #[derive(Debug, Clone)]
 pub struct Manifest {
@@ -20,6 +28,7 @@ pub enum KeyStatus {
 pub enum VerificationResult {
     Ok,
     DigestMismatch,
+    SignatureAlgorithmMismatch,
     SignatureInvalid,
     KeyRevoked,
     KeyRetiredOutOfWindow,
@@ -57,6 +66,16 @@ pub fn verify_manifest(
     expected_artifact_digest: &str,
     now: u64,
 ) -> VerificationResult {
+    let log_failure = |reason: &str| {
+        warn!(
+            event = "supplychain.verify_manifest.failed",
+            manifest_id = %manifest.id,
+            kid = %trusted_key.kid,
+            reason = reason,
+            "Manifest verification failed"
+        );
+    };
+
     // 1. Digest Existence/Format Check
     // Spec: Must use "-" prefix (e.g., sha256-..., sha384-...)
     // REQ-SUPPLYCHAIN-DIGEST-FORMAT
@@ -64,34 +83,39 @@ pub fn verify_manifest(
         manifest.digest.starts_with("sha256-") || manifest.digest.starts_with("sha384-");
 
     if !has_valid_prefix {
+        log_failure("MANIFEST_DIGEST_FORMAT_INVALID");
         return VerificationResult::DigestMismatch; // Malformed or unsupported digest
     }
 
     // 1b. Artifact Digest Verification (Contract: Manifest must match artifact)
     // Enforce mandatory check as per REQ-SUPPLYCHAIN-DIGEST-MATCH
     if manifest.digest != expected_artifact_digest {
+        log_failure("MANIFEST_DIGEST_MISMATCH");
         return VerificationResult::DigestMismatch;
     }
 
     // 2. Key ID Match (Contract: Key used must match Trusted Key)
     if manifest.kid != trusted_key.kid {
-        // Better error classification for audit/triage
+        log_failure("MANIFEST_KEY_MISMATCH");
         return VerificationResult::KeyMismatch;
     }
 
     // 2b. Key Status Check
     match trusted_key.status {
-        KeyStatus::Revoked => return VerificationResult::KeyRevoked,
+        KeyStatus::Revoked => {
+            log_failure("MANIFEST_KEY_REVOKED");
+            return VerificationResult::KeyRevoked;
+        }
         KeyStatus::Retired => {
-            // Check Grace Window (e.g., 24h = 86400s)
-            let grace_period = 86400;
             if let Some(retired_at) = trusted_key.retired_at {
-                if now > retired_at.saturating_add(grace_period) {
+                if now > retired_at.saturating_add(RETIRED_KEY_GRACE_PERIOD_SECS) {
+                    log_failure("MANIFEST_KEY_RETIRED_OUT_OF_WINDOW");
                     return VerificationResult::KeyRetiredOutOfWindow;
                 }
                 // In window -> Proceed to signature check
             } else {
                 // Retired but no timestamp -> Assume out
+                log_failure("MANIFEST_KEY_RETIRED_OUT_OF_WINDOW");
                 return VerificationResult::KeyRetiredOutOfWindow;
             }
         }
@@ -102,36 +126,73 @@ pub fn verify_manifest(
     }
 
     // 2c. Validity Period Check with Tolerance (30s)
-    let tolerance = 30;
     if let Some(nbf) = trusted_key.not_before {
-        if now < nbf.saturating_sub(tolerance) {
+        if now.saturating_add(CLOCK_DRIFT_TOLERANCE_SECS) < nbf {
+            log_failure("MANIFEST_KEY_NOT_YET_VALID");
             return VerificationResult::KeyNotYetValid;
         }
     }
     if let Some(exp) = trusted_key.not_after {
-        if now > exp.saturating_add(tolerance) {
+        if now > exp.saturating_add(CLOCK_DRIFT_TOLERANCE_SECS) {
+            log_failure("MANIFEST_KEY_EXPIRED");
             return VerificationResult::KeyExpired;
         }
+    }
+
+    if !trusted_key.alg.trim().eq_ignore_ascii_case("ed25519") {
+        log_failure("MANIFEST_SIGNATURE_ALGORITHM_MISMATCH");
+        return VerificationResult::SignatureAlgorithmMismatch;
     }
 
     // 3. Signature Verification (Real) via ring
     let signature_bytes = match hex::decode(&manifest.signature) {
         Ok(bytes) => bytes,
-        Err(_) => return VerificationResult::SignatureInvalid,
+        Err(e) => {
+            warn!(
+                event = "supplychain.verify_manifest.failed",
+                manifest_id = %manifest.id,
+                kid = %trusted_key.kid,
+                reason = "MANIFEST_SIGNATURE_INVALID",
+                error_detail = %e,
+                decode_stage = "signature_hex_decode",
+                "Manifest verification failed"
+            );
+            return VerificationResult::SignatureInvalid;
+        }
     };
 
     let pub_key_bytes = match hex::decode(&trusted_key.public_key) {
         Ok(bytes) => bytes,
-        Err(_) => return VerificationResult::SignatureInvalid,
+        Err(e) => {
+            warn!(
+                event = "supplychain.verify_manifest.failed",
+                manifest_id = %manifest.id,
+                kid = %trusted_key.kid,
+                reason = "MANIFEST_SIGNATURE_INVALID",
+                error_detail = %e,
+                decode_stage = "public_key_hex_decode",
+                "Manifest verification failed"
+            );
+            return VerificationResult::SignatureInvalid;
+        }
     };
 
-    let peer_public_key =
-        signature::UnparsedPublicKey::new(&signature::ED25519, pub_key_bytes);
+    let peer_public_key = signature::UnparsedPublicKey::new(&signature::ED25519, pub_key_bytes);
 
     // Verify signature over the UTF-8 bytes of the digest string
     match peer_public_key.verify(manifest.digest.as_bytes(), &signature_bytes) {
         Ok(()) => VerificationResult::Ok,
-        Err(_) => VerificationResult::SignatureInvalid,
+        Err(e) => {
+            warn!(
+                event = "supplychain.verify_manifest.failed",
+                manifest_id = %manifest.id,
+                kid = %trusted_key.kid,
+                reason = "MANIFEST_SIGNATURE_INVALID",
+                error_detail = ?e,
+                "Manifest verification failed"
+            );
+            VerificationResult::SignatureInvalid
+        }
     }
 }
 
