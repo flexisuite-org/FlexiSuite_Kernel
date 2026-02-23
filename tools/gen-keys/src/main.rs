@@ -1,18 +1,8 @@
-use clap::Parser;
 use ed25519_dalek::{SigningKey, Signer, VerifyingKey};
 use rand::rngs::OsRng;
 use serde::Serialize;
 use std::fs;
-use std::path::PathBuf;
-
-#[derive(Debug, Parser)]
-#[command(name = "gen-keys", about = "Generate trust root keys and JSON")]
-struct Args {
-    /// Output file path for manifest_trust_root.json.
-    /// Priority: CLI arg > GEN_KEYS_OUTPUT_PATH > built-in default.
-    #[arg(long, env = "GEN_KEYS_OUTPUT_PATH")]
-    output: Option<PathBuf>,
-}
+use std::path::Path;
 
 #[derive(Serialize)]
 struct TrustRoot {
@@ -32,7 +22,6 @@ struct Key {
 }
 
 fn main() {
-    let args = Args::parse();
     let mut csprng = OsRng;
     let signing_key: SigningKey = SigningKey::generate(&mut csprng);
     let verifying_key: VerifyingKey = signing_key.verifying_key();
@@ -58,22 +47,16 @@ fn main() {
 
     let json = serde_json::to_string_pretty(&trust_root).unwrap();
 
-    let output_path = args.output.unwrap_or_else(default_output_path);
+    // Path relative to where we run it. If run from tools/gen-keys, it's ../../ops/trust
+    let path_str = "../../ops/trust/manifest_trust_root.json";
+    let path = Path::new(path_str);
 
-    if let Some(parent) = output_path.parent() {
+    if let Some(parent) = path.parent() {
         if !parent.exists() {
             fs::create_dir_all(parent).unwrap();
         }
     }
 
-    fs::write(&output_path, json).unwrap();
-    println!(
-        "Wrote manifest_trust_root.json to {}",
-        output_path.display()
-    );
-}
-
-fn default_output_path() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../ops/trust/manifest_trust_root.json")
+    fs::write(path, json).unwrap();
+    println!("Wrote manifest_trust_root.json to {}", path_str);
 }

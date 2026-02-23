@@ -1,17 +1,14 @@
 use axum::{
     Json, Router,
     extract::{Extension, Path},
-    http::{HeaderMap, HeaderName, HeaderValue, StatusCode, header},
+    http::{HeaderName, HeaderValue, StatusCode},
     middleware::{from_fn, from_fn_with_state},
-    response::{IntoResponse, Response},
     routing::{get, post},
 };
 use sea_orm::DatabaseConnection;
 use serde::Serialize;
 use std::sync::Arc;
 use tokio::task::JoinHandle;
-use tower::ServiceBuilder;
-use tower_http::set_header::SetResponseHeaderLayer;
 use uuid::Uuid;
 
 use crate::auth::{TenantContext, auth_middleware};
@@ -22,9 +19,6 @@ use crate::middleware::{
 
 pub mod auth;
 pub mod diagnostics;
-pub mod error;
-pub mod health;
-pub mod metrics;
 pub mod middleware;
 pub mod profile;
 
@@ -44,7 +38,7 @@ pub struct ActionStatusResponse {
 pub async fn build_app(
     config: MiddlewareConfig,
     db: Arc<DatabaseConnection>,
-) -> Result<(Router, Router, JoinHandle<()>), String> {
+) -> Result<(Router, JoinHandle<()>), String> {
     let state = MiddlewareState::new(config).await?;
     Ok(build_app_with_state(state, db))
 }
@@ -52,15 +46,10 @@ pub async fn build_app(
 pub fn build_app_with_state(
     state: MiddlewareState,
     db: Arc<DatabaseConnection>,
-) -> (Router, Router, JoinHandle<()>) {
-    metrics::init_metrics();
+) -> (Router, JoinHandle<()>) {
     let cleanup_handle = state.start_cleanup_task();
 
-    let metrics_router = Router::new().route("/metrics", get(metrics::metrics_handler));
-
-    let public_router = Router::new()
-        .route("/health/liveness", get(health::liveness))
-        .route("/health/readiness", get(health::readiness));
+    let public_router = Router::new().route("/health", get(|| async { "OK" }));
 
     let protected_router = Router::new()
         .route("/test", post(write_test).put(write_test))
@@ -68,50 +57,15 @@ pub fn build_app_with_state(
         // Diagnostics routes under /api/v1/diagnostics
         .nest("/api/v1/diagnostics", diagnostics::routes())
         // Outermost applied last: Auth -> Idempotency -> Quota
-        .route_layer(from_fn(quota_middleware))
-        .route_layer(from_fn(idempotency_middleware))
-        .route_layer(from_fn_with_state(db.clone(), auth_middleware));
+        .layer(from_fn(quota_middleware))
+        .layer(from_fn(idempotency_middleware))
+        .layer(from_fn_with_state(db.clone(), auth_middleware));
 
     (
         Router::new()
             .merge(public_router)
             .merge(protected_router)
-            .layer(Extension(state))
-            .layer(Extension(db))
-            .layer(
-                ServiceBuilder::new()
-                    // COOP/COEP/CORP headers for cross-origin isolation
-                    .layer(SetResponseHeaderLayer::overriding(
-                        HeaderName::from_static("cross-origin-opener-policy"),
-                        HeaderValue::from_static("same-origin"),
-                    ))
-                    .layer(SetResponseHeaderLayer::overriding(
-                        HeaderName::from_static("cross-origin-embedder-policy"),
-                        HeaderValue::from_static("require-corp"),
-                    ))
-                    .layer(SetResponseHeaderLayer::overriding(
-                        HeaderName::from_static("cross-origin-resource-policy"),
-                        HeaderValue::from_static("same-origin"),
-                    ))
-                    // Standard security headers
-                    .layer(SetResponseHeaderLayer::overriding(
-                        header::X_CONTENT_TYPE_OPTIONS,
-                        HeaderValue::from_static("nosniff"),
-                    ))
-                    .layer(SetResponseHeaderLayer::overriding(
-                        header::X_FRAME_OPTIONS,
-                        HeaderValue::from_static("DENY"),
-                    ))
-                    .layer(SetResponseHeaderLayer::overriding(
-                        header::CONTENT_SECURITY_POLICY,
-                        HeaderValue::from_static("default-src 'none'; frame-ancestors 'none'"),
-                    ))
-                    .layer(SetResponseHeaderLayer::overriding(
-                        header::STRICT_TRANSPORT_SECURITY,
-                        HeaderValue::from_static("max-age=63072000; includeSubDomains"),
-                    )),
-            ),
-        metrics_router,
+            .layer(Extension(state)),
         cleanup_handle,
     )
 }
@@ -132,8 +86,6 @@ pub async fn write_test(
         ActionStatus::Completed,
     )
     .await;
-
-    // TODO: record sandbox duration via kernel-runtime execution hook when integrated
 
     let body = TestWriteResponse {
         action_id: action_id.clone(),
@@ -159,148 +111,15 @@ pub async fn write_test(
 
 pub async fn get_action_status(
     Path(action_id): Path<String>,
-    headers: HeaderMap,
     Extension(state): Extension<MiddlewareState>,
     Extension(ctx): Extension<TenantContext>,
-) -> Response {
+) -> Result<Json<ActionStatusResponse>, StatusCode> {
     if let Some(record) = get_action(&state, ctx.tenant_id().clone(), &action_id).await {
-        return Json(ActionStatusResponse {
+        return Ok(Json(ActionStatusResponse {
             action_id,
             status: record.status,
-        })
-        .into_response();
+        }));
     }
 
-    let request_id = headers
-        .get("x-request-id")
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_string());
-
-    error::build_json_error_response("Action not found", StatusCode::NOT_FOUND, request_id)
-}
-
-#[cfg(test)]
-mod security_header_tests {
-    use super::*;
-    use axum::{
-        body::Body,
-        http::{Request, StatusCode},
-    };
-    use sea_orm::{DatabaseBackend, MockDatabase};
-    use tower::ServiceExt;
-
-    async fn make_test_app() -> Router {
-        let db = Arc::new(MockDatabase::new(DatabaseBackend::Postgres).into_connection());
-        let mut config = MiddlewareConfig::default();
-        config.require_redis = false;
-        config.redis_url = "redis://0.0.0.0:0".to_string();
-
-        let state = MiddlewareState::new(config)
-            .await
-            .expect("Failed to create state");
-        let (app, _metrics, _cleanup) = build_app_with_state(state, db);
-        app
-    }
-
-    async fn assert_security_headers(response: Response) {
-        let headers = response.headers();
-        assert_eq!(
-            headers
-                .get("cross-origin-opener-policy")
-                .and_then(|v| v.to_str().ok()),
-            Some("same-origin")
-        );
-        assert_eq!(
-            headers
-                .get("cross-origin-embedder-policy")
-                .and_then(|v| v.to_str().ok()),
-            Some("require-corp")
-        );
-        assert_eq!(
-            headers
-                .get("cross-origin-resource-policy")
-                .and_then(|v| v.to_str().ok()),
-            Some("same-origin")
-        );
-
-        // Verify standard security headers
-        assert_eq!(
-            headers
-                .get(header::X_CONTENT_TYPE_OPTIONS)
-                .expect("x-content-type-options must be present"),
-            "nosniff"
-        );
-        assert_eq!(
-            headers
-                .get(header::X_FRAME_OPTIONS)
-                .expect("x-frame-options must be present"),
-            "DENY"
-        );
-        assert_eq!(
-            headers
-                .get(header::CONTENT_SECURITY_POLICY)
-                .expect("content-security-policy must be present"),
-            "default-src 'none'; frame-ancestors 'none'"
-        );
-        assert_eq!(
-            headers
-                .get(header::STRICT_TRANSPORT_SECURITY)
-                .expect("strict-transport-security must be present"),
-            "max-age=63072000; includeSubDomains"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_security_headers_health() {
-        let app = make_test_app().await;
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .uri("/health/liveness")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(response.status(), StatusCode::OK);
-        assert_security_headers(response).await;
-    }
-
-    #[tokio::test]
-    async fn test_security_headers_protected() {
-        let app = make_test_app().await;
-        // Call protected route without auth to trigger a response (even if it's 401/error, headers should still be there)
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .uri("/test")
-                    .method("POST")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        // Should be 401 Unauthorized because we didn't provide any auth headers
-        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-        assert_security_headers(response).await;
-    }
-
-    #[tokio::test]
-    async fn test_security_headers_error() {
-        let app = make_test_app().await;
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .uri("/non-existent")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(response.status(), StatusCode::NOT_FOUND);
-        assert_security_headers(response).await;
-    }
+    Err(StatusCode::NOT_FOUND)
 }

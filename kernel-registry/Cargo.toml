@@ -15,11 +15,9 @@ hex = "0.4"
 bytes = "1.5"
 kernel-core = { path = "../kernel-core" }
 tracing = "=0.1.43"
-base64 = "0.22"
-ed25519-dalek = { version = "2.1", features = ["std", "rand_core"] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full"] }
 tempfile = "3"
-temp-env = "=0.3.6"
+ed25519-dalek = { version = "2.1", features = ["std", "pem", "rand_core"] }
 rand = "0.8"
