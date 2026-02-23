@@ -577,7 +577,7 @@ async fn test_save_manifest_accepts_retired_in_window() {
     let now = unix_now();
     let store = Arc::new(InMemory::new());
     let (registry, signing_key, kid) =
-        setup_registry_with_key_status(store, KeyStatus::Retired, Some(now), None, None);
+        setup_registry_with_key_status(store, KeyStatus::Retired, Some(now + 2), None, None);
     let mut manifest = test_manifest("app_retired_ok", "1.0.0");
     manifest.security.manifest_signature_kid = kid;
     let digest = compute_digest(&manifest);
