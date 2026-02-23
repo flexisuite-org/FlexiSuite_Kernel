@@ -6,7 +6,7 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{get, post},
 };
-use sea_orm::DatabaseConnection;
+use sea_orm::{ConnectionTrait, DatabaseConnection, Statement};
 use serde::Serialize;
 use std::sync::Arc;
 use std::time::Duration;
@@ -55,12 +55,12 @@ pub fn build_app_with_state(
 
     let public_router = Router::new()
         .route("/health", get(liveness))
-        .route("/health/liveness", get(liveness))
-        .route("/health/readiness", get(readiness));
+        .route("/health/liveness", get(liveness));
 
     let protected_router = Router::new()
         .route("/test", post(write_test).put(write_test))
         .route("/actions/:action_id", get(get_action_status))
+        .route("/health/readiness", get(readiness))
         // Diagnostics routes under /api/v1/diagnostics
         .nest("/api/v1/diagnostics", diagnostics::routes())
         // Outermost applied last: Auth -> Idempotency -> Quota
@@ -216,13 +216,18 @@ async fn liveness() -> StatusCode {
 
 async fn readiness(
     Extension(state): Extension<MiddlewareState>,
-    Extension(db): Extension<Arc<DatabaseConnection>>,
+    Extension(ctx): Extension<TenantContext>,
 ) -> Response {
     let db_timeout = Duration::from_secs(5);
     let redis_timeout = Duration::from_secs(5);
 
     let db_future = tokio::time::timeout(db_timeout, async move {
-        db.ping().await.map_err(|e| e.to_string())
+        let db = ctx.db().map_err(|e| e.to_string())?;
+        let stmt = Statement::from_string(db.get_database_backend(), "SELECT 1".to_string());
+        db.execute(stmt)
+            .await
+            .map(|_| ())
+            .map_err(|e| e.to_string())
     });
     let redis_future = tokio::time::timeout(redis_timeout, state.idempotency_store.ping());
 
