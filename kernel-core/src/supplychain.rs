@@ -56,6 +56,7 @@ pub struct TrustedKey {
 }
 
 pub fn verify_manifest(
+    tenant_id: &str,
     manifest: &Manifest,
     trusted_key: &TrustedKey,
     expected_artifact_digest: &str,
@@ -64,6 +65,7 @@ pub fn verify_manifest(
     let log_failure = |reason: &str| {
         warn!(
             event = "supplychain.verify_manifest.failed",
+            tenant = %tenant_id,
             manifest_id = %manifest.id,
             kid = %trusted_key.kid,
             reason = reason,
@@ -131,6 +133,7 @@ pub fn verify_manifest(
         Err(e) => {
             warn!(
                 event = "supplychain.verify_manifest.failed",
+                tenant = %tenant_id,
                 manifest_id = %manifest.id,
                 kid = %trusted_key.kid,
                 reason = "MANIFEST_SIGNATURE_INVALID",
@@ -147,6 +150,7 @@ pub fn verify_manifest(
         Err(e) => {
             warn!(
                 event = "supplychain.verify_manifest.failed",
+                tenant = %tenant_id,
                 manifest_id = %manifest.id,
                 kid = %trusted_key.kid,
                 reason = "MANIFEST_SIGNATURE_INVALID",
@@ -164,6 +168,7 @@ pub fn verify_manifest(
         Err(e) => {
             warn!(
                 event = "supplychain.verify_manifest.failed",
+                tenant = %tenant_id,
                 manifest_id = %manifest.id,
                 kid = %trusted_key.kid,
                 reason = "MANIFEST_SIGNATURE_INVALID",

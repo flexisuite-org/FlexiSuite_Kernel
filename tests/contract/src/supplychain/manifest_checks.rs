@@ -86,6 +86,15 @@ mod tests {
             not_before: None,
             not_after: None,
         };
+        let key_retired_none = TrustedKey {
+            kid: "active".to_string(),
+            alg: "Ed25519".to_string(),
+            public_key: pub_key_active.clone(),
+            status: KeyStatus::Retired,
+            retired_at: None,
+            not_before: None,
+            not_after: None,
+        };
         let key_next = TrustedKey {
             kid: "active".to_string(),
             alg: "Ed25519".to_string(),
@@ -107,7 +116,13 @@ mod tests {
 
         // Revoked Key -> KeyRevoked
         assert!(matches!(
-            verify_manifest(&manifest_revoked, &key_revoked, digest_123, now),
+            verify_manifest(
+                "tenant_test",
+                &manifest_revoked,
+                &key_revoked,
+                digest_123,
+                now
+            ),
             VerificationResult::KeyRevoked
         ));
 
@@ -115,13 +130,19 @@ mod tests {
         // Even if signature is valid for "sha256-456", if expected digest is different, fail digest match.
         // manifest_ok has digest "sha256-456".
         assert!(matches!(
-            verify_manifest(&manifest_ok, &key_active, "sha256-WRONG", now),
+            verify_manifest(
+                "tenant_test",
+                &manifest_ok,
+                &key_active,
+                "sha256-WRONG",
+                now
+            ),
             VerificationResult::DigestMismatch
         ));
 
         // Success case
         assert!(matches!(
-            verify_manifest(&manifest_ok, &key_active, "sha256-456", now),
+            verify_manifest("tenant_test", &manifest_ok, &key_active, "sha256-456", now),
             VerificationResult::Ok
         ));
 
@@ -138,7 +159,13 @@ mod tests {
 
         // Verifying dash prefix support
         assert!(matches!(
-            verify_manifest(&manifest_sha384, &key_active, digest_abc, now),
+            verify_manifest(
+                "tenant_test",
+                &manifest_sha384,
+                &key_active,
+                digest_abc,
+                now
+            ),
             VerificationResult::Ok
         ));
 
@@ -155,7 +182,7 @@ mod tests {
             not_after: None,
         };
         assert!(matches!(
-            verify_manifest(&manifest_ok, &key_wrong, "sha256-456", now),
+            verify_manifest("tenant_test", &manifest_ok, &key_wrong, "sha256-456", now),
             VerificationResult::KeyMismatch
         ));
 
@@ -166,7 +193,13 @@ mod tests {
         manifest_tampered.signature = "deadbeef".to_string(); // Invalid hex signature or just garbage
         // Or valid hex but invalid signature
         assert!(matches!(
-            verify_manifest(&manifest_tampered, &key_active, "sha256-456", now),
+            verify_manifest(
+                "tenant_test",
+                &manifest_tampered,
+                &key_active,
+                "sha256-456",
+                now
+            ),
             VerificationResult::SignatureInvalid
         ));
 
@@ -177,32 +210,68 @@ mod tests {
         manifest_wrong_sig.signature = signature_other;
 
         assert!(matches!(
-            verify_manifest(&manifest_wrong_sig, &key_active, "sha256-456", now),
+            verify_manifest(
+                "tenant_test",
+                &manifest_wrong_sig,
+                &key_active,
+                "sha256-456",
+                now
+            ),
             VerificationResult::SignatureInvalid
         ));
 
         // Test Retired logic
         // 1. In Window -> OK
         assert!(matches!(
-            verify_manifest(&manifest_ok, &key_retired_ok, "sha256-456", now),
+            verify_manifest(
+                "tenant_test",
+                &manifest_ok,
+                &key_retired_ok,
+                "sha256-456",
+                now
+            ),
             VerificationResult::Ok
         ));
 
         // 2. Out Window -> Fail
         assert!(matches!(
-            verify_manifest(&manifest_ok, &key_retired_fail, "sha256-456", now),
+            verify_manifest(
+                "tenant_test",
+                &manifest_ok,
+                &key_retired_fail,
+                "sha256-456",
+                now
+            ),
+            VerificationResult::KeyRetiredOutOfWindow
+        ));
+
+        // 2b. Missing retired_at must fail-closed
+        assert!(matches!(
+            verify_manifest(
+                "tenant_test",
+                &manifest_ok,
+                &key_retired_none,
+                "sha256-456",
+                now
+            ),
             VerificationResult::KeyRetiredOutOfWindow
         ));
 
         // 3. Next -> OK
         assert!(matches!(
-            verify_manifest(&manifest_ok, &key_next, "sha256-456", now),
+            verify_manifest("tenant_test", &manifest_ok, &key_next, "sha256-456", now),
             VerificationResult::Ok
         ));
 
         // Unsupported algorithm should fail explicitly before signature verification.
         assert!(matches!(
-            verify_manifest(&manifest_ok, &key_wrong_alg, "sha256-456", now),
+            verify_manifest(
+                "tenant_test",
+                &manifest_ok,
+                &key_wrong_alg,
+                "sha256-456",
+                now
+            ),
             VerificationResult::SignatureAlgorithmMismatch
         ));
 
@@ -210,12 +279,12 @@ mod tests {
         let mut key_future = key_active.clone(); // Removed duplicate definition
         key_future.not_before = Some(now + 100);
         assert!(matches!(
-            verify_manifest(&manifest_ok, &key_future, "sha256-456", now),
+            verify_manifest("tenant_test", &manifest_ok, &key_future, "sha256-456", now),
             VerificationResult::KeyNotYetValid
         ));
         key_future.not_before = Some(now);
         assert!(matches!(
-            verify_manifest(&manifest_ok, &key_future, "sha256-456", now),
+            verify_manifest("tenant_test", &manifest_ok, &key_future, "sha256-456", now),
             VerificationResult::Ok
         ));
 
@@ -223,12 +292,12 @@ mod tests {
         let mut key_expired = key_active.clone(); // Removed duplicate definition
         key_expired.not_after = Some(now - 100);
         assert!(matches!(
-            verify_manifest(&manifest_ok, &key_expired, "sha256-456", now),
+            verify_manifest("tenant_test", &manifest_ok, &key_expired, "sha256-456", now),
             VerificationResult::KeyExpired
         ));
         key_expired.not_after = Some(now);
         assert!(matches!(
-            verify_manifest(&manifest_ok, &key_expired, "sha256-456", now),
+            verify_manifest("tenant_test", &manifest_ok, &key_expired, "sha256-456", now),
             VerificationResult::Ok
         ));
     }

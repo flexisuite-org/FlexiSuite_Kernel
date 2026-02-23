@@ -1,5 +1,5 @@
 use crate::error::RegistryError;
-use kernel_core::supplychain::{TrustedKey, KeyStatus};
+use kernel_core::supplychain::{KeyStatus, TrustedKey};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
@@ -55,10 +55,15 @@ impl FileTrustProvider {
 
 impl TrustProvider for FileTrustProvider {
     fn get_key(&self, kid: &str) -> Result<TrustedKey, RegistryError> {
-        let key = self.trust_root.keys.iter().find(|k| k.kid == kid).ok_or_else(|| {
-            warn!("Key not found in trust root: {}", kid);
-            RegistryError::TrustRootError(format!("Key not found: {}", kid))
-        })?;
+        let key = self
+            .trust_root
+            .keys
+            .iter()
+            .find(|k| k.kid == kid)
+            .ok_or_else(|| {
+                warn!("Key not found in trust root: {}", kid);
+                RegistryError::TrustRootError(format!("Key not found: {}", kid))
+            })?;
 
         let status = match key.status.as_str() {
             "active" => KeyStatus::Active,
@@ -67,7 +72,10 @@ impl TrustProvider for FileTrustProvider {
             "revoked" => KeyStatus::Revoked,
             _ => {
                 warn!("Unknown key status: {}", key.status);
-                return Err(RegistryError::TrustRootError(format!("Unknown key status: {}", key.status)));
+                return Err(RegistryError::TrustRootError(format!(
+                    "Unknown key status: {}",
+                    key.status
+                )));
             }
         };
 
@@ -106,9 +114,10 @@ pub mod tests {
 
     impl TrustProvider for MockTrustProvider {
         fn get_key(&self, kid: &str) -> Result<TrustedKey, RegistryError> {
-            self.keys.get(kid).cloned().ok_or_else(|| {
-                RegistryError::TrustRootError(format!("Key not found: {}", kid))
-            })
+            self.keys
+                .get(kid)
+                .cloned()
+                .ok_or_else(|| RegistryError::TrustRootError(format!("Key not found: {}", kid)))
         }
     }
 }
