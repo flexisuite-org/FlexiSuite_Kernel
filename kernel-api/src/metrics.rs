@@ -7,7 +7,12 @@ use prometheus::{Encoder, TextEncoder, CounterVec, Histogram, Registry, register
 use std::sync::OnceLock;
 
 pub fn init_metrics() {
-    let _ = init_metrics_with_registry(prometheus::default_registry());
+    match init_metrics_with_registry(prometheus::default_registry()) {
+        Ok(()) => {}
+        Err(error) => {
+            tracing::warn!(error = %error, "init_metrics failed: {error}");
+        }
+    }
 }
 
 pub fn init_metrics_with_registry(registry: &Registry) -> Result<(), prometheus::Error> {
