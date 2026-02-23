@@ -11,10 +11,18 @@ pub fn init_metrics() {
 }
 
 pub fn init_metrics_with_registry(registry: &Registry) -> Result<(), prometheus::Error> {
+    // Check if already initialized before attempting to register metrics in the registry.
+    // This avoids unnecessary registration and focuses registry errors on actual duplicates.
+    if METRICS.get().is_some() {
+        return Err(prometheus::Error::Msg(
+            "Metrics already initialized".to_string(),
+        ));
+    }
+
     let metrics = Metrics::new(registry)?;
     if let Err(metrics) = METRICS.set(metrics) {
-        // Already initialized. To avoid leaving orphaned metrics in the passed registry,
-        // we attempt to unregister them.
+        // Already initialized (handled race where another thread set it after the check above).
+        // To avoid leaving orphaned metrics in the passed registry, we attempt to unregister them.
         let _ = registry.unregister(Box::new(metrics.quota_reject_total));
         let _ = registry.unregister(Box::new(metrics.sandbox_duration_seconds));
         let _ = registry.unregister(Box::new(metrics.token_validation_total));
@@ -159,11 +167,18 @@ mod tests {
 
     #[tokio::test]
     async fn test_multiple_initialization_fails() {
-        let registry = Registry::new();
-        let _ = init_metrics_with_registry(&registry);
+        // Since METRICS is a global OnceLock, these tests may interact if run in parallel.
+        // Rust tests run in parallel by default, but individual tests here attempt to
+        // register with different registries. However, METRICS.set() will still fail
+        // if any other test already initialized it.
+        let registry1 = Registry::new();
+        let _ = init_metrics_with_registry(&registry1);
         
-        // Second initialization must fail
-        let res2 = init_metrics_with_registry(&registry);
+        // Second initialization must fail even with a fresh Registry.
+        // This ensures we are testing the OnceLock (METRICS.set()) failure path,
+        // not a duplicate registration error within the same Registry.
+        let registry2 = Registry::new();
+        let res2 = init_metrics_with_registry(&registry2);
         assert!(res2.is_err());
         if let Err(prometheus::Error::Msg(msg)) = res2 {
             assert_eq!(msg, "Metrics already initialized");
