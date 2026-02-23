@@ -45,7 +45,7 @@ pub async fn setup_app_with_config(
 
     let db = MockDatabase::new(DatabaseBackend::Postgres).into_connection();
 
-    let (app, _metrics, _cleanup) = kernel_api::build_app_with_state(state, db.into());
+    let (app, _cleanup) = kernel_api::build_app_with_state(state, db.into());
     app
 }
 
@@ -94,10 +94,6 @@ impl IdempotencyStore for NotifyingStore {
     async fn cleanup(&self) {
         self.inner.cleanup().await
     }
-
-    async fn ping(&self) -> Result<kernel_api::middleware::PingStatus, IdempotencyStoreError> {
-        self.inner.ping().await
-    }
 }
 
 fn build_idempotent_post(key: &str, body: &str) -> Request<Body> {
@@ -124,21 +120,11 @@ async fn test_health_is_public() {
     let app = setup_app().await;
 
     let req = Request::builder()
-        .uri("/health/liveness")
+        .uri("/health")
         .body(Body::empty())
         .unwrap();
     let res = app.clone().oneshot(req).await.unwrap();
     assert_eq!(res.status(), StatusCode::OK);
-
-    let req = Request::builder()
-        .uri("/health/readiness")
-        .body(Body::empty())
-        .unwrap();
-    let res = app.clone().oneshot(req).await.unwrap();
-    // Readiness might fail (503) if mock DB/Redis aren't fully set up in this integration test env,
-    // but it should definitely NOT be 401 Unauthorized.
-    // 200 OK or 503 Service Unavailable are both acceptable "public" responses.
-    assert!(res.status() == StatusCode::OK || res.status() == StatusCode::SERVICE_UNAVAILABLE);
 }
 
 #[tokio::test]

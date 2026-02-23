@@ -96,7 +96,6 @@ where
             "Token timestamp expired or future (skew > 30s)",
             "Missing or empty tenant token",
             "Invalid token format",
-            crate::error::INVALID_OR_EXPIRED_KEY_ID,
         ]
         .iter()
         .find(|&&m| error_msg.contains(m))

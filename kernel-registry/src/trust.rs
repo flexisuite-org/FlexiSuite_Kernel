@@ -1,8 +1,8 @@
 use crate::error::RegistryError;
-use kernel_core::supplychain::{KeyStatus, TrustedKey};
+use kernel_core::supplychain::{TrustedKey, KeyStatus};
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 use tracing::{error, info, warn};
 
@@ -29,6 +29,7 @@ pub trait TrustProvider: Send + Sync {
 }
 
 pub struct FileTrustProvider {
+    path: PathBuf,
     trust_root: Arc<TrustRoot>,
 }
 
@@ -45,43 +46,19 @@ impl FileTrustProvider {
             RegistryError::TrustRootError(format!("Failed to parse trust root: {}", e))
         })?;
 
-        validate_trust_algorithms(&path, &root)?;
-
         Ok(Self {
+            path,
             trust_root: Arc::new(root),
         })
     }
 }
 
-fn validate_trust_algorithms(path: &Path, root: &TrustRoot) -> Result<(), RegistryError> {
-    const ALLOWED_ALGS: &[&str] = &["Ed25519", "RS256", "ES256"];
-    for key in &root.keys {
-        if !ALLOWED_ALGS.contains(&key.alg.as_str()) {
-            let msg = format!(
-                "FileTrustProvider::new rejected TrustRootKey.alg='{}' for kid='{}' in {:?}; allowed: {}",
-                key.alg,
-                key.kid,
-                path,
-                ALLOWED_ALGS.join(", ")
-            );
-            error!("{}", msg);
-            return Err(RegistryError::TrustRootError(msg));
-        }
-    }
-    Ok(())
-}
-
 impl TrustProvider for FileTrustProvider {
     fn get_key(&self, kid: &str) -> Result<TrustedKey, RegistryError> {
-        let key = self
-            .trust_root
-            .keys
-            .iter()
-            .find(|k| k.kid == kid)
-            .ok_or_else(|| {
-                warn!("Key not found in trust root: {}", kid);
-                RegistryError::TrustRootError(format!("Key not found: {}", kid))
-            })?;
+        let key = self.trust_root.keys.iter().find(|k| k.kid == kid).ok_or_else(|| {
+            warn!("Key not found in trust root: {}", kid);
+            RegistryError::TrustRootError(format!("Key not found: {}", kid))
+        })?;
 
         let status = match key.status.as_str() {
             "active" => KeyStatus::Active,
@@ -90,10 +67,7 @@ impl TrustProvider for FileTrustProvider {
             "revoked" => KeyStatus::Revoked,
             _ => {
                 warn!("Unknown key status: {}", key.status);
-                return Err(RegistryError::TrustRootError(format!(
-                    "Unknown key status: {}",
-                    key.status
-                )));
+                return Err(RegistryError::TrustRootError(format!("Unknown key status: {}", key.status)));
             }
         };
 
@@ -132,10 +106,9 @@ pub mod tests {
 
     impl TrustProvider for MockTrustProvider {
         fn get_key(&self, kid: &str) -> Result<TrustedKey, RegistryError> {
-            self.keys
-                .get(kid)
-                .cloned()
-                .ok_or_else(|| RegistryError::TrustRootError(format!("Key not found: {}", kid)))
+            self.keys.get(kid).cloned().ok_or_else(|| {
+                RegistryError::TrustRootError(format!("Key not found: {}", kid))
+            })
         }
     }
 }

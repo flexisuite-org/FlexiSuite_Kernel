@@ -25,10 +25,4 @@ pub enum RegistryError {
 
     #[error("Trust root error: {0}")]
     TrustRootError(String),
-
-    #[error("Signature verification failed: {0}")]
-    SignatureVerificationFailed(String),
-
-    #[error("Trust root key not found: {0}")]
-    KeyNotFound(String),
 }

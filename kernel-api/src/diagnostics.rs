@@ -223,16 +223,14 @@ async fn query_diagnostic(
     }
 }
 
-/// Health probe entry-point. For availability decisions, use /health/liveness or /health/readiness.
+/// Stub health check endpoint. Does not perform real service checks.
 async fn get_health() -> impl IntoResponse {
     (
-        StatusCode::OK,
+        StatusCode::NOT_IMPLEMENTED,
         Json(serde_json::json!({
-            "status": "up",
-            "probes": {
-                "liveness": "/health/liveness",
-                "readiness": "/health/readiness"
-            }
+            "status": "not_implemented",
+            "message": "Health dependency checks are not implemented yet. Implement real probes before using this endpoint for availability decisions.",
+            "stub": true
         })),
     )
         .into_response()

@@ -1,192 +1,28 @@
 use crate::error::RegistryError;
 use crate::model::{Dependencies, DistManifest, Kind, Route};
-use base64::Engine;
-use base64::prelude::BASE64_URL_SAFE_NO_PAD;
+use crate::trust::{FileTrustProvider, TrustProvider};
 use bytes::Bytes;
-use ed25519_dalek::{Signature, VerifyingKey};
 use kernel_core::auth::TenantContext;
+use kernel_core::supplychain::{verify_manifest, Manifest, VerificationResult};
 use object_store::ObjectStore;
 use object_store::path::Path;
 use serde::Serialize;
 use sha2::{Digest, Sha384};
-use std::collections::{BTreeMap, HashMap, HashSet};
-use std::sync::{Arc, LazyLock, RwLock};
+use std::collections::BTreeMap;
+use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::{error, info, instrument, warn};
-
-// Cached Trust Roots
-static TRUST_ROOTS: LazyLock<RwLock<HashMap<String, VerifyingKey>>> = LazyLock::new(|| {
-    let map = load_trust_roots_from_env();
-    RwLock::new(map)
-});
-
-fn load_trust_roots_from_env() -> HashMap<String, VerifyingKey> {
-    let mut map = HashMap::new();
-    let mut source_suffixes = HashMap::<String, String>::new();
-    let mut collisions = HashSet::<String>::new();
-
-    for (key, val) in std::env::vars_os() {
-        let key = match key.into_string() {
-            Ok(v) => v,
-            Err(_) => {
-                warn!("Skipping non-UTF-8 environment variable name while loading trust roots");
-                continue;
-            }
-        };
-        if let Some(kid_suffix) = key.strip_prefix("FLEXI_REGISTRY_TRUST_ROOT_KEY_B64URL_") {
-            if kid_suffix.is_empty() {
-                continue;
-            }
-            let val = match val.into_string() {
-                Ok(v) => v,
-                Err(_) => {
-                    warn!(
-                        "Ignoring trust root env var {} because value is not valid UTF-8",
-                        key
-                    );
-                    continue;
-                }
-            };
-            // Normalize checks: The suffix MUST be alphanumeric + underscore only.
-            // We reuse normalize_kid logic or just check it directly.
-            // Since this comes from environment keys (often shell constrained), uppercase is expected.
-            // We validate to prevent garbage keys.
-            if !kid_suffix
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
-            {
-                warn!("Ignoring invalid trust root env key suffix: {}", kid_suffix);
-                continue;
-            }
-
-            let normalized_kid = normalize_kid(kid_suffix);
-            if collisions.contains(&normalized_kid) {
-                warn!(
-                    kid_suffix = %kid_suffix,
-                    normalized_kid = %normalized_kid,
-                    "Ignoring trust root key because this normalized KID is in collision state"
-                );
-                continue;
-            }
-            if let Some(existing_suffix) = source_suffixes.get(&normalized_kid) {
-                if existing_suffix != kid_suffix {
-                    warn!(
-                        existing_suffix = %existing_suffix,
-                        conflicting_suffix = %kid_suffix,
-                        normalized_kid = %normalized_kid,
-                        "Rejecting normalized KID collision in trust root env vars"
-                    );
-                    map.remove(&normalized_kid);
-                    source_suffixes.remove(&normalized_kid);
-                    collisions.insert(normalized_kid);
-                    continue;
-                }
-            }
-
-            match BASE64_URL_SAFE_NO_PAD.decode(&val) {
-                Ok(bytes) => {
-                    if bytes.len() != 32 {
-                        warn!(
-                            "Invalid Ed25519 public key length for env var {}: expected 32, got {}",
-                            key,
-                            bytes.len()
-                        );
-                        continue;
-                    }
-                    if let Ok(vk) = VerifyingKey::from_bytes(
-                        bytes.as_slice().try_into().expect("Checked length is 32"),
-                    ) {
-                        source_suffixes.insert(normalized_kid.clone(), kid_suffix.to_string());
-                        map.insert(normalized_kid, vk);
-                    } else {
-                        warn!("Invalid Ed25519 public key format for env var {}", key);
-                    }
-                }
-                Err(_) => {
-                    warn!("Invalid Base64URL encoding for env var {}", key);
-                }
-            }
-        }
-    }
-    if !collisions.is_empty() {
-        warn!(
-            collisions = ?collisions,
-            "Detected trust root key normalization collisions; affected KIDs were rejected"
-        );
-    }
-    info!("Loaded {} trust root keys from environment", map.len());
-    map
-}
-
-/// Explicitly reloads trust root keys from environment variables.
-/// Call this after updating environment variables (e.g., in tests or during config refresh).
-pub fn reload_trust_root_keys() {
-    let new_map = load_trust_roots_from_env();
-    let mut write_guard = TRUST_ROOTS.write().expect("Trust root lock poisoned");
-
-    // Calculate diff for logging
-    let old_keys: Vec<_> = write_guard.keys().cloned().collect();
-    let new_keys: Vec<_> = new_map.keys().cloned().collect();
-
-    let added: Vec<_> = new_keys
-        .iter()
-        .filter(|k| !write_guard.contains_key(*k))
-        .collect();
-    let removed: Vec<_> = old_keys
-        .iter()
-        .filter(|k| !new_map.contains_key(*k))
-        .collect();
-
-    // Detect rotated keys (same KID, different value)
-    let rotated: Vec<_> = new_keys
-        .iter()
-        .filter(|k| {
-            if let (Some(old_val), Some(new_val)) = (write_guard.get(*k), new_map.get(*k)) {
-                // VerifyingKey implements PartialEq
-                old_val != new_val
-            } else {
-                false
-            }
-        })
-        .collect();
-
-    if !added.is_empty() || !removed.is_empty() || !rotated.is_empty() {
-        info!(
-            "Reloading trust roots. Added: {:?}, Removed: {:?}, Rotated: {:?}",
-            added, removed, rotated
-        );
-    } else {
-        info!("Reloading trust roots. No changes detected.");
-    }
-
-    *write_guard = new_map;
-}
-
-pub fn normalize_kid(kid: &str) -> String {
-    // Alphanumeric -> Uppercase
-    // Hyphen -> Hyphen (preserved)
-    // Others -> Underscore
-    // This matches the ENV var pattern FLEXI_REGISTRY_TRUST_ROOT_KEY_B64URL_{NORMALIZED}
-    kid.chars()
-        .map(|ch| {
-            if ch.is_ascii_alphanumeric() {
-                ch.to_ascii_uppercase()
-            } else if ch == '-' {
-                '-'
-            } else {
-                '_'
-            }
-        })
-        .collect::<String>()
-}
 
 pub struct RegistryStorage {
     store: Arc<dyn ObjectStore>,
     prefix: String,
     tenant_id: String,
+    trust_provider: Arc<dyn TrustProvider>,
 }
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
+/// Digest payload for `manifest_payload_digest`.
 struct ManifestDigestPayload<'a> {
     schema_version: &'a str,
     id: &'a str,
@@ -201,12 +37,40 @@ struct ManifestDigestPayload<'a> {
 }
 
 impl RegistryStorage {
-    pub fn new(store: Arc<dyn ObjectStore>, tenant_ctx: &TenantContext) -> Self {
-        Self {
+    pub fn new(store: Arc<dyn ObjectStore>, tenant_ctx: &TenantContext) -> Result<Self, RegistryError> {
+        // Allow override via env var for production config injection
+        let trust_path_str = std::env::var("MANIFEST_TRUST_ROOT_PATH")
+            .unwrap_or_else(|_| "ops/trust/manifest_trust_root.json".to_string());
+
+        let mut trust_path = std::path::PathBuf::from(&trust_path_str);
+
+        // Fallback logic for local development/testing from crate root
+        if !trust_path.exists() {
+             let cwd = std::env::current_dir().unwrap_or_default();
+             if cwd.ends_with("kernel-registry") && trust_path_str == "ops/trust/manifest_trust_root.json" {
+                 let fallback = std::path::PathBuf::from("../ops/trust/manifest_trust_root.json");
+                 if fallback.exists() {
+                     info!("Running inside kernel-registry, using fallback {:?}", fallback);
+                     trust_path = fallback;
+                 }
+             }
+        }
+
+        let trust_provider = FileTrustProvider::new(trust_path.clone())
+            .map_err(|e| RegistryError::TrustRootError(format!("Failed to load trust root from {:?}: {}", trust_path, e)))?;
+
+        Ok(Self {
             store,
             prefix: format!("tenants/{}/", tenant_ctx.tenant_id().as_str()),
             tenant_id: tenant_ctx.tenant_id().to_string(),
-        }
+            trust_provider: Arc::new(trust_provider),
+        })
+    }
+
+    /// Builder-style method to override trust provider (for testing)
+    pub fn with_trust_provider(mut self, provider: Arc<dyn TrustProvider>) -> Self {
+        self.trust_provider = provider;
+        self
     }
 
     fn validate_key(key: &str) -> Result<(), RegistryError> {
@@ -250,14 +114,14 @@ impl RegistryStorage {
         Path::from(format!("{}artifacts/{}", self.prefix, key))
     }
 
-    pub fn manifest_path(&self, id: &str, version: &str) -> Path {
+    fn manifest_path(&self, id: &str, version: &str) -> Path {
         Path::from(format!(
             "{}manifests/{}/{}/manifest.json",
             self.prefix, id, version
         ))
     }
 
-    pub fn manifest_payload_digest(manifest: &DistManifest) -> Result<String, RegistryError> {
+    fn manifest_payload_digest(manifest: &DistManifest) -> Result<String, RegistryError> {
         let payload = ManifestDigestPayload {
             schema_version: &manifest.schema_version,
             id: &manifest.id,
@@ -277,6 +141,7 @@ impl RegistryStorage {
 
         let mut hasher = Sha384::new();
         hasher.update(payload_bytes);
+        // Backwards compatibility: return raw hex, no prefix
         Ok(hex::encode(hasher.finalize()))
     }
 
@@ -318,71 +183,6 @@ impl RegistryStorage {
         }
     }
 
-    fn verify_signature(kid: &str, digest: &str, signature: &str) -> Result<(), RegistryError> {
-        // 1. Validate KID Format
-        // Strict allowlist: Alphanumeric, hyphen, underscore only.
-        // Replaced Regex with manual check for reduced dependency.
-        if !kid
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
-        {
-            warn!(kid = %kid, "Invalid KID format rejected");
-            return Err(RegistryError::KeyNotFound(format!(
-                "Invalid KID format: {}",
-                kid
-            )));
-        }
-
-        // 2. Normalize KID for Lookup
-        let normalized_kid = normalize_kid(kid);
-
-        // 3. Lookup Public Key from Cache
-        // Extract the key OUT of the lock scope to avoid holding lock during crypto
-        let public_key = {
-            let trust_roots = TRUST_ROOTS.read().expect("Trust root lock poisoned");
-            trust_roots.get(&normalized_kid).cloned()
-        };
-
-        let public_key = public_key.ok_or_else(|| {
-            warn!(kid = %kid, normalized = %normalized_kid, "Trust root key not found");
-            RegistryError::KeyNotFound(format!("Public key for kid '{kid}' not found"))
-        })?;
-
-        // 4. Decode Signature
-        let signature_bytes = BASE64_URL_SAFE_NO_PAD.decode(signature).map_err(|e| {
-            warn!(kid = %kid, "Invalid base64 signature");
-            RegistryError::SignatureVerificationFailed(format!("Invalid signature encoding: {e}"))
-        })?;
-        let signature_obj = Signature::from_slice(&signature_bytes).map_err(|e| {
-            warn!(kid = %kid, "Invalid signature length");
-            RegistryError::SignatureVerificationFailed(format!("Invalid signature format: {e}"))
-        })?;
-
-        // 5. Verify (Ed25519)
-        // Verify raw SHA-384 digest bytes (48 bytes), NOT the hex string bytes.
-        let digest_bytes = hex::decode(digest).map_err(|e| {
-            warn!(kid = %kid, "Invalid digest hex encoding");
-            RegistryError::InvalidManifest(format!("Invalid digest hex: {e}"))
-        })?;
-
-        if digest_bytes.len() != 48 {
-            warn!(kid = %kid, digest = %digest, len = digest_bytes.len(), "Invalid digest length");
-            return Err(RegistryError::InvalidManifest(format!(
-                "Invalid digest length: expected 48, got {}",
-                digest_bytes.len()
-            )));
-        }
-
-        // Use verify_strict to reject weak keys
-        public_key
-            .verify_strict(&digest_bytes, &signature_obj)
-            .map_err(|_| {
-                warn!(kid = %kid, digest = %digest, "Signature verification failed");
-                RegistryError::SignatureVerificationFailed("Invalid signature".to_string())
-            })
-    }
-
-    /// Saves binary data and returns the SHA-384 digest (hex string).
     #[instrument(skip(self, data), fields(tenant = %self.tenant_id, artifact = %key))]
     pub async fn save_artifact(&self, key: &str, data: Bytes) -> Result<String, RegistryError> {
         Self::validate_key(key)?;
@@ -400,7 +200,6 @@ impl RegistryStorage {
         Ok(digest)
     }
 
-    /// Retrieves binary data. If expected_digest is provided, verifies SHA-384.
     #[instrument(skip(self), fields(tenant = %self.tenant_id, artifact = %key))]
     pub async fn get_artifact(
         &self,
@@ -439,8 +238,6 @@ impl RegistryStorage {
         Ok(data)
     }
 
-    /// Saves a DistManifest to `manifests/{id}/{version}/manifest.json`.
-    /// Returns the SHA-384 digest and persisted manifest with manifest_digest set.
     #[instrument(skip(self, manifest), fields(tenant = %self.tenant_id, manifest.id = %manifest.id, manifest.version = %manifest.version))]
     pub async fn save_manifest(
         &self,
@@ -471,14 +268,46 @@ impl RegistryStorage {
         // security section excluded from the hashed payload.
         let computed_digest = Self::manifest_payload_digest(manifest)?;
 
-        // Verify signature BEFORE accepting/persisting
-        Self::verify_signature(
-            &manifest.security.manifest_signature_kid,
-            &computed_digest,
-            &manifest.security.manifest_signature,
-        )?;
+        // Validate Security
+        let trusted_key = self
+            .trust_provider
+            .get_key(&manifest.security.manifest_signature_kid)?;
+
+        // Prepend prefix ONLY for verification logic to match kernel-core requirement
+        let digest_for_verification = format!("sha384-{}", computed_digest);
+
+        let core_manifest = Manifest {
+            id: manifest.id.clone(),
+            digest: digest_for_verification.clone(),
+            signature: manifest.security.manifest_signature.clone(),
+            kid: manifest.security.manifest_signature_kid.clone(),
+        };
+
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+
+        match verify_manifest(
+            &core_manifest,
+            &trusted_key,
+            &digest_for_verification, // Should match manifest_digest but we check computed one
+            now,
+        ) {
+            VerificationResult::Ok => {
+                info!("Manifest signature verified successfully");
+            }
+            err => {
+                error!(event = "MANIFEST_SIGNATURE_INVALID", reason = ?err, kid = %trusted_key.kid, "Signature verification failed");
+                return Err(RegistryError::InvalidManifest(format!(
+                    "Signature verification failed: {:?}",
+                    err
+                )));
+            }
+        }
 
         let mut persisted = manifest.clone();
+        // Persist the raw hex digest as per contract (or current state)
         persisted.security.manifest_digest = computed_digest.clone();
 
         let path = self.manifest_path(&manifest.id, &manifest.version);
@@ -493,7 +322,6 @@ impl RegistryStorage {
         Ok((computed_digest, persisted))
     }
 
-    /// Retrieves a DistManifest from `manifests/{id}/{version}/manifest.json`.
     #[instrument(skip(self), fields(tenant = %self.tenant_id, manifest.id = %id, manifest.version = %version))]
     pub async fn get_manifest(
         &self,
@@ -521,14 +349,6 @@ impl RegistryStorage {
             warn!(expected = %expected, actual = %actual, "Manifest integrity check failed");
             return Err(RegistryError::IntegrityCheckFailed { expected, actual });
         }
-
-        // Verify signature
-        Self::verify_signature(
-            &manifest.security.manifest_signature_kid,
-            &actual,
-            &manifest.security.manifest_signature,
-        )?;
-
         info!(digest = %actual, "Manifest retrieved successfully");
         Ok(manifest)
     }

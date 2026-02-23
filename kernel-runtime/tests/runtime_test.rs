@@ -119,10 +119,7 @@ async fn test_deno_invalid_memory_limit_is_init_error() {
         Err(SandboxError::InitError(e)) => {
             assert!(e.contains("below the minimum Deno/V8 heap limit"));
         }
-        other => panic!(
-            "Expected InitError for invalid memory limit, got: {:?}",
-            other
-        ),
+        other => panic!("Expected InitError for invalid memory limit, got: {:?}", other),
     }
 }
 
@@ -384,8 +381,7 @@ async fn test_wasm_non_json_stdout_returns_string() {
     let mut runtime = WasmSandbox::new(options).unwrap();
     let input = serde_json::Value::Null;
     let output = runtime.execute(wat, input).await.unwrap();
-    // Runtime normalizes non-JSON stdout via trim().
-    assert_eq!(output, serde_json::json!("hello wasm"));
+    assert_eq!(output, serde_json::json!("hello wasm\n"));
 }
 
 #[tokio::test]

@@ -57,66 +57,32 @@ mod tests {
             retry_after_s: 0,
         };
         let h_zero = v_zero.headers();
-        let retry_after_zero = h_zero.iter().find(|(k, _)| k == "Retry-After");
-        assert_eq!(
-            retry_after_zero
-                .expect("Retry-After header must be present")
-                .1,
-            "0"
-        );
+        assert_eq!(h_zero[0].1, "0");
 
         // Case 2: Large value (Generic layer) -> Cap at 1 year
         let v_large = QuotaViolation {
             layer: QuotaLayer::ApiRateLimit,
             retry_after_s: 999_999_999,
         };
-        let h_large = v_large.headers();
-        let retry_after_large = h_large.iter().find(|(k, _)| k == "Retry-After");
-        assert_eq!(
-            retry_after_large
-                .expect("Retry-After header must be present")
-                .1,
-            "31536000"
-        );
+        assert_eq!(v_large.headers()[0].1, "31536000");
 
         // Case 3: SystemHardLimit boundary -> 1-30s clip
         let v_sys_low = QuotaViolation {
             layer: QuotaLayer::SystemHardLimit,
             retry_after_s: 0,
         };
-        let h_sys_low = v_sys_low.headers();
-        let retry_after_sys_low = h_sys_low.iter().find(|(k, _)| k == "Retry-After");
-        assert_eq!(
-            retry_after_sys_low
-                .expect("Retry-After header must be present")
-                .1,
-            "1"
-        );
+        assert_eq!(v_sys_low.headers()[0].1, "1");
 
         let v_sys_high = QuotaViolation {
             layer: QuotaLayer::SystemHardLimit,
             retry_after_s: 100,
         };
-        let h_sys_high = v_sys_high.headers();
-        let retry_after_sys_high = h_sys_high.iter().find(|(k, _)| k == "Retry-After");
-        assert_eq!(
-            retry_after_sys_high
-                .expect("Retry-After header must be present")
-                .1,
-            "30"
-        );
+        assert_eq!(v_sys_high.headers()[0].1, "30");
 
         let v_sys_ok = QuotaViolation {
             layer: QuotaLayer::SystemHardLimit,
             retry_after_s: 15,
         };
-        let h_sys_ok = v_sys_ok.headers();
-        let retry_after_sys_ok = h_sys_ok.iter().find(|(k, _)| k == "Retry-After");
-        assert_eq!(
-            retry_after_sys_ok
-                .expect("Retry-After header must be present")
-                .1,
-            "15"
-        );
+        assert_eq!(v_sys_ok.headers()[0].1, "15");
     }
 }
