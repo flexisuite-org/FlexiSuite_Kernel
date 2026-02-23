@@ -3,7 +3,7 @@ use crate::model::{Dependencies, DistManifest, Kind, Route};
 use crate::trust::{FileTrustProvider, TrustProvider};
 use bytes::Bytes;
 use kernel_core::auth::TenantContext;
-use kernel_core::supplychain::{verify_manifest, Manifest, VerificationResult};
+use kernel_core::supplychain::{Manifest, VerificationResult, verify_manifest};
 use object_store::ObjectStore;
 use object_store::path::Path;
 use serde::Serialize;
@@ -37,7 +37,10 @@ struct ManifestDigestPayload<'a> {
 }
 
 impl RegistryStorage {
-    pub fn new(store: Arc<dyn ObjectStore>, tenant_ctx: &TenantContext) -> Result<Self, RegistryError> {
+    pub fn new(
+        store: Arc<dyn ObjectStore>,
+        tenant_ctx: &TenantContext,
+    ) -> Result<Self, RegistryError> {
         // Allow override via env var for production config injection
         let trust_path_str = std::env::var("MANIFEST_TRUST_ROOT_PATH")
             .unwrap_or_else(|_| "ops/trust/manifest_trust_root.json".to_string());
@@ -46,18 +49,27 @@ impl RegistryStorage {
 
         // Fallback logic for local development/testing from crate root
         if !trust_path.exists() {
-             let cwd = std::env::current_dir().unwrap_or_default();
-             if cwd.ends_with("kernel-registry") && trust_path_str == "ops/trust/manifest_trust_root.json" {
-                 let fallback = std::path::PathBuf::from("../ops/trust/manifest_trust_root.json");
-                 if fallback.exists() {
-                     info!("Running inside kernel-registry, using fallback {:?}", fallback);
-                     trust_path = fallback;
-                 }
-             }
+            let cwd = std::env::current_dir().unwrap_or_default();
+            if cwd.ends_with("kernel-registry")
+                && trust_path_str == "ops/trust/manifest_trust_root.json"
+            {
+                let fallback = std::path::PathBuf::from("../ops/trust/manifest_trust_root.json");
+                if fallback.exists() {
+                    info!(
+                        "Running inside kernel-registry, using fallback {:?}",
+                        fallback
+                    );
+                    trust_path = fallback;
+                }
+            }
         }
 
-        let trust_provider = FileTrustProvider::new(trust_path.clone())
-            .map_err(|e| RegistryError::TrustRootError(format!("Failed to load trust root from {:?}: {}", trust_path, e)))?;
+        let trust_provider = FileTrustProvider::new(trust_path.clone()).map_err(|e| {
+            RegistryError::TrustRootError(format!(
+                "Failed to load trust root from {:?}: {}",
+                trust_path, e
+            ))
+        })?;
 
         Ok(Self {
             store,
@@ -289,6 +301,7 @@ impl RegistryStorage {
             .as_secs();
 
         match verify_manifest(
+            &self.tenant_id,
             &core_manifest,
             &trusted_key,
             &digest_for_verification, // Should match manifest_digest but we check computed one

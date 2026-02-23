@@ -1,4 +1,5 @@
 // ... imports ...
+use ed25519_dalek::{Signer, SigningKey, VerifyingKey};
 use kernel_core::auth::{TenantContext, TenantId};
 use kernel_core::supplychain::{KeyStatus, TrustedKey};
 use kernel_registry::error::RegistryError;
@@ -8,12 +9,11 @@ use kernel_registry::trust::TrustProvider;
 use object_store::ObjectStore;
 use object_store::memory::InMemory;
 use object_store::path::Path;
-use std::collections::BTreeMap;
-use std::sync::Arc;
-use ed25519_dalek::{SigningKey, Signer, VerifyingKey};
 use rand::rngs::OsRng;
-use std::collections::HashMap;
 use sha2::Digest;
+use std::collections::BTreeMap;
+use std::collections::HashMap;
+use std::sync::Arc;
 
 struct MockTrustProvider {
     keys: HashMap<String, TrustedKey>,
@@ -21,7 +21,9 @@ struct MockTrustProvider {
 
 impl MockTrustProvider {
     fn new() -> Self {
-        Self { keys: HashMap::new() }
+        Self {
+            keys: HashMap::new(),
+        }
     }
     fn add(&mut self, key: TrustedKey) {
         self.keys.insert(key.kid.clone(), key);
@@ -30,9 +32,10 @@ impl MockTrustProvider {
 
 impl TrustProvider for MockTrustProvider {
     fn get_key(&self, kid: &str) -> Result<TrustedKey, RegistryError> {
-        self.keys.get(kid).cloned().ok_or_else(|| {
-            RegistryError::TrustRootError(format!("Key not found: {}", kid))
-        })
+        self.keys
+            .get(kid)
+            .cloned()
+            .ok_or_else(|| RegistryError::TrustRootError(format!("Key not found: {}", kid)))
     }
 }
 
@@ -216,10 +219,16 @@ async fn test_save_and_get_manifest() {
     let (saved_digest, persisted) = registry.save_manifest(&manifest).await.unwrap();
     // Saved digest should be raw hex (no prefix)
     assert_eq!(saved_digest, compute_digest(&manifest));
-    assert_eq!(persisted.security.manifest_digest, compute_digest(&manifest));
+    assert_eq!(
+        persisted.security.manifest_digest,
+        compute_digest(&manifest)
+    );
 
     let retrieved = registry.get_manifest("app_test", "1.0.0").await.unwrap();
-    assert_eq!(retrieved.security.manifest_digest, compute_digest(&manifest));
+    assert_eq!(
+        retrieved.security.manifest_digest,
+        compute_digest(&manifest)
+    );
 }
 
 #[tokio::test]
@@ -234,7 +243,8 @@ async fn test_manifest_digest_excludes_security_section() {
     manifest_a.name = "Security Digest Test".to_string();
     manifest_a.security.manifest_signature_kid = kid_a;
     let digest_a_prefixed = compute_digest_prefixed(&manifest_a);
-    manifest_a.security.manifest_signature = hex::encode(key_a.sign(digest_a_prefixed.as_bytes()).to_bytes());
+    manifest_a.security.manifest_signature =
+        hex::encode(key_a.sign(digest_a_prefixed.as_bytes()).to_bytes());
 
     let mut manifest_b = manifest_a.clone();
     // Intentionally keep `manifest_b` with the same id/version/payload as `manifest_a`.
@@ -244,7 +254,8 @@ async fn test_manifest_digest_excludes_security_section() {
     // Digest should be same as A
     assert_eq!(digest_a_prefixed, digest_b_prefixed);
 
-    manifest_b.security.manifest_signature = hex::encode(key_b.sign(digest_b_prefixed.as_bytes()).to_bytes());
+    manifest_b.security.manifest_signature =
+        hex::encode(key_b.sign(digest_b_prefixed.as_bytes()).to_bytes());
 
     let (digest_a, _) = registry_a.save_manifest(&manifest_a).await.unwrap();
     let (digest_b, _) = registry_b.save_manifest(&manifest_b).await.unwrap();
@@ -320,7 +331,8 @@ async fn test_get_manifest_detects_tampered_stored_json() {
     manifest.name = "Tamper Test".to_string();
     manifest.security.manifest_signature_kid = kid;
     let digest_prefixed = compute_digest_prefixed(&manifest);
-    manifest.security.manifest_signature = hex::encode(key.sign(digest_prefixed.as_bytes()).to_bytes());
+    manifest.security.manifest_signature =
+        hex::encode(key.sign(digest_prefixed.as_bytes()).to_bytes());
 
     let (_, persisted) = registry.save_manifest(&manifest).await.unwrap();
 
@@ -381,7 +393,8 @@ async fn test_manifest_digest_numeric_normalization() {
         .insert("count".to_string(), serde_json::json!(1));
     manifest_int.security.manifest_signature_kid = kid_a;
     let digest_int_prefixed = compute_digest_prefixed(&manifest_int);
-    manifest_int.security.manifest_signature = hex::encode(key_a.sign(digest_int_prefixed.as_bytes()).to_bytes());
+    manifest_int.security.manifest_signature =
+        hex::encode(key_a.sign(digest_int_prefixed.as_bytes()).to_bytes());
 
     let mut manifest_float = test_manifest("app_numeric", "1.0.0");
     manifest_float
@@ -389,7 +402,8 @@ async fn test_manifest_digest_numeric_normalization() {
         .insert("count".to_string(), serde_json::json!(1.0));
     manifest_float.security.manifest_signature_kid = kid_b;
     let digest_float_prefixed = compute_digest_prefixed(&manifest_float);
-    manifest_float.security.manifest_signature = hex::encode(key_b.sign(digest_float_prefixed.as_bytes()).to_bytes());
+    manifest_float.security.manifest_signature =
+        hex::encode(key_b.sign(digest_float_prefixed.as_bytes()).to_bytes());
 
     let (digest_int_saved, _) = registry_a.save_manifest(&manifest_int).await.unwrap();
     let (digest_float_saved, _) = registry_b.save_manifest(&manifest_float).await.unwrap();
@@ -415,7 +429,8 @@ async fn test_manifest_digest_big_int_normalization() {
         .insert("big_u64".to_string(), serde_json::json!(u64::MAX));
     manifest_big.security.manifest_signature_kid = kid_a;
     let digest_prefixed = compute_digest_prefixed(&manifest_big);
-    manifest_big.security.manifest_signature = hex::encode(key_a.sign(digest_prefixed.as_bytes()).to_bytes());
+    manifest_big.security.manifest_signature =
+        hex::encode(key_a.sign(digest_prefixed.as_bytes()).to_bytes());
 
     let (saved_digest, _) = registry_a.save_manifest(&manifest_big).await.unwrap();
     // SHA-384 hex is 96 chars
@@ -514,7 +529,7 @@ async fn test_save_manifest_rejects_whitespace_security_fields() {
 
 #[tokio::test]
 async fn test_save_manifest_verifies_signature() {
-     let store = Arc::new(InMemory::new());
+    let store = Arc::new(InMemory::new());
     let (registry, signing_key, kid) = setup_registry_with_keys(store);
 
     let mut manifest = test_manifest("app_sig_test", "1.0.0");
@@ -524,7 +539,10 @@ async fn test_save_manifest_verifies_signature() {
     // 1. Valid Signature
     let signature = hex::encode(signing_key.sign(digest_prefixed.as_bytes()).to_bytes());
     manifest.security.manifest_signature = signature;
-    registry.save_manifest(&manifest).await.expect("Valid signature should pass");
+    registry
+        .save_manifest(&manifest)
+        .await
+        .expect("Valid signature should pass");
 
     // 2. Invalid Signature (Tampered Payload)
     let mut manifest_bad = manifest.clone();
@@ -533,7 +551,11 @@ async fn test_save_manifest_verifies_signature() {
     let result = registry.save_manifest(&manifest_bad).await;
     match result {
         Err(RegistryError::InvalidManifest(msg)) => {
-            assert!(msg.contains("Signature verification failed"), "Got: {}", msg);
+            assert!(
+                msg.contains("Signature verification failed"),
+                "Got: {}",
+                msg
+            );
         }
         other => panic!("Expected InvalidManifest, got {:?}", other),
     }
