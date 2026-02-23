@@ -1606,14 +1606,9 @@ pub async fn idempotency_middleware(req: Request<Body>, next: Next) -> Result<Re
         }
     };
 
-    let tenant_ctx = parts
-        .extensions
-        .get::<TenantContext>()
-        .ok_or(build_json_error_response(
-            "Unauthorized",
-            StatusCode::UNAUTHORIZED,
-            request_id.clone(),
-        ))?;
+    let tenant_ctx = parts.extensions.get::<TenantContext>().ok_or_else(|| {
+        build_json_error_response("Unauthorized", StatusCode::UNAUTHORIZED, request_id.clone())
+    })?;
 
     tracing::Span::current().record("tenant_id", &tenant_ctx.tenant_id().to_string());
     tracing::Span::current().record("method", method.as_str());
@@ -1635,16 +1630,17 @@ pub async fn idempotency_middleware(req: Request<Body>, next: Next) -> Result<Re
     // Note: This forces buffering. For streams > 10MB, Idempotency is not supported by this middleware.
 
     // Check Store
-    let state =
-        parts
-            .extensions
-            .get::<MiddlewareState>()
-            .cloned()
-            .ok_or(build_json_error_response(
+    let state = parts
+        .extensions
+        .get::<MiddlewareState>()
+        .cloned()
+        .ok_or_else(|| {
+            build_json_error_response(
                 "Internal Server Error",
                 StatusCode::INTERNAL_SERVER_ERROR,
                 request_id.clone(),
-            ))?;
+            )
+        })?;
 
     let body_bytes = match to_bytes(body, state.config.max_body_size).await {
         Ok(b) => b,
@@ -2026,12 +2022,6 @@ pub fn violation_to_status(v: &QuotaViolation) -> StatusCode {
 }
 
 pub fn violation_to_response(v: &QuotaViolation, request_id: Option<String>) -> Response {
-    let violation_type = match v.layer {
-        QuotaLayer::SystemHardLimit => "system_hard_limit",
-        QuotaLayer::CircuitBreaker => "circuit_breaker",
-        QuotaLayer::TenantBudget => "tenant_budget",
-        QuotaLayer::ApiRateLimit => "api_rate_limit",
-    };
     let status = violation_to_status(v);
     let message = match status {
         StatusCode::TOO_MANY_REQUESTS => "Rate limit exceeded",
@@ -2044,16 +2034,35 @@ pub fn violation_to_response(v: &QuotaViolation, request_id: Option<String>) -> 
         .and_then(|(_, value)| value.parse::<u64>().ok())
         .unwrap_or(v.retry_after_s);
 
-    let body = serde_json::json!({
-        "status": status.as_u16(),
-        "error": message,
-        "limit": serde_json::Value::Null,
-        "remaining": serde_json::Value::Null,
-        "period": serde_json::Value::Null,
-        "retry_after": retry_after,
-        "request_id": request_id,
-    });
-    let mut res = (status, Json(body)).into_response();
+    let limit = quota_headers
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case("X-RateLimit-Limit"))
+        .and_then(|(_, value)| value.parse::<u64>().ok());
+    let remaining = quota_headers
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case("X-RateLimit-Remaining"))
+        .and_then(|(_, value)| value.parse::<u64>().ok());
+    let period = quota_headers
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case("X-RateLimit-Period"))
+        .cloned()
+        .map(|(_, value)| value);
+
+    let mut body = serde_json::Map::new();
+    body.insert("status".to_string(), serde_json::json!(status.as_u16()));
+    body.insert("error".to_string(), serde_json::json!(message));
+    body.insert("retry_after".to_string(), serde_json::json!(retry_after));
+    body.insert("request_id".to_string(), serde_json::json!(request_id));
+    if let Some(value) = limit {
+        body.insert("limit".to_string(), serde_json::json!(value));
+    }
+    if let Some(value) = remaining {
+        body.insert("remaining".to_string(), serde_json::json!(value));
+    }
+    if let Some(value) = period {
+        body.insert("period".to_string(), serde_json::json!(value));
+    }
+    let mut res = (status, Json(serde_json::Value::Object(body))).into_response();
 
     // Inject headers from violation
     let headers = res.headers_mut();
@@ -2067,6 +2076,12 @@ pub fn violation_to_response(v: &QuotaViolation, request_id: Option<String>) -> 
 
     #[cfg(any(test, feature = "test-utils"))]
     {
+        let violation_type = match v.layer {
+            QuotaLayer::SystemHardLimit => "system_hard_limit",
+            QuotaLayer::CircuitBreaker => "circuit_breaker",
+            QuotaLayer::TenantBudget => "tenant_budget",
+            QuotaLayer::ApiRateLimit => "api_rate_limit",
+        };
         // For tests, we might want to inspect specific violation details via headers
         headers.insert(
             "X-Violation-Type",

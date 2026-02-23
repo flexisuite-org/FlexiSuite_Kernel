@@ -79,12 +79,6 @@ impl RegistryStorage {
         }
     }
 
-    /// Builder-style method to override trust provider (for testing)
-    pub fn with_trust_provider(mut self, provider: Arc<dyn TrustProvider>) -> Self {
-        self.trust_provider = provider;
-        self
-    }
-
     fn validate_key(key: &str) -> Result<(), RegistryError> {
         if key.is_empty() {
             return Err(RegistryError::InvalidPath(
@@ -396,10 +390,10 @@ impl RegistryStorage {
                     kid = %trusted_key.kid,
                     "Manifest signature verification failed on read"
                 );
-                return Err(RegistryError::IntegrityCheckFailed {
-                    expected: "valid_signature".to_string(),
-                    actual: format!("{reason:?}"),
-                });
+                return Err(RegistryError::InvalidManifest(format!(
+                    "Signature verification failed: {:?}",
+                    reason
+                )));
             }
         }
 
