@@ -24,6 +24,7 @@ use crate::middleware::{
 pub mod auth;
 pub mod diagnostics;
 pub mod health;
+pub mod metrics;
 pub mod middleware;
 pub mod profile;
 pub mod error;
@@ -44,7 +45,7 @@ pub struct ActionStatusResponse {
 pub async fn build_app(
     config: MiddlewareConfig,
     db: Arc<DatabaseConnection>,
-) -> Result<(Router, JoinHandle<()>), String> {
+) -> Result<(Router, Router, JoinHandle<()>), String> {
     let state = MiddlewareState::new(config).await?;
     Ok(build_app_with_state(state, db))
 }
@@ -52,8 +53,11 @@ pub async fn build_app(
 pub fn build_app_with_state(
     state: MiddlewareState,
     db: Arc<DatabaseConnection>,
-) -> (Router, JoinHandle<()>) {
+) -> (Router, Router, JoinHandle<()>) {
+    metrics::init_metrics();
     let cleanup_handle = state.start_cleanup_task();
+
+    let metrics_router = Router::new().route("/metrics", get(metrics::metrics_handler));
 
     let public_router = Router::new()
         .route("/health/liveness", get(health::liveness))
@@ -108,7 +112,7 @@ pub fn build_app_with_state(
                         HeaderValue::from_static("max-age=63072000; includeSubDomains"),
                     )),
             ),
-
+        metrics_router,
         cleanup_handle,
     )
 }
@@ -129,6 +133,8 @@ pub async fn write_test(
         ActionStatus::Completed,
     )
     .await;
+
+    // TODO: record sandbox duration via kernel-runtime execution hook when integrated
 
     let body = TestWriteResponse {
         action_id: action_id.clone(),
@@ -193,7 +199,7 @@ mod security_header_tests {
         let state = MiddlewareState::new(config)
             .await
             .expect("Failed to create state");
-        let (app, _cleanup) = build_app_with_state(state, db);
+        let (app, _metrics, _cleanup) = build_app_with_state(state, db);
         app
     }
 
