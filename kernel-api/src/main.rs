@@ -77,23 +77,31 @@ async fn main() {
 
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
 
-    let metrics_listener = TcpListener::bind(metrics_addr).await.unwrap_or_else(|e| {
-        eprintln!("Failed to bind metrics to {metrics_addr}: {e}");
-        std::process::exit(1);
-    });
-    tracing::info!("Listening on http://{} (Metrics)", metrics_addr);
+    match TcpListener::bind(metrics_addr).await {
+        Ok(metrics_listener) => {
+            tracing::info!("Listening on http://{} (Metrics)", metrics_addr);
 
-    tokio::spawn(async move {
-        let server = axum::serve(metrics_listener, metrics_app);
-        if let Err(e) = server
-            .with_graceful_shutdown(async move {
-                let _ = shutdown_rx.await;
-            })
-            .await
-        {
-            tracing::error!("Metrics server error: {e}");
+            tokio::spawn(async move {
+                let server = axum::serve(metrics_listener, metrics_app);
+                if let Err(e) = server
+                    .with_graceful_shutdown(async move {
+                        let _ = shutdown_rx.await;
+                    })
+                    .await
+                {
+                    tracing::error!("Metrics server error: {e}");
+                }
+            });
         }
-    });
+        Err(e) => {
+            tracing::warn!(
+                "Failed to bind metrics server to {}: {}. Continuing without metrics endpoint.",
+                metrics_addr,
+                e
+            );
+            drop(shutdown_rx);
+        }
+    }
 
     let listener = TcpListener::bind(addr).await.unwrap_or_else(|e| {
         eprintln!("Failed to bind to {addr}: {e}");
