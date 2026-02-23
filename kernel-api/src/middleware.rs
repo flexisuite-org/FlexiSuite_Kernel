@@ -23,7 +23,6 @@ use tokio::sync::{Mutex, Notify};
 use tracing::{error, info, instrument, warn};
 
 use crate::auth::TenantContext;
-use crate::error::build_json_error_response;
 
 #[derive(Clone)]
 pub struct MiddlewareConfig {
@@ -1952,37 +1951,34 @@ pub async fn quota_middleware(req: Request<Body>, next: Next) -> Result<Response
     #[cfg(any(test, feature = "test-utils"))]
     {
         if parts.headers.contains_key("X-Mock-Quota-System") {
-            let mut violation = QuotaViolation {
+            let violation = QuotaViolation {
                 layer: QuotaLayer::SystemHardLimit,
                 retry_after_s: 100,
             };
-            violation.clamp_retry_after();
             warn!("System Hard Limit exceeded (Mock)");
             return Err(violation_to_response(&violation, request_id));
         }
 
         if parts.headers.contains_key("X-Mock-Quota-Tenant") {
-            let mut violation = QuotaViolation {
+            let violation = QuotaViolation {
                 layer: QuotaLayer::TenantBudget,
                 retry_after_s: 5,
             };
-            violation.clamp_retry_after();
             warn!("Tenant Budget exceeded (Mock)");
             return Err(violation_to_response(&violation, request_id));
         }
 
         if parts.headers.contains_key("X-Mock-Quota-Api") {
-            let mut violation = QuotaViolation {
+            let violation = QuotaViolation {
                 layer: QuotaLayer::ApiRateLimit,
                 retry_after_s: 60,
             };
-            violation.clamp_retry_after();
             warn!("API Rate Limit exceeded (Mock)");
             return Err(violation_to_response(&violation, request_id));
         }
     }
 
-    if let Err(mut v) = state
+    if let Err(v) = state
         .quota_store
         .check_and_update_multi(
             tenant_ctx.tenant_id(),
@@ -1994,7 +1990,6 @@ pub async fn quota_middleware(req: Request<Body>, next: Next) -> Result<Response
         )
         .await
     {
-        v.clamp_retry_after();
         return Err(violation_to_response(&v, request_id));
     }
 
@@ -2007,6 +2002,19 @@ fn response_not_cacheable_for_replay(headers: &HeaderMap, max_size: usize) -> bo
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.parse::<usize>().ok())
         .is_some_and(|n| n > max_size)
+}
+
+fn build_json_error_response(
+    message: impl Into<String>,
+    status: StatusCode,
+    request_id: Option<String>,
+) -> Response {
+    let body = serde_json::json!({
+        "status": status.as_u16(),
+        "error": message.into(),
+        "request_id": request_id,
+    });
+    (status, Json(body)).into_response()
 }
 
 pub fn violation_to_status(v: &QuotaViolation) -> StatusCode {
@@ -2024,7 +2032,6 @@ pub fn violation_to_response(v: &QuotaViolation, request_id: Option<String>) -> 
         QuotaLayer::TenantBudget => "tenant_budget",
         QuotaLayer::ApiRateLimit => "api_rate_limit",
     };
-    crate::metrics::record_quota_reject(violation_type);
     let status = violation_to_status(v);
     let message = match status {
         StatusCode::TOO_MANY_REQUESTS => "Rate limit exceeded",
