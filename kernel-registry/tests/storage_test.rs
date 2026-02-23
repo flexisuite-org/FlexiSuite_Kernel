@@ -1,13 +1,13 @@
 use base64::Engine;
 use base64::prelude::BASE64_URL_SAFE_NO_PAD;
+use ed25519_dalek::{Signer, SigningKey, VerifyingKey};
 use kernel_core::auth::{TenantContext, TenantId};
 use kernel_registry::error::RegistryError;
 use kernel_registry::model::{Dependencies, DistManifest, Kind, Route, Security};
-use kernel_registry::storage::{normalize_kid, reload_trust_root_keys, RegistryStorage};
+use kernel_registry::storage::{RegistryStorage, normalize_kid, reload_trust_root_keys};
+use object_store::ObjectStore;
 use object_store::memory::InMemory;
 use object_store::path::Path;
-use object_store::ObjectStore;
-use ed25519_dalek::{Signer, SigningKey, VerifyingKey};
 use rand::rngs::OsRng;
 use std::collections::BTreeMap;
 use std::sync::{Arc, LazyLock, Mutex};
@@ -89,7 +89,10 @@ impl TestKey {
 /// Handles environment variable setting, trust root reloading, and async runtime.
 fn with_test_key<F>(key: &TestKey, test_fn: F)
 where
-    F: for<'a> FnOnce(&'a TestKey, RegistryStorage) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>>,
+    F: for<'a> FnOnce(
+        &'a TestKey,
+        RegistryStorage,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>>,
 {
     // Serialize execution to prevent env var races
     let _guard = ENV_LOCK.lock().unwrap();
@@ -106,7 +109,10 @@ where
 /// Helper to run registry tests with a specific trust root key UNSET.
 fn with_test_key_unset<F>(key: &TestKey, test_fn: F)
 where
-    F: for<'a> FnOnce(&'a TestKey, RegistryStorage) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>>,
+    F: for<'a> FnOnce(
+        &'a TestKey,
+        RegistryStorage,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>>,
 {
     // Serialize execution to prevent env var races
     let _guard = ENV_LOCK.lock().unwrap();
@@ -151,73 +157,81 @@ async fn test_save_and_get_artifact() {
 #[test]
 fn test_save_and_get_manifest() {
     let key = TestKey::new("test-key-1");
-    with_test_key(&key, |key, registry| Box::pin(async move {
-        let mut manifest = test_manifest("app_test", "1.0.0");
-        key.sign(&mut manifest);
+    with_test_key(&key, |key, registry| {
+        Box::pin(async move {
+            let mut manifest = test_manifest("app_test", "1.0.0");
+            key.sign(&mut manifest);
 
-        let (digest, persisted) = registry.save_manifest(&manifest).await.unwrap();
-        assert_eq!(digest.len(), 96);
-        assert_eq!(persisted.security.manifest_digest, digest);
+            let (digest, persisted) = registry.save_manifest(&manifest).await.unwrap();
+            assert_eq!(digest.len(), 96);
+            assert_eq!(persisted.security.manifest_digest, digest);
 
-        let retrieved = registry.get_manifest("app_test", "1.0.0").await.unwrap();
-        assert_eq!(retrieved.security.manifest_digest, digest);
-        assert_eq!(
-            retrieved.security.manifest_signature,
-            manifest.security.manifest_signature
-        );
-    }));
+            let retrieved = registry.get_manifest("app_test", "1.0.0").await.unwrap();
+            assert_eq!(retrieved.security.manifest_digest, digest);
+            assert_eq!(
+                retrieved.security.manifest_signature,
+                manifest.security.manifest_signature
+            );
+        })
+    });
 }
 
 #[test]
 fn test_manifest_digest_excludes_security_section() {
     let key = TestKey::new("test-key-digest");
-    with_test_key(&key, |key, registry_a| Box::pin(async move {
-        let mut manifest_a = test_manifest("app_security_digest", "1.0.0");
-        manifest_a.name = "Security Digest Test".to_string();
-        key.sign(&mut manifest_a);
+    with_test_key(&key, |key, registry_a| {
+        Box::pin(async move {
+            let mut manifest_a = test_manifest("app_security_digest", "1.0.0");
+            manifest_a.name = "Security Digest Test".to_string();
+            key.sign(&mut manifest_a);
 
-        let mut manifest_b = manifest_a.clone();
-        // Modify a security field. The digest (payload) should remain unchanged.
-        manifest_b.security.trust_root_version = "v2".to_string();
+            let mut manifest_b = manifest_a.clone();
+            // Modify a security field. The digest (payload) should remain unchanged.
+            manifest_b.security.trust_root_version = "v2".to_string();
 
-        let (digest_a, _) = registry_a.save_manifest(&manifest_a).await.unwrap();
-        // Saving manifest_b should produce the same digest since only security fields differ.
-        let (digest_b, _) = registry_a.save_manifest(&manifest_b).await.unwrap();
+            let (digest_a, _) = registry_a.save_manifest(&manifest_a).await.unwrap();
+            // Saving manifest_b should produce the same digest since only security fields differ.
+            let (digest_b, _) = registry_a.save_manifest(&manifest_b).await.unwrap();
 
-        assert_eq!(digest_a, digest_b);
-    }));
+            assert_eq!(digest_a, digest_b);
+        })
+    });
 }
 
 #[test]
 fn test_save_manifest_rejects_invalid_signature() {
     let key = TestKey::new("test-key-invalid");
-    with_test_key(&key, |key, registry| Box::pin(async move {
-        let mut manifest = test_manifest("app_invalid_sig", "1.0.0");
-        key.sign(&mut manifest);
-        // Tamper with signature
-        manifest.security.manifest_signature = BASE64_URL_SAFE_NO_PAD.encode(b"bad_sig");
+    with_test_key(&key, |key, registry| {
+        Box::pin(async move {
+            let mut manifest = test_manifest("app_invalid_sig", "1.0.0");
+            key.sign(&mut manifest);
+            // Tamper with signature
+            manifest.security.manifest_signature = BASE64_URL_SAFE_NO_PAD.encode(b"bad_sig");
 
-        let result = registry.save_manifest(&manifest).await;
-        match result {
-            Err(RegistryError::SignatureVerificationFailed(_)) => {}
-            other => panic!("expected SignatureVerificationFailed, got {other:?}"),
-        }
-    }));
+            let result = registry.save_manifest(&manifest).await;
+            match result {
+                Err(RegistryError::SignatureVerificationFailed(_)) => {}
+                other => panic!("expected SignatureVerificationFailed, got {other:?}"),
+            }
+        })
+    });
 }
 
 #[test]
 fn test_save_manifest_rejects_unknown_kid() {
     let key = TestKey::new("test-key-unknown");
-    with_test_key_unset(&key, |key, registry| Box::pin(async move {
-        let mut manifest = test_manifest("app_unknown_kid", "1.0.0");
-        key.sign(&mut manifest);
+    with_test_key_unset(&key, |key, registry| {
+        Box::pin(async move {
+            let mut manifest = test_manifest("app_unknown_kid", "1.0.0");
+            key.sign(&mut manifest);
 
-        let result = registry.save_manifest(&manifest).await;
-        match result {
-            Err(RegistryError::KeyNotFound(_)) => {}
-            other => panic!("expected KeyNotFound, got {other:?}"),
-        }
-    }));
+            let result = registry.save_manifest(&manifest).await;
+            match result {
+                Err(RegistryError::KeyNotFound(_)) => {}
+                other => panic!("expected KeyNotFound, got {other:?}"),
+            }
+        })
+    });
 }
 
 #[test]
@@ -245,7 +259,9 @@ fn test_normalized_kid_collision_rejects_ambiguous_keys() {
                 let result = registry.save_manifest(&manifest).await;
                 match result {
                     Err(RegistryError::KeyNotFound(_)) => {}
-                    other => panic!("expected KeyNotFound for normalized KID collision, got {other:?}"),
+                    other => {
+                        panic!("expected KeyNotFound for normalized KID collision, got {other:?}")
+                    }
                 }
             });
         },
@@ -360,49 +376,58 @@ fn test_get_manifest_detects_tampered_stored_json() {
 #[test]
 fn test_manifest_digest_numeric_normalization() {
     let key = TestKey::new("test-key-numeric");
-    with_test_key(&key, |key, registry| Box::pin(async move {
-        let mut manifest_int = test_manifest("app_numeric", "1.0.0");
-        manifest_int
-            .configuration
-            .insert("count".to_string(), serde_json::json!(1));
-        // Sign AFTER modification
-        key.sign(&mut manifest_int);
+    with_test_key(&key, |key, registry| {
+        Box::pin(async move {
+            let mut manifest_int = test_manifest("app_numeric", "1.0.0");
+            manifest_int
+                .configuration
+                .insert("count".to_string(), serde_json::json!(1));
+            // Sign AFTER modification
+            key.sign(&mut manifest_int);
 
-        let mut manifest_float = test_manifest("app_numeric", "1.0.0");
-        manifest_float
-            .configuration
-            .insert("count".to_string(), serde_json::json!(1.0));
+            let mut manifest_float = test_manifest("app_numeric", "1.0.0");
+            manifest_float
+                .configuration
+                .insert("count".to_string(), serde_json::json!(1.0));
 
-        // Assert normalization matches BEFORE signing/saving
-        assert_eq!(compute_digest(&manifest_int), compute_digest(&manifest_float));
+            // Assert normalization matches BEFORE signing/saving
+            assert_eq!(
+                compute_digest(&manifest_int),
+                compute_digest(&manifest_float)
+            );
 
-        // Reuse same signature from int for float version
-        manifest_float.security.manifest_signature = manifest_int.security.manifest_signature.clone();
-        manifest_float.security.manifest_signature_kid = manifest_int.security.manifest_signature_kid.clone();
+            // Reuse same signature from int for float version
+            manifest_float.security.manifest_signature =
+                manifest_int.security.manifest_signature.clone();
+            manifest_float.security.manifest_signature_kid =
+                manifest_int.security.manifest_signature_kid.clone();
 
-        let (digest_int, _) = registry.save_manifest(&manifest_int).await.unwrap();
-        let (digest_float, _) = registry.save_manifest(&manifest_float).await.unwrap();
+            let (digest_int, _) = registry.save_manifest(&manifest_int).await.unwrap();
+            let (digest_float, _) = registry.save_manifest(&manifest_float).await.unwrap();
 
-        assert_eq!(digest_int, digest_float);
-    }));
+            assert_eq!(digest_int, digest_float);
+        })
+    });
 }
 
 #[test]
 fn test_manifest_digest_big_int_normalization() {
     let key = TestKey::new("test-key-bigint");
-    with_test_key(&key, |key, registry| Box::pin(async move {
-        let mut manifest_big = test_manifest("app_big_int", "1.0.0");
-        manifest_big
-            .configuration
-            .insert("big_i64".to_string(), serde_json::json!(i64::MAX));
-        manifest_big
-            .configuration
-            .insert("big_u64".to_string(), serde_json::json!(u64::MAX));
-        key.sign(&mut manifest_big);
+    with_test_key(&key, |key, registry| {
+        Box::pin(async move {
+            let mut manifest_big = test_manifest("app_big_int", "1.0.0");
+            manifest_big
+                .configuration
+                .insert("big_i64".to_string(), serde_json::json!(i64::MAX));
+            manifest_big
+                .configuration
+                .insert("big_u64".to_string(), serde_json::json!(u64::MAX));
+            key.sign(&mut manifest_big);
 
-        let (digest, _) = registry.save_manifest(&manifest_big).await.unwrap();
-        assert_eq!(digest.len(), 96);
-    }));
+            let (digest, _) = registry.save_manifest(&manifest_big).await.unwrap();
+            assert_eq!(digest.len(), 96);
+        })
+    });
 }
 
 #[tokio::test]

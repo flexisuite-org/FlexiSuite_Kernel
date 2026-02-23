@@ -59,7 +59,9 @@ mod tests {
         let h_zero = v_zero.headers();
         let retry_after_zero = h_zero.iter().find(|(k, _)| k == "Retry-After");
         assert_eq!(
-            retry_after_zero.expect("Retry-After header must be present").1,
+            retry_after_zero
+                .expect("Retry-After header must be present")
+                .1,
             "0"
         );
 
@@ -71,7 +73,9 @@ mod tests {
         let h_large = v_large.headers();
         let retry_after_large = h_large.iter().find(|(k, _)| k == "Retry-After");
         assert_eq!(
-            retry_after_large.expect("Retry-After header must be present").1,
+            retry_after_large
+                .expect("Retry-After header must be present")
+                .1,
             "31536000"
         );
 
@@ -83,7 +87,9 @@ mod tests {
         let h_sys_low = v_sys_low.headers();
         let retry_after_sys_low = h_sys_low.iter().find(|(k, _)| k == "Retry-After");
         assert_eq!(
-            retry_after_sys_low.expect("Retry-After header must be present").1,
+            retry_after_sys_low
+                .expect("Retry-After header must be present")
+                .1,
             "1"
         );
 
@@ -94,7 +100,9 @@ mod tests {
         let h_sys_high = v_sys_high.headers();
         let retry_after_sys_high = h_sys_high.iter().find(|(k, _)| k == "Retry-After");
         assert_eq!(
-            retry_after_sys_high.expect("Retry-After header must be present").1,
+            retry_after_sys_high
+                .expect("Retry-After header must be present")
+                .1,
             "30"
         );
 
@@ -105,7 +113,9 @@ mod tests {
         let h_sys_ok = v_sys_ok.headers();
         let retry_after_sys_ok = h_sys_ok.iter().find(|(k, _)| k == "Retry-After");
         assert_eq!(
-            retry_after_sys_ok.expect("Retry-After header must be present").1,
+            retry_after_sys_ok
+                .expect("Retry-After header must be present")
+                .1,
             "15"
         );
     }

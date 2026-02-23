@@ -1,10 +1,10 @@
 #[cfg(test)]
 mod tests {
+    use ed25519_dalek::{Signer, SigningKey};
     use kernel_core::supplychain::{
         BreakGlassContext, KeyStatus, Manifest, TrustedKey, VerificationResult, verify_break_glass,
         verify_manifest,
     };
-    use ed25519_dalek::{SigningKey, Signer};
     use rand::rngs::OsRng;
 
     #[test]
@@ -20,8 +20,10 @@ mod tests {
 
         // Digest to sign
         let digest_123 = "sha256-123";
-        let signature_123_active = hex::encode(signing_key_active.sign(digest_123.as_bytes()).to_bytes());
-        let signature_123_revoked = hex::encode(signing_key_revoked.sign(digest_123.as_bytes()).to_bytes());
+        let signature_123_active =
+            hex::encode(signing_key_active.sign(digest_123.as_bytes()).to_bytes());
+        let signature_123_revoked =
+            hex::encode(signing_key_revoked.sign(digest_123.as_bytes()).to_bytes());
 
         let manifest_revoked = Manifest {
             id: "pkg-a".to_string(),
@@ -31,7 +33,8 @@ mod tests {
         };
 
         let digest_456 = "sha256-456";
-        let signature_456_active = hex::encode(signing_key_active.sign(digest_456.as_bytes()).to_bytes());
+        let signature_456_active =
+            hex::encode(signing_key_active.sign(digest_456.as_bytes()).to_bytes());
         let manifest_ok = Manifest {
             id: "pkg-b".to_string(),
             digest: digest_456.to_string(),
@@ -113,7 +116,8 @@ mod tests {
 
         // Test SHA-384
         let digest_abc = "sha384-abc";
-        let signature_abc_active = hex::encode(signing_key_active.sign(digest_abc.as_bytes()).to_bytes());
+        let signature_abc_active =
+            hex::encode(signing_key_active.sign(digest_abc.as_bytes()).to_bytes());
         let manifest_sha384 = Manifest {
             id: "pkg-c".to_string(),
             digest: digest_abc.to_string(),
@@ -192,6 +196,11 @@ mod tests {
             verify_manifest(&manifest_ok, &key_future, "sha256-456", now),
             VerificationResult::KeyNotYetValid
         ));
+        key_future.not_before = Some(now);
+        assert!(matches!(
+            verify_manifest(&manifest_ok, &key_future, "sha256-456", now),
+            VerificationResult::Ok
+        ));
 
         // Test Key Expired
         let mut key_expired = key_active.clone(); // Removed duplicate definition
@@ -199,6 +208,11 @@ mod tests {
         assert!(matches!(
             verify_manifest(&manifest_ok, &key_expired, "sha256-456", now),
             VerificationResult::KeyExpired
+        ));
+        key_expired.not_after = Some(now);
+        assert!(matches!(
+            verify_manifest(&manifest_ok, &key_expired, "sha256-456", now),
+            VerificationResult::Ok
         ));
     }
 

@@ -3,7 +3,10 @@ use axum::{
     http::{Response, StatusCode, header},
     response::IntoResponse,
 };
-use prometheus::{Encoder, TextEncoder, CounterVec, Histogram, Registry, register_counter_vec_with_registry, register_histogram_with_registry};
+use prometheus::{
+    CounterVec, Encoder, Histogram, Registry, TextEncoder, register_counter_vec_with_registry,
+    register_histogram_with_registry,
+};
 use std::sync::OnceLock;
 
 pub fn init_metrics() {
@@ -91,7 +94,8 @@ async fn metrics_handler_with_registry(registry: &Registry) -> impl IntoResponse
             StatusCode::INTERNAL_SERVER_ERROR,
             [(header::CONTENT_TYPE, "text/plain")],
             format!("Failed to encode metrics: {}", e),
-        ).into_response();
+        )
+            .into_response();
     }
 
     Response::builder()
@@ -104,7 +108,8 @@ async fn metrics_handler_with_registry(registry: &Registry) -> impl IntoResponse
                 StatusCode::INTERNAL_SERVER_ERROR,
                 [(header::CONTENT_TYPE, "text/plain")],
                 format!("Failed to build response: {}", e),
-            ).into_response()
+            )
+                .into_response()
         })
 }
 
@@ -114,7 +119,9 @@ static WARNED_UNINITIALIZED: AtomicBool = AtomicBool::new(false);
 
 fn warn_uninitialized() {
     if !WARNED_UNINITIALIZED.swap(true, Ordering::Relaxed) {
-        tracing::warn!("Metrics not initialized — recording calls will be no-ops. Call init_metrics() at startup.");
+        tracing::warn!(
+            "Metrics not initialized — recording calls will be no-ops. Call init_metrics() at startup."
+        );
     }
 }
 
@@ -136,7 +143,10 @@ pub fn record_sandbox_duration(duration_seconds: f64) {
 
 pub fn record_token_validation(status: &str) {
     if let Some(metrics) = METRICS.get() {
-        metrics.token_validation_total.with_label_values(&[status]).inc();
+        metrics
+            .token_validation_total
+            .with_label_values(&[status])
+            .inc();
     } else {
         warn_uninitialized();
     }
@@ -153,11 +163,19 @@ mod tests {
         // For testing, we use a local Metrics instance with its own registry to avoid races.
         let metrics = Metrics::new(&registry).unwrap();
 
-        metrics.quota_reject_total.with_label_values(&["test_layer"]).inc();
+        metrics
+            .quota_reject_total
+            .with_label_values(&["test_layer"])
+            .inc();
         metrics.sandbox_duration_seconds.observe(0.5);
-        metrics.token_validation_total.with_label_values(&["success"]).inc();
+        metrics
+            .token_validation_total
+            .with_label_values(&["success"])
+            .inc();
 
-        let response = metrics_handler_with_registry(&registry).await.into_response();
+        let response = metrics_handler_with_registry(&registry)
+            .await
+            .into_response();
         assert_eq!(response.status(), StatusCode::OK);
 
         let body = response.into_body();
