@@ -51,10 +51,11 @@ async fn main() {
         });
 
     let config = MiddlewareConfig::default();
-    let (app, _cleanup_handle) = build_app(config, db.clone()).await.unwrap_or_else(|e| {
-        eprintln!("kernel-api startup error (middleware): {e}");
-        std::process::exit(1);
-    });
+    let (app, metrics_app, _cleanup_handle) =
+        build_app(config, db.clone()).await.unwrap_or_else(|e| {
+            eprintln!("kernel-api startup error (middleware): {e}");
+            std::process::exit(1);
+        });
 
     let host = std::env::var("KERNEL_API_HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
     let port = std::env::var("KERNEL_API_PORT").unwrap_or_else(|_| "3000".to_string());
@@ -63,14 +64,90 @@ async fn main() {
         eprintln!("Invalid bind address: {addr_str}");
         std::process::exit(1);
     });
-    tracing::info!("Listening on http://{}", addr);
+
+    let metrics_host =
+        std::env::var("KERNEL_API_METRICS_HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
+    let metrics_port =
+        std::env::var("KERNEL_API_METRICS_PORT").unwrap_or_else(|_| "9091".to_string());
+    let metrics_addr_str = format!("{metrics_host}:{metrics_port}");
+    let metrics_addr: SocketAddr = metrics_addr_str.parse().unwrap_or_else(|_| {
+        eprintln!("Invalid metrics bind address: {metrics_addr_str}");
+        std::process::exit(1);
+    });
+
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+
+    match TcpListener::bind(metrics_addr).await {
+        Ok(metrics_listener) => {
+            tracing::info!("Listening on http://{} (Metrics)", metrics_addr);
+
+            tokio::spawn(async move {
+                let server = axum::serve(metrics_listener, metrics_app);
+                if let Err(e) = server
+                    .with_graceful_shutdown(async move {
+                        let _ = shutdown_rx.await;
+                    })
+                    .await
+                {
+                    tracing::error!("Metrics server error: {e}");
+                }
+            });
+        }
+        Err(e) => {
+            tracing::warn!(
+                "Failed to bind metrics server to {}: {}. Continuing without metrics endpoint.",
+                metrics_addr,
+                e
+            );
+            drop(shutdown_rx);
+        }
+    }
 
     let listener = TcpListener::bind(addr).await.unwrap_or_else(|e| {
         eprintln!("Failed to bind to {addr}: {e}");
         std::process::exit(1);
     });
-    axum::serve(listener, app).await.unwrap_or_else(|e| {
-        eprintln!("Server error: {e}");
-        std::process::exit(1);
-    });
+    tracing::info!("Listening on http://{} (API)", addr);
+
+    let ctrl_c_future = async {
+        if let Err(e) = tokio::signal::ctrl_c().await {
+            tracing::error!("Failed to install CTRL+C handler: {e}");
+            std::future::pending::<()>().await;
+        }
+    };
+
+    #[cfg(unix)]
+    let terminate_future = async {
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut stream) => {
+                stream.recv().await;
+            }
+            Err(e) => {
+                tracing::error!("Failed to install SIGTERM handler: {e}");
+                std::future::pending::<()>().await;
+            }
+        }
+    };
+
+    #[cfg(not(unix))]
+    let terminate_future = std::future::pending::<()>();
+
+    axum::serve(listener, app)
+        .with_graceful_shutdown(async move {
+            tokio::select! {
+                _ = ctrl_c_future => {
+                    tracing::info!("Shutdown signal (SIGINT) received, stopping API server");
+                },
+                _ = terminate_future => {
+                    tracing::info!("Shutdown signal (SIGTERM) received, stopping API server");
+                },
+            }
+        })
+        .await
+        .unwrap_or_else(|e| {
+            eprintln!("Server error: {e}");
+            std::process::exit(1);
+        });
+
+    let _ = shutdown_tx.send(());
 }

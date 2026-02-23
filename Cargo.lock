@@ -3253,6 +3253,7 @@ dependencies = [
 name = "kernel-registry"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "bytes",
  "ed25519-dalek",
  "hex",
@@ -3262,6 +3263,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "temp-env",
  "tempfile",
  "thiserror 1.0.69",
  "tokio",
