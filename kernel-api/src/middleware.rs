@@ -23,6 +23,7 @@ use tokio::sync::{Mutex, Notify};
 use tracing::{error, info, instrument, warn};
 
 use crate::auth::TenantContext;
+use crate::build_json_error_response;
 
 #[derive(Clone)]
 pub struct MiddlewareConfig {
@@ -1998,19 +1999,6 @@ fn response_not_cacheable_for_replay(headers: &HeaderMap, max_size: usize) -> bo
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.parse::<usize>().ok())
         .is_some_and(|n| n > max_size)
-}
-
-fn build_json_error_response(
-    message: impl Into<String>,
-    status: StatusCode,
-    request_id: Option<String>,
-) -> Response {
-    let body = serde_json::json!({
-        "status": status.as_u16(),
-        "error": message.into(),
-        "request_id": request_id,
-    });
-    (status, Json(body)).into_response()
 }
 
 pub fn violation_to_status(v: &QuotaViolation) -> StatusCode {

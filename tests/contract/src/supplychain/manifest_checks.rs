@@ -5,8 +5,8 @@ mod tests {
     // SigningKey.sign(...) must be identical to the bytes verify_manifest checks as expected_digest.
     use ed25519_dalek::{Signer, SigningKey};
     use kernel_core::supplychain::{
-        BreakGlassContext, KeyStatus, Manifest, TrustedKey, VerificationResult, verify_break_glass,
-        verify_manifest,
+        BreakGlassContext, CLOCK_DRIFT_TOLERANCE_SECS, KeyStatus, Manifest, TrustedKey,
+        VerificationResult, verify_break_glass, verify_manifest,
     };
     use rand::rngs::OsRng;
 
@@ -283,8 +283,10 @@ mod tests {
         ));
 
         // Test Key Not Yet Valid
+        let margin = CLOCK_DRIFT_TOLERANCE_SECS + 1_000;
+
         let mut key_future = key_active.clone(); // Removed duplicate definition
-        key_future.not_before = Some(now + 100);
+        key_future.not_before = Some(now + margin);
         assert!(matches!(
             verify_manifest("tenant_test", &manifest_ok, &key_future, "sha256-456", now),
             VerificationResult::KeyNotYetValid
@@ -297,7 +299,7 @@ mod tests {
 
         // Test Key Expired
         let mut key_expired = key_active.clone(); // Removed duplicate definition
-        key_expired.not_after = Some(now - 100);
+        key_expired.not_after = Some(now - margin);
         assert!(matches!(
             verify_manifest("tenant_test", &manifest_ok, &key_expired, "sha256-456", now),
             VerificationResult::KeyExpired
