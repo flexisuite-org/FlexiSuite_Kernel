@@ -41,27 +41,15 @@ impl RegistryStorage {
         store: Arc<dyn ObjectStore>,
         tenant_ctx: &TenantContext,
     ) -> Result<Self, RegistryError> {
-        // Allow override via env var for production config injection
         let trust_path_str = std::env::var("MANIFEST_TRUST_ROOT_PATH")
             .unwrap_or_else(|_| "ops/trust/manifest_trust_root.json".to_string());
+        let trust_path = std::path::PathBuf::from(&trust_path_str);
 
-        let mut trust_path = std::path::PathBuf::from(&trust_path_str);
-
-        // Fallback logic for local development/testing from crate root
         if !trust_path.exists() {
-            let cwd = std::env::current_dir().unwrap_or_default();
-            if cwd.ends_with("kernel-registry")
-                && trust_path_str == "ops/trust/manifest_trust_root.json"
-            {
-                let fallback = std::path::PathBuf::from("../ops/trust/manifest_trust_root.json");
-                if fallback.exists() {
-                    info!(
-                        "Running inside kernel-registry, using fallback {:?}",
-                        fallback
-                    );
-                    trust_path = fallback;
-                }
-            }
+            return Err(RegistryError::TrustRootError(format!(
+                "Trust root file not found: {:?}. Set MANIFEST_TRUST_ROOT_PATH to a valid trust root path (current value: {}).",
+                trust_path, trust_path_str
+            )));
         }
 
         let trust_provider = FileTrustProvider::new(trust_path.clone()).map_err(|e| {
@@ -71,12 +59,24 @@ impl RegistryStorage {
             ))
         })?;
 
-        Ok(Self {
+        Ok(Self::new_with_trust_provider(
+            store,
+            tenant_ctx,
+            Arc::new(trust_provider),
+        ))
+    }
+
+    pub fn new_with_trust_provider(
+        store: Arc<dyn ObjectStore>,
+        tenant_ctx: &TenantContext,
+        trust_provider: Arc<dyn TrustProvider>,
+    ) -> Self {
+        Self {
             store,
             prefix: format!("tenants/{}/", tenant_ctx.tenant_id().as_str()),
             tenant_id: tenant_ctx.tenant_id().to_string(),
-            trust_provider: Arc::new(trust_provider),
-        })
+            trust_provider,
+        }
     }
 
     /// Builder-style method to override trust provider (for testing)
@@ -126,7 +126,7 @@ impl RegistryStorage {
         Path::from(format!("{}artifacts/{}", self.prefix, key))
     }
 
-    fn manifest_path(&self, id: &str, version: &str) -> Path {
+    pub fn manifest_path(&self, id: &str, version: &str) -> Path {
         Path::from(format!(
             "{}manifests/{}/{}/manifest.json",
             self.prefix, id, version
@@ -153,8 +153,11 @@ impl RegistryStorage {
 
         let mut hasher = Sha384::new();
         hasher.update(payload_bytes);
-        // Backwards compatibility: return raw hex, no prefix
-        Ok(hex::encode(hasher.finalize()))
+        Ok(format!("sha384-{}", hex::encode(hasher.finalize())))
+    }
+
+    pub fn compute_manifest_digest(manifest: &DistManifest) -> Result<String, RegistryError> {
+        Self::manifest_payload_digest(manifest)
     }
 
     fn normalize_value(v: serde_json::Value) -> serde_json::Value {
@@ -276,8 +279,7 @@ impl RegistryStorage {
             ));
         }
 
-        // manifest_digest is computed from the manifest with the entire
-        // security section excluded from the hashed payload.
+        // security section excluded from the hashed payload (canonical "sha384-{hex}" format).
         let computed_digest = Self::manifest_payload_digest(manifest)?;
 
         // Validate Security
@@ -285,26 +287,29 @@ impl RegistryStorage {
             .trust_provider
             .get_key(&manifest.security.manifest_signature_kid)?;
 
-        // Prepend prefix ONLY for verification logic to match kernel-core requirement
-        let digest_for_verification = format!("sha384-{}", computed_digest);
-
         let core_manifest = Manifest {
             id: manifest.id.clone(),
-            digest: digest_for_verification.clone(),
+            digest: manifest.security.manifest_digest.clone(),
             signature: manifest.security.manifest_signature.clone(),
             kid: manifest.security.manifest_signature_kid.clone(),
         };
 
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
+        let now = match SystemTime::now().duration_since(UNIX_EPOCH) {
+            Ok(duration) => duration.as_secs(),
+            Err(err) => {
+                warn!(
+                    error = %err,
+                    "System clock is before UNIX_EPOCH; falling back to now=0 for manifest verification"
+                );
+                0
+            }
+        };
 
         match verify_manifest(
             &self.tenant_id,
             &core_manifest,
             &trusted_key,
-            &digest_for_verification, // Should match manifest_digest but we check computed one
+            &computed_digest,
             now,
         ) {
             VerificationResult::Ok => {
@@ -320,7 +325,6 @@ impl RegistryStorage {
         }
 
         let mut persisted = manifest.clone();
-        // Persist the raw hex digest as per contract (or current state)
         persisted.security.manifest_digest = computed_digest.clone();
 
         let path = self.manifest_path(&manifest.id, &manifest.version);
@@ -362,6 +366,43 @@ impl RegistryStorage {
             warn!(expected = %expected, actual = %actual, "Manifest integrity check failed");
             return Err(RegistryError::IntegrityCheckFailed { expected, actual });
         }
+
+        let trusted_key = self
+            .trust_provider
+            .get_key(&manifest.security.manifest_signature_kid)?;
+
+        let core_manifest = Manifest {
+            id: manifest.id.clone(),
+            digest: manifest.security.manifest_digest.clone(),
+            signature: manifest.security.manifest_signature.clone(),
+            kid: manifest.security.manifest_signature_kid.clone(),
+        };
+        let now = match SystemTime::now().duration_since(UNIX_EPOCH) {
+            Ok(duration) => duration.as_secs(),
+            Err(err) => {
+                warn!(
+                    error = %err,
+                    "System clock is before UNIX_EPOCH; falling back to now=0 for manifest read verification"
+                );
+                0
+            }
+        };
+        match verify_manifest(&self.tenant_id, &core_manifest, &trusted_key, &actual, now) {
+            VerificationResult::Ok => {}
+            reason => {
+                error!(
+                    event = "MANIFEST_SIGNATURE_INVALID",
+                    reason = ?reason,
+                    kid = %trusted_key.kid,
+                    "Manifest signature verification failed on read"
+                );
+                return Err(RegistryError::IntegrityCheckFailed {
+                    expected: "valid_signature".to_string(),
+                    actual: format!("{reason:?}"),
+                });
+            }
+        }
+
         info!(digest = %actual, "Manifest retrieved successfully");
         Ok(manifest)
     }
