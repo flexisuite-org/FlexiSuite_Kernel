@@ -1,10 +1,12 @@
+use chrono::{TimeZone, Utc};
 use clap::Parser;
 use ed25519_dalek::{SigningKey, VerifyingKey};
+use rand::RngCore;
 use rand::rngs::OsRng;
 use serde::Serialize;
 use std::fs;
 use std::path::PathBuf;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Parser)]
 #[command(name = "gen-keys", about = "Generate trust root keys and JSON")]
@@ -13,6 +15,18 @@ struct Args {
     /// Priority: CLI arg > GEN_KEYS_OUTPUT_PATH > built-in default.
     #[arg(long, env = "GEN_KEYS_OUTPUT_PATH")]
     output: Option<PathBuf>,
+
+    /// Optional manifest version override (default: UTC timestamp-based version).
+    #[arg(long, env = "GEN_KEYS_VERSION")]
+    version: Option<String>,
+
+    /// Optional key id override (default: unique runtime-generated key id).
+    #[arg(long, env = "GEN_KEYS_KID")]
+    kid: Option<String>,
+
+    /// Key validity window in days (default: 365).
+    #[arg(long, env = "GEN_KEYS_VALIDITY_DAYS", default_value_t = 365)]
+    validity_days: u64,
 }
 
 #[derive(Serialize)]
@@ -39,17 +53,31 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let verifying_key: VerifyingKey = signing_key.verifying_key();
 
     let pub_hex = hex::encode(verifying_key.to_bytes());
-    let now_secs = SystemTime::now()
+    let now_duration = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
+        .map(|d| (d.as_secs(), d.subsec_nanos()))
+        .unwrap_or((0, 0));
+    let now_secs = now_duration.0;
+    let now_dt = Utc
+        .timestamp_opt(now_secs as i64, now_duration.1)
+        .single()
+        .unwrap_or_else(|| Utc.timestamp_opt(0, 0).single().expect("unix epoch must be valid"));
+    let generated_at = now_dt.to_rfc3339();
+
+    let validity_secs = args.validity_days.saturating_mul(24 * 60 * 60);
     let not_before = now_secs;
-    let not_after = now_secs.saturating_add(Duration::from_secs(365 * 24 * 60 * 60).as_secs());
-    let generated_at = format!("unix:{now_secs}");
-    let version = format!("v{now_secs}");
-    let kid = format!("store-key-{now_secs}");
+    let not_after = now_secs.saturating_add(validity_secs);
+    let version = args
+        .version
+        .unwrap_or_else(|| format!("v{}", now_dt.format("%Y%m%dT%H%M%SZ")));
+
+    let mut kid_suffix = [0_u8; 8];
+    csprng.fill_bytes(&mut kid_suffix);
+    let generated_kid = format!("store-key-{}-{}", now_secs, hex::encode(kid_suffix));
+    let kid = args.kid.unwrap_or(generated_kid);
 
     println!("Public Key: {}", pub_hex);
+    println!("Key ID: {}", kid);
 
     let trust_root = TrustRoot {
         version,
@@ -65,7 +93,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let json = serde_json::to_string_pretty(&trust_root)?;
-
     let output_path = args.output.unwrap_or_else(default_output_path);
 
     if let Some(parent) = output_path.parent() {
@@ -83,6 +110,5 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn default_output_path() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../ops/trust/manifest_trust_root.json")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../ops/trust/manifest_trust_root.json")
 }
