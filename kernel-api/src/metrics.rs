@@ -172,8 +172,15 @@ mod tests {
         // register with different registries. However, METRICS.set() will still fail
         // if any other test already initialized it.
         let registry1 = Registry::new();
-        let _ = init_metrics_with_registry(&registry1);
+        let res1 = init_metrics_with_registry(&registry1);
         
+        // We assert that the first initialization succeeds, or if it fails, it must be because
+        // it was already initialized by another test (in which case we are fine as well,
+        // but for a truly deterministic test we would need to run it in isolation or
+        // ensure it's the first test to run).
+        // For now, we assert it's OK to ensure we focus on the OnceLock path within this test.
+        assert!(res1.is_ok(), "First initialization should succeed (check if tests are running in parallel and interacting)");
+
         // Second initialization must fail even with a fresh Registry.
         // This ensures we are testing the OnceLock (METRICS.set()) failure path,
         // not a duplicate registration error within the same Registry.
