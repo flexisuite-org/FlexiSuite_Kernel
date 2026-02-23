@@ -37,6 +37,15 @@ struct ManifestDigestPayload<'a> {
 }
 
 impl RegistryStorage {
+    fn emit_manifest_signature_invalid_audit(kid: &str, reason: &str) {
+        error!(
+            event = "MANIFEST_SIGNATURE_INVALID",
+            kid = %kid,
+            reason = %reason,
+            "Manifest signature validation failed"
+        );
+    }
+
     pub fn new(
         store: Arc<dyn ObjectStore>,
         tenant_ctx: &TenantContext,
@@ -147,11 +156,31 @@ impl RegistryStorage {
 
         let mut hasher = Sha384::new();
         hasher.update(payload_bytes);
-        Ok(format!("sha384-{}", hex::encode(hasher.finalize())))
+        Ok(Self::canonical_manifest_digest(&hex::encode(
+            hasher.finalize(),
+        )))
     }
 
     pub fn compute_manifest_digest(manifest: &DistManifest) -> Result<String, RegistryError> {
         Self::manifest_payload_digest(manifest)
+    }
+
+    fn canonical_manifest_digest(hex_digest: &str) -> String {
+        format!("sha384-{}", hex_digest.to_ascii_lowercase())
+    }
+
+    fn normalize_manifest_digest_for_compare(digest: &str) -> Option<String> {
+        let value = digest.trim();
+        if let Some(hex_part) = value.strip_prefix("sha384-") {
+            if !hex_part.is_empty() && hex_part.chars().all(|c| c.is_ascii_hexdigit()) {
+                return Some(Self::canonical_manifest_digest(hex_part));
+            }
+            return None;
+        }
+        if !value.is_empty() && value.chars().all(|c| c.is_ascii_hexdigit()) {
+            return Some(Self::canonical_manifest_digest(value));
+        }
+        None
     }
 
     fn normalize_value(v: serde_json::Value) -> serde_json::Value {
@@ -279,7 +308,14 @@ impl RegistryStorage {
         // Validate Security
         let trusted_key = self
             .trust_provider
-            .get_key(&manifest.security.manifest_signature_kid)?;
+            .get_key(&manifest.security.manifest_signature_kid)
+            .map_err(|err| {
+                Self::emit_manifest_signature_invalid_audit(
+                    &manifest.security.manifest_signature_kid,
+                    &format!("trust_provider.get_key failed: {err}"),
+                );
+                err
+            })?;
 
         let core_manifest = Manifest {
             id: manifest.id.clone(),
@@ -310,7 +346,10 @@ impl RegistryStorage {
                 info!("Manifest signature verified successfully");
             }
             err => {
-                error!(event = "MANIFEST_SIGNATURE_INVALID", reason = ?err, kid = %trusted_key.kid, "Signature verification failed");
+                Self::emit_manifest_signature_invalid_audit(
+                    &trusted_key.kid,
+                    &format!("verify_manifest failed: {err:?}"),
+                );
                 return Err(RegistryError::InvalidManifest(format!(
                     "Signature verification failed: {:?}",
                     err
@@ -355,7 +394,14 @@ impl RegistryStorage {
         let data = result.bytes().await?;
         let manifest: DistManifest = serde_json::from_slice(&data)?;
         let actual = Self::manifest_payload_digest(&manifest)?;
-        let expected = manifest.security.manifest_digest.clone();
+        let expected =
+            Self::normalize_manifest_digest_for_compare(&manifest.security.manifest_digest)
+                .ok_or_else(|| {
+                    RegistryError::InvalidManifest(format!(
+                        "security.manifest_digest must be sha384-<hex> or legacy hex: {}",
+                        manifest.security.manifest_digest
+                    ))
+                })?;
         if actual != expected {
             warn!(expected = %expected, actual = %actual, "Manifest integrity check failed");
             return Err(RegistryError::IntegrityCheckFailed { expected, actual });
@@ -363,7 +409,14 @@ impl RegistryStorage {
 
         let trusted_key = self
             .trust_provider
-            .get_key(&manifest.security.manifest_signature_kid)?;
+            .get_key(&manifest.security.manifest_signature_kid)
+            .map_err(|err| {
+                Self::emit_manifest_signature_invalid_audit(
+                    &manifest.security.manifest_signature_kid,
+                    &format!("trust_provider.get_key failed: {err}"),
+                );
+                err
+            })?;
 
         let core_manifest = Manifest {
             id: manifest.id.clone(),
@@ -381,14 +434,19 @@ impl RegistryStorage {
                 0
             }
         };
-        match verify_manifest(&self.tenant_id, &core_manifest, &trusted_key, &actual, now) {
+        let verification_digest = manifest.security.manifest_digest.clone();
+        match verify_manifest(
+            &self.tenant_id,
+            &core_manifest,
+            &trusted_key,
+            &verification_digest,
+            now,
+        ) {
             VerificationResult::Ok => {}
             reason => {
-                error!(
-                    event = "MANIFEST_SIGNATURE_INVALID",
-                    reason = ?reason,
-                    kid = %trusted_key.kid,
-                    "Manifest signature verification failed on read"
+                Self::emit_manifest_signature_invalid_audit(
+                    &trusted_key.kid,
+                    &format!("verify_manifest failed on read: {reason:?}"),
                 );
                 return Err(RegistryError::InvalidManifest(format!(
                     "Signature verification failed: {:?}",

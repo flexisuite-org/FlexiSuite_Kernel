@@ -23,10 +23,17 @@ mod tests {
 
         // Digest to sign
         let digest_123 = "sha256-123";
-        let _signature_123_active =
+        let signature_123_active =
             hex::encode(signing_key_active.sign(digest_123.as_bytes()).to_bytes());
         let signature_123_revoked =
             hex::encode(signing_key_revoked.sign(digest_123.as_bytes()).to_bytes());
+
+        let manifest_active_123 = Manifest {
+            id: "pkg-a-active".to_string(),
+            digest: digest_123.to_string(),
+            signature: signature_123_active,
+            kid: "active".to_string(),
+        };
 
         let manifest_revoked = Manifest {
             id: "pkg-a".to_string(),
@@ -133,6 +140,18 @@ mod tests {
             VerificationResult::KeyRevoked
         ));
 
+        // Active key and matching digest/signature -> Ok
+        assert!(matches!(
+            verify_manifest(
+                "tenant_test",
+                &manifest_active_123,
+                &key_active,
+                digest_123,
+                now
+            ),
+            VerificationResult::Ok
+        ));
+
         // Test Digest Mismatch (Contract: Mandatory check)
         // Even if signature is valid for "sha256-456", if expected digest is different, fail digest match.
         // manifest_ok has digest "sha256-456".
@@ -204,6 +223,20 @@ mod tests {
                 "tenant_test",
                 &manifest_tampered,
                 &key_active,
+                "sha256-456",
+                now
+            ),
+            VerificationResult::SignatureInvalid
+        ));
+
+        // Public key decode failure must also be treated as SignatureInvalid.
+        let mut key_invalid_pubkey = key_active.clone();
+        key_invalid_pubkey.public_key = "not_valid_hex!!!".to_string();
+        assert!(matches!(
+            verify_manifest(
+                "tenant_test",
+                &manifest_ok,
+                &key_invalid_pubkey,
                 "sha256-456",
                 now
             ),

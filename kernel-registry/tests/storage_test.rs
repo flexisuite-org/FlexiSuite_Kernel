@@ -1,7 +1,9 @@
 // ... imports ...
 use ed25519_dalek::{Signer, SigningKey};
 use kernel_core::auth::{TenantContext, TenantId};
-use kernel_core::supplychain::{KeyStatus, TrustedKey};
+use kernel_core::supplychain::{
+    CLOCK_DRIFT_TOLERANCE_SECS, KeyStatus, RETIRED_KEY_GRACE_PERIOD_SECS, TrustedKey,
+};
 use kernel_registry::error::RegistryError;
 use kernel_registry::model::{Dependencies, DistManifest, Kind, Route, Security};
 use kernel_registry::storage::RegistryStorage;
@@ -191,6 +193,36 @@ async fn test_save_and_get_manifest() {
         retrieved.security.manifest_digest,
         compute_digest(&manifest)
     );
+}
+
+#[tokio::test]
+async fn test_get_manifest_accepts_legacy_raw_hex_digest() {
+    let store = Arc::new(InMemory::new());
+    let (registry, signing_key, kid) = setup_registry_with_keys(store.clone());
+
+    let mut manifest = test_manifest("app_legacy_digest", "1.0.0");
+    manifest.security.manifest_signature_kid = kid;
+    let prefixed_digest = compute_digest(&manifest);
+    let legacy_digest = prefixed_digest
+        .strip_prefix("sha384-")
+        .expect("computed digest should be sha384-prefixed")
+        .to_string();
+    manifest.security.manifest_digest = legacy_digest.clone();
+    manifest.security.manifest_signature =
+        hex::encode(signing_key.sign(legacy_digest.as_bytes()).to_bytes());
+
+    let path = registry.manifest_path(&manifest.id, &manifest.version);
+    let data = serde_json::to_vec(&manifest).expect("serialize legacy manifest");
+    store
+        .put(&path, data.into())
+        .await
+        .expect("store legacy manifest");
+
+    let retrieved = registry
+        .get_manifest(&manifest.id, &manifest.version)
+        .await
+        .expect("legacy digest format should still be readable");
+    assert_eq!(retrieved.security.manifest_digest, legacy_digest);
 }
 
 #[tokio::test]
@@ -574,9 +606,15 @@ async fn test_save_manifest_rejects_revoked_key() {
 #[tokio::test]
 async fn test_save_manifest_rejects_retired_out_of_window() {
     let now = unix_now();
+    let retired_out_of_window = now.saturating_sub(RETIRED_KEY_GRACE_PERIOD_SECS + 1);
     let store = Arc::new(InMemory::new());
-    let (registry, signing_key, kid) =
-        setup_registry_with_key_status(store, KeyStatus::Retired, Some(now - 172_800), None, None);
+    let (registry, signing_key, kid) = setup_registry_with_key_status(
+        store,
+        KeyStatus::Retired,
+        Some(retired_out_of_window),
+        None,
+        None,
+    );
     let mut manifest = test_manifest("app_retired_old", "1.0.0");
     manifest.security.manifest_signature_kid = kid;
     let digest = compute_digest(&manifest);
@@ -596,9 +634,15 @@ async fn test_save_manifest_rejects_retired_out_of_window() {
 #[tokio::test]
 async fn test_save_manifest_accepts_retired_in_window() {
     let now = unix_now();
+    let retired_in_window = now.saturating_sub(RETIRED_KEY_GRACE_PERIOD_SECS / 2);
     let store = Arc::new(InMemory::new());
-    let (registry, signing_key, kid) =
-        setup_registry_with_key_status(store, KeyStatus::Retired, Some(now - 10), None, None);
+    let (registry, signing_key, kid) = setup_registry_with_key_status(
+        store,
+        KeyStatus::Retired,
+        Some(retired_in_window),
+        None,
+        None,
+    );
     let mut manifest = test_manifest("app_retired_ok", "1.0.0");
     manifest.security.manifest_signature_kid = kid;
     let digest = compute_digest(&manifest);
@@ -616,9 +660,15 @@ async fn test_save_manifest_accepts_retired_in_window() {
 #[tokio::test]
 async fn test_save_manifest_rejects_key_not_yet_valid() {
     let now = unix_now();
+    let not_yet_valid_after_drift = now.saturating_add(CLOCK_DRIFT_TOLERANCE_SECS + 1);
     let store = Arc::new(InMemory::new());
-    let (registry, signing_key, kid) =
-        setup_registry_with_key_status(store, KeyStatus::Active, None, Some(now + 3_600), None);
+    let (registry, signing_key, kid) = setup_registry_with_key_status(
+        store,
+        KeyStatus::Active,
+        None,
+        Some(not_yet_valid_after_drift),
+        None,
+    );
     let mut manifest = test_manifest("app_not_yet_valid", "1.0.0");
     manifest.security.manifest_signature_kid = kid;
     let digest = compute_digest(&manifest);
@@ -636,9 +686,15 @@ async fn test_save_manifest_rejects_key_not_yet_valid() {
 #[tokio::test]
 async fn test_save_manifest_rejects_key_expired() {
     let now = unix_now();
+    let expired_before_drift_window = now.saturating_sub(CLOCK_DRIFT_TOLERANCE_SECS + 1);
     let store = Arc::new(InMemory::new());
-    let (registry, signing_key, kid) =
-        setup_registry_with_key_status(store, KeyStatus::Active, None, None, Some(now - 3_600));
+    let (registry, signing_key, kid) = setup_registry_with_key_status(
+        store,
+        KeyStatus::Active,
+        None,
+        None,
+        Some(expired_before_drift_window),
+    );
     let mut manifest = test_manifest("app_expired", "1.0.0");
     manifest.security.manifest_signature_kid = kid;
     let digest = compute_digest(&manifest);
@@ -679,11 +735,12 @@ async fn test_get_manifest_rejects_revoked_key() {
 #[tokio::test]
 async fn test_get_manifest_rejects_retired_out_of_window() {
     let now = unix_now();
+    let retired_out_of_window = now.saturating_sub(RETIRED_KEY_GRACE_PERIOD_SECS + 1);
     let store = Arc::new(InMemory::new());
     let (registry, signing_key, kid) = setup_registry_with_key_status(
         store.clone(),
         KeyStatus::Retired,
-        Some(now - 172_800),
+        Some(retired_out_of_window),
         None,
         None,
     );
@@ -710,9 +767,15 @@ async fn test_get_manifest_rejects_retired_out_of_window() {
 #[tokio::test]
 async fn test_get_manifest_accepts_retired_in_window() {
     let now = unix_now();
+    let retired_in_window = now.saturating_sub(RETIRED_KEY_GRACE_PERIOD_SECS / 2);
     let store = Arc::new(InMemory::new());
-    let (registry, signing_key, kid) =
-        setup_registry_with_key_status(store, KeyStatus::Retired, Some(now - 10), None, None);
+    let (registry, signing_key, kid) = setup_registry_with_key_status(
+        store,
+        KeyStatus::Retired,
+        Some(retired_in_window),
+        None,
+        None,
+    );
     let mut manifest = test_manifest("app_get_retired_ok", "1.0.0");
     manifest.security.manifest_signature_kid = kid;
     let digest = compute_digest(&manifest);
@@ -735,9 +798,15 @@ async fn test_get_manifest_accepts_retired_in_window() {
 #[tokio::test]
 async fn test_get_manifest_rejects_key_not_yet_valid() {
     let now = unix_now();
+    let not_yet_valid_after_drift = now.saturating_add(CLOCK_DRIFT_TOLERANCE_SECS + 1);
     let store = Arc::new(InMemory::new());
-    let (registry, signing_key, kid) =
-        setup_registry_with_key_status(store.clone(), KeyStatus::Active, None, Some(now + 3_600), None);
+    let (registry, signing_key, kid) = setup_registry_with_key_status(
+        store.clone(),
+        KeyStatus::Active,
+        None,
+        Some(not_yet_valid_after_drift),
+        None,
+    );
     let mut manifest = test_manifest("app_get_not_yet_valid", "1.0.0");
     manifest.security.manifest_signature_kid = kid;
     let digest = compute_digest(&manifest);
@@ -759,9 +828,15 @@ async fn test_get_manifest_rejects_key_not_yet_valid() {
 #[tokio::test]
 async fn test_get_manifest_rejects_key_expired() {
     let now = unix_now();
+    let expired_before_drift_window = now.saturating_sub(CLOCK_DRIFT_TOLERANCE_SECS + 1);
     let store = Arc::new(InMemory::new());
-    let (registry, signing_key, kid) =
-        setup_registry_with_key_status(store.clone(), KeyStatus::Active, None, None, Some(now - 3_600));
+    let (registry, signing_key, kid) = setup_registry_with_key_status(
+        store.clone(),
+        KeyStatus::Active,
+        None,
+        None,
+        Some(expired_before_drift_window),
+    );
     let mut manifest = test_manifest("app_get_expired", "1.0.0");
     manifest.security.manifest_signature_kid = kid;
     let digest = compute_digest(&manifest);

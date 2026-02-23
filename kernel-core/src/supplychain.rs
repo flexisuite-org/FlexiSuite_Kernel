@@ -4,6 +4,27 @@ use tracing::warn;
 pub const RETIRED_KEY_GRACE_PERIOD_SECS: u64 = 86_400;
 pub const CLOCK_DRIFT_TOLERANCE_SECS: u64 = 30;
 
+fn normalize_manifest_digest_for_compare(value: &str) -> Option<String> {
+    let digest = value.trim();
+    if let Some(hex_part) = digest.strip_prefix("sha256-") {
+        if !hex_part.is_empty() && hex_part.chars().all(|c| c.is_ascii_hexdigit()) {
+            return Some(format!("sha256-{}", hex_part.to_ascii_lowercase()));
+        }
+        return None;
+    }
+    if let Some(hex_part) = digest.strip_prefix("sha384-") {
+        if !hex_part.is_empty() && hex_part.chars().all(|c| c.is_ascii_hexdigit()) {
+            return Some(format!("sha384-{}", hex_part.to_ascii_lowercase()));
+        }
+        return None;
+    }
+    if !digest.is_empty() && digest.chars().all(|c| c.is_ascii_hexdigit()) {
+        // Backward compatibility: legacy manifests may persist raw SHA-384 hex.
+        return Some(format!("sha384-{}", digest.to_ascii_lowercase()));
+    }
+    None
+}
+
 #[derive(Debug, Clone)]
 pub struct Manifest {
     pub id: String,
@@ -73,14 +94,22 @@ pub fn verify_manifest(
         );
     };
 
-    let has_valid_prefix =
-        manifest.digest.starts_with("sha256-") || manifest.digest.starts_with("sha384-");
-    if !has_valid_prefix {
-        log_failure("MANIFEST_DIGEST_FORMAT_INVALID");
-        return VerificationResult::DigestMismatch;
-    }
-
-    if manifest.digest != expected_artifact_digest {
+    let normalized_manifest_digest = match normalize_manifest_digest_for_compare(&manifest.digest) {
+        Some(v) => v,
+        None => {
+            log_failure("MANIFEST_DIGEST_FORMAT_INVALID");
+            return VerificationResult::DigestMismatch;
+        }
+    };
+    let normalized_expected_digest =
+        match normalize_manifest_digest_for_compare(expected_artifact_digest) {
+            Some(v) => v,
+            None => {
+                log_failure("MANIFEST_DIGEST_FORMAT_INVALID");
+                return VerificationResult::DigestMismatch;
+            }
+        };
+    if normalized_manifest_digest != normalized_expected_digest {
         log_failure("MANIFEST_DIGEST_MISMATCH");
         return VerificationResult::DigestMismatch;
     }
