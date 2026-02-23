@@ -1,11 +1,7 @@
 use ring::signature;
 use tracing::warn;
 
-/// REQ-SUPPLYCHAIN-RETIRED-KEY-GRACE:
-/// Retired key signatures are accepted for up to 24 hours after `retired_at`.
 pub const RETIRED_KEY_GRACE_PERIOD_SECS: u64 = 86_400;
-/// REQ-SUPPLYCHAIN-CLOCK-DRIFT-TOLERANCE:
-/// Allow small clock drift when evaluating key validity windows.
 pub const CLOCK_DRIFT_TOLERANCE_SECS: u64 = 30;
 
 #[derive(Debug, Clone)]
@@ -38,7 +34,7 @@ pub enum VerificationResult {
     BreakGlassScopeMismatch,
     BreakGlassDisabled,
     BreakGlassScopeMissing,
-    KeyMismatch, // New: explicit triage
+    KeyMismatch,
 }
 
 pub struct BreakGlassContext {
@@ -59,7 +55,6 @@ pub struct TrustedKey {
     pub not_after: Option<u64>,
 }
 
-/// Verify manifest signature and key status.
 pub fn verify_manifest(
     manifest: &Manifest,
     trusted_key: &TrustedKey,
@@ -76,31 +71,23 @@ pub fn verify_manifest(
         );
     };
 
-    // 1. Digest Existence/Format Check
-    // Spec: Must use "-" prefix (e.g., sha256-..., sha384-...)
-    // REQ-SUPPLYCHAIN-DIGEST-FORMAT
     let has_valid_prefix =
         manifest.digest.starts_with("sha256-") || manifest.digest.starts_with("sha384-");
-
     if !has_valid_prefix {
         log_failure("MANIFEST_DIGEST_FORMAT_INVALID");
-        return VerificationResult::DigestMismatch; // Malformed or unsupported digest
+        return VerificationResult::DigestMismatch;
     }
 
-    // 1b. Artifact Digest Verification (Contract: Manifest must match artifact)
-    // Enforce mandatory check as per REQ-SUPPLYCHAIN-DIGEST-MATCH
     if manifest.digest != expected_artifact_digest {
         log_failure("MANIFEST_DIGEST_MISMATCH");
         return VerificationResult::DigestMismatch;
     }
 
-    // 2. Key ID Match (Contract: Key used must match Trusted Key)
     if manifest.kid != trusted_key.kid {
         log_failure("MANIFEST_KEY_MISMATCH");
         return VerificationResult::KeyMismatch;
     }
 
-    // 2b. Key Status Check
     match trusted_key.status {
         KeyStatus::Revoked => {
             log_failure("MANIFEST_KEY_REVOKED");
@@ -112,20 +99,15 @@ pub fn verify_manifest(
                     log_failure("MANIFEST_KEY_RETIRED_OUT_OF_WINDOW");
                     return VerificationResult::KeyRetiredOutOfWindow;
                 }
-                // In window -> Proceed to signature check
             } else {
-                // Retired but no timestamp -> Assume out
                 log_failure("MANIFEST_KEY_RETIRED_OUT_OF_WINDOW");
                 return VerificationResult::KeyRetiredOutOfWindow;
             }
         }
-        KeyStatus::Next => {
-            // Verification allowed for Next keys (during rotation preparation)
-        }
+        KeyStatus::Next => {}
         KeyStatus::Active => {}
     }
 
-    // 2c. Validity Period Check with Tolerance (30s)
     if let Some(nbf) = trusted_key.not_before {
         if now.saturating_add(CLOCK_DRIFT_TOLERANCE_SECS) < nbf {
             log_failure("MANIFEST_KEY_NOT_YET_VALID");
@@ -144,7 +126,6 @@ pub fn verify_manifest(
         return VerificationResult::SignatureAlgorithmMismatch;
     }
 
-    // 3. Signature Verification (Real) via ring
     let signature_bytes = match hex::decode(&manifest.signature) {
         Ok(bytes) => bytes,
         Err(e) => {
@@ -178,8 +159,6 @@ pub fn verify_manifest(
     };
 
     let peer_public_key = signature::UnparsedPublicKey::new(&signature::ED25519, pub_key_bytes);
-
-    // Verify signature over the UTF-8 bytes of the digest string
     match peer_public_key.verify(manifest.digest.as_bytes(), &signature_bytes) {
         Ok(()) => VerificationResult::Ok,
         Err(e) => {
@@ -205,12 +184,10 @@ pub fn verify_break_glass(
     if !ctx.enabled {
         return VerificationResult::BreakGlassDisabled;
     }
-    // Strict Expiry: now >= expiry means expired
     if now >= ctx.expiry_ts {
         return VerificationResult::BreakGlassExpired;
     }
 
-    // Strict Scope: Global bypass is FORBIDDEN. Scopes must be present.
     match &ctx.scope_tenant_id {
         Some(scope_tid) => {
             if scope_tid != tenant_id {
