@@ -5,8 +5,8 @@ use base64::prelude::BASE64_URL_SAFE_NO_PAD;
 use bytes::Bytes;
 use ed25519_dalek::{Signature, VerifyingKey};
 use kernel_core::auth::TenantContext;
-use object_store::path::Path;
 use object_store::ObjectStore;
+use object_store::path::Path;
 use serde::Serialize;
 use sha2::{Digest, Sha384};
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -135,7 +135,7 @@ pub fn reload_trust_root_keys() {
         .iter()
         .filter(|k| !new_map.contains_key(*k))
         .collect();
-    
+
     // Detect rotated keys (same KID, different value)
     let rotated: Vec<_> = new_keys
         .iter()

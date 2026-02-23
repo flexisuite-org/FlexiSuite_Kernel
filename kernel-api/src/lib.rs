@@ -2,7 +2,6 @@ use axum::{
     Json, Router,
     extract::{Extension, Path},
     http::{HeaderMap, HeaderName, HeaderValue, StatusCode, header},
-
     middleware::{from_fn, from_fn_with_state},
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -23,11 +22,11 @@ use crate::middleware::{
 
 pub mod auth;
 pub mod diagnostics;
+pub mod error;
 pub mod health;
 pub mod metrics;
 pub mod middleware;
 pub mod profile;
-pub mod error;
 
 #[derive(Serialize)]
 pub struct TestWriteResponse {
@@ -305,5 +304,3 @@ mod security_header_tests {
         assert_security_headers(response).await;
     }
 }
-
-

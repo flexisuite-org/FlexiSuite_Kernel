@@ -1,15 +1,15 @@
+use crate::auth::SystemTenantContext;
+use crate::middleware::{MiddlewareState, PingStatus};
 use axum::{
+    Json,
     extract::Extension,
     http::StatusCode,
     response::{IntoResponse, Response},
-    Json,
 };
 use sea_orm::DatabaseConnection;
+use serde::Serialize;
 use std::sync::Arc;
 use std::time::Duration;
-use serde::Serialize;
-use crate::middleware::{MiddlewareState, PingStatus};
-use crate::auth::SystemTenantContext;
 
 pub async fn liveness() -> StatusCode {
     StatusCode::OK
@@ -56,7 +56,10 @@ pub async fn readiness(
             Health::Down
         }
         Err(_) => {
-            tracing::error!("Readiness check timed out after {}s (database)", db_timeout.as_secs());
+            tracing::error!(
+                "Readiness check timed out after {}s (database)",
+                db_timeout.as_secs()
+            );
             Health::Down
         }
     };
@@ -69,7 +72,10 @@ pub async fn readiness(
             Health::Down
         }
         Err(_) => {
-            tracing::error!("Readiness check timed out after {}s (redis)", redis_timeout.as_secs());
+            tracing::error!(
+                "Readiness check timed out after {}s (redis)",
+                redis_timeout.as_secs()
+            );
             Health::Down
         }
     };
@@ -81,7 +87,11 @@ pub async fn readiness(
     };
 
     let body = ReadinessResponse {
-        status: if status_code == StatusCode::OK { "healthy".to_string() } else { "unhealthy".to_string() },
+        status: if status_code == StatusCode::OK {
+            "healthy".to_string()
+        } else {
+            "unhealthy".to_string()
+        },
         checks: Checks {
             database: db_health,
             redis: redis_health,
@@ -94,8 +104,10 @@ pub async fn readiness(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::middleware::{MiddlewareConfig, InMemoryIdempotencyStore, InMemoryActionStore, InMemoryQuotaStore};
-    use sea_orm::{MockDatabase, DatabaseBackend};
+    use crate::middleware::{
+        InMemoryActionStore, InMemoryIdempotencyStore, InMemoryQuotaStore, MiddlewareConfig,
+    };
+    use sea_orm::{DatabaseBackend, MockDatabase};
 
     #[tokio::test]
     async fn test_liveness() {
@@ -105,8 +117,7 @@ mod tests {
     #[tokio::test]
     async fn test_readiness_structure() {
         // MockDatabase::ping() defaults to OK (returns Ok(()))
-        let db = MockDatabase::new(DatabaseBackend::Postgres)
-            .into_connection();
+        let db = MockDatabase::new(DatabaseBackend::Postgres).into_connection();
         let db = Arc::new(db);
 
         let config = MiddlewareConfig::default();
@@ -118,12 +129,14 @@ mod tests {
         );
 
         let response = readiness(Extension(state), Extension(db)).await;
-        
+
         // MockDatabase::ping() succeeds by default in this environment,
         // and Redis is Degraded. Both mean the service is READY (200 OK).
         assert_eq!(response.status(), StatusCode::OK);
 
-        let body_bytes = axum::body::to_bytes(response.into_body(), 1024).await.unwrap();
+        let body_bytes = axum::body::to_bytes(response.into_body(), 1024)
+            .await
+            .unwrap();
         let body: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
 
         assert_eq!(body["status"], "healthy");

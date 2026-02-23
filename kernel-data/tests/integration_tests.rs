@@ -17,7 +17,7 @@ use kernel_data::connection::{RawConnection, TenantScoped, with_tenant_tx};
 use kernel_data::entities::entity_record;
 use kernel_data::repository::TenantRepository;
 use sea_orm::{
-    ConnectionTrait, Database, DatabaseConnection, DbBackend, Statement, TransactionTrait, Set,
+    ConnectionTrait, Database, DatabaseConnection, DbBackend, Set, Statement, TransactionTrait,
 };
 use std::sync::OnceLock;
 use testcontainers::{RunnableImage, clients};
@@ -91,7 +91,11 @@ async fn test_tenant_isolation_rls() {
         .query_all_check("SELECT 1 FROM pg_extension WHERE extname = 'pgcrypto'")
         .await
         .expect("Failed to query extensions");
-    assert_eq!(pgcrypto_exists.len(), 1, "pgcrypto extension should be enabled");
+    assert_eq!(
+        pgcrypto_exists.len(),
+        1,
+        "pgcrypto extension should be enabled"
+    );
 
     // 5. Initialize Keys (HMAC)
     TestAuth::init_keys(&db)
@@ -426,7 +430,7 @@ async fn test_authorize_rejects_revoked_key() {
 
     let tenant_id = TenantId::new("revocation-tenant").unwrap();
     let ctx = TenantContext::new(tenant_id.clone(), Some(UserId::new("user-1").unwrap()));
-    
+
     // Generate two tokens while the key is Active
     let pre_revoke_token = TestAuth::generate_tenant_token(&db, &tenant_id)
         .await
@@ -444,16 +448,16 @@ async fn test_authorize_rejects_revoked_key() {
         .await
         .expect("Failed to revoke active key");
 
-    // Use the second pre-generated token; authorize_tenant should now reject it 
+    // Use the second pre-generated token; authorize_tenant should now reject it
     // because the key it references (KID) is now Revoked.
 
     // NOTE: This test verifies functional correctness (security contract).
     // Latency SLO (p95 < 60s) must be verified via load testing (see ops/slo_profile.yaml).
-    let second = with_tenant_tx(&db, &ctx, &pre_revoke_token2, |_| Box::pin(async { Ok(()) })).await;
-    assert!(
-        second.is_err(),
-        "Token usage with revoked key must fail"
-    );
+    let second = with_tenant_tx(&db, &ctx, &pre_revoke_token2, |_| {
+        Box::pin(async { Ok(()) })
+    })
+    .await;
+    assert!(second.is_err(), "Token usage with revoked key must fail");
     let err = second.unwrap_err().to_string();
 
     // Error message is defined in migration m20250521_000001_key_management.rs

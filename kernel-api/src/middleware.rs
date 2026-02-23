@@ -886,10 +886,7 @@ impl IdempotencyStore for RedisIdempotencyStore {
     /// and check backend availability.
     async fn ping(&self) -> Result<PingStatus, IdempotencyStoreError> {
         let mut conn = self.manager.clone();
-        match redis::cmd("PING")
-            .query_async::<String>(&mut conn)
-            .await
-        {
+        match redis::cmd("PING").query_async::<String>(&mut conn).await {
             Ok(_) => Ok(PingStatus::Ok),
             Err(e) => {
                 error!("Redis ping error: {}", e);
@@ -1560,10 +1557,7 @@ pub async fn get_action(
 }
 
 #[instrument(skip_all, fields(tenant_id, method, path))]
-pub async fn idempotency_middleware(
-    req: Request<Body>,
-    next: Next,
-) -> Result<Response, Response> {
+pub async fn idempotency_middleware(req: Request<Body>, next: Next) -> Result<Response, Response> {
     let (parts, body) = req.into_parts();
     let method = parts.method.clone();
     let request_id = parts
@@ -1612,9 +1606,14 @@ pub async fn idempotency_middleware(
         }
     };
 
-    let tenant_ctx = parts.extensions.get::<TenantContext>().ok_or(
-        build_json_error_response("Unauthorized", StatusCode::UNAUTHORIZED, request_id.clone()),
-    )?;
+    let tenant_ctx = parts
+        .extensions
+        .get::<TenantContext>()
+        .ok_or(build_json_error_response(
+            "Unauthorized",
+            StatusCode::UNAUTHORIZED,
+            request_id.clone(),
+        ))?;
 
     tracing::Span::current().record("tenant_id", &tenant_ctx.tenant_id().to_string());
     tracing::Span::current().record("method", method.as_str());
@@ -1636,15 +1635,16 @@ pub async fn idempotency_middleware(
     // Note: This forces buffering. For streams > 10MB, Idempotency is not supported by this middleware.
 
     // Check Store
-    let state = parts
-        .extensions
-        .get::<MiddlewareState>()
-        .cloned()
-        .ok_or(build_json_error_response(
-            "Internal Server Error",
-            StatusCode::INTERNAL_SERVER_ERROR,
-            request_id.clone(),
-        ))?;
+    let state =
+        parts
+            .extensions
+            .get::<MiddlewareState>()
+            .cloned()
+            .ok_or(build_json_error_response(
+                "Internal Server Error",
+                StatusCode::INTERNAL_SERVER_ERROR,
+                request_id.clone(),
+            ))?;
 
     let body_bytes = match to_bytes(body, state.config.max_body_size).await {
         Ok(b) => b,
@@ -2054,8 +2054,6 @@ pub fn violation_to_response(v: &QuotaViolation, request_id: Option<String>) -> 
 
     res
 }
-
-
 
 #[cfg(test)]
 mod tests {
