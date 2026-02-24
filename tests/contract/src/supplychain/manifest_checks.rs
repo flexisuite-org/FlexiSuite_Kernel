@@ -6,6 +6,7 @@ mod tests {
     };
 
     #[test]
+    #[cfg(feature = "test-utils")]
     fn test_manifest_signature_trust_root() {
         let manifest_revoked = Manifest {
             id: "pkg-a".to_string(),
