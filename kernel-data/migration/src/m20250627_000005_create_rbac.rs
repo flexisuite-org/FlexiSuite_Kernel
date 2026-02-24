@@ -18,7 +18,8 @@ impl MigrationTrait for Migration {
                 description TEXT NOT NULL,
                 created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                 updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                PRIMARY KEY (id, tenant_id)
+                PRIMARY KEY (id, tenant_id),
+                UNIQUE (tenant_id, name)
             );
             "#,
         ).await?;
@@ -35,7 +36,8 @@ impl MigrationTrait for Migration {
                 created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                 updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                 PRIMARY KEY (id, tenant_id),
-                FOREIGN KEY (role_id, tenant_id) REFERENCES flexi.roles(id, tenant_id) ON DELETE CASCADE
+                FOREIGN KEY (role_id, tenant_id) REFERENCES flexi.roles(id, tenant_id) ON DELETE CASCADE,
+                UNIQUE (tenant_id, role_id, resource, action)
             );
             "#,
         ).await?;
@@ -50,7 +52,8 @@ impl MigrationTrait for Migration {
                 description TEXT NOT NULL,
                 created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                 updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                PRIMARY KEY (id, tenant_id)
+                PRIMARY KEY (id, tenant_id),
+                UNIQUE (tenant_id, name)
             );
             "#,
         ).await?;
@@ -101,14 +104,21 @@ impl MigrationTrait for Migration {
                 CREATE POLICY tenant_isolation ON flexi.{table}
                     FOR ALL
                     TO PUBLIC
-                    USING (tenant_id = flexi.authorized_tenant_id());
+                    USING (tenant_id = flexi.authorized_tenant_id())
+                    WITH CHECK (tenant_id = flexi.authorized_tenant_id());
                 "#
             )).await?;
         }
 
         // Add Indexes
-        // Roles: tenant_id, name (for lookup)
-        db.execute_unprepared("CREATE INDEX IF NOT EXISTS idx_roles_tenant_name ON flexi.roles (tenant_id, name)").await?;
+        // Roles: tenant_id, name (for lookup) - covered by UNIQUE constraint but adding explicit index doesn't hurt read perf,
+        // however UNIQUE constraint already creates an index implicitly in Postgres.
+        // We can skip explicit index creation for (tenant_id, name) if unique constraint exists.
+        // But let's keep the non-unique index if we want it for specific query patterns or just rely on the unique constraint.
+        // The previous migration had explicit CREATE INDEX. The review suggested adjusting or removing it.
+        // "adjust or remove the existing non-unique index referenced in the migration to avoid redundancy/conflict."
+        // We will remove idx_roles_tenant_name as it is redundant with the UNIQUE constraint on (tenant_id, name).
+
         // Permissions: tenant_id, role_id (for fetch)
         db.execute_unprepared("CREATE INDEX IF NOT EXISTS idx_permissions_tenant_role ON flexi.permissions (tenant_id, role_id)").await?;
         // Group Members: tenant_id, user_id (to find user's groups)
@@ -124,7 +134,7 @@ impl MigrationTrait for Migration {
 
         let tables = ["group_roles", "group_members", "groups", "permissions", "roles"];
         for table in tables {
-            db.execute_unprepared(&format!("DROP TABLE IF EXISTS flexi.{table}")).await?;
+            db.execute_unprepared(&format!("DROP TABLE IF EXISTS flexi.{table} CASCADE")).await?;
         }
 
         Ok(())

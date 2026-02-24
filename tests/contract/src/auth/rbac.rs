@@ -1,6 +1,6 @@
 use axum::{body::Body, http::{Request, StatusCode}};
 use kernel_api::auth::{TenantId, UserId, TenantContext};
-use kernel_api::middleware::{load_permissions_middleware, require_permission};
+use kernel_api::middleware::{load_permissions_middleware, require_permission, BearerToken};
 use kernel_api::entities::{permission};
 use sea_orm::{
     DatabaseBackend, MockDatabase,
@@ -55,6 +55,7 @@ async fn test_rbac_middleware_allow() {
     let app = axum::Router::new()
         .route("/protected", axum::routing::get(|| async { "Allowed" }).layer(axum::middleware::from_fn(|req, next| require_permission("test:read", req, next))))
         .layer(axum::middleware::from_fn(load_permissions_middleware))
+        .layer(axum::Extension(BearerToken(token.to_string())))
         .layer(axum::Extension(TenantContext::new(
             TenantId::new(tenant_id).unwrap(),
             Some(UserId::new(user_id).unwrap()),
@@ -98,6 +99,7 @@ async fn test_rbac_middleware_deny() {
     let app = axum::Router::new()
         .route("/protected", axum::routing::get(|| async { "Allowed" }).layer(axum::middleware::from_fn(|req, next| require_permission("test:read", req, next))))
         .layer(axum::middleware::from_fn(load_permissions_middleware))
+        .layer(axum::Extension(BearerToken(token.to_string())))
         .layer(axum::Extension(TenantContext::new(
             TenantId::new(tenant_id).unwrap(),
             Some(UserId::new(user_id).unwrap()),

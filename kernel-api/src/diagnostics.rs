@@ -14,9 +14,10 @@ use kernel_data::{
     entities::{diagnostic_policy, diagnostic_report},
     with_tenant_tx,
 };
-use sea_orm::ActiveValue;
+use sea_orm::{ActiveValue, ConnectionTrait, DatabaseConnection, Statement, DbBackend};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
+use std::sync::Arc;
 
 /// Maximum allowed length for user-supplied string fields (error_code, trace_id, etc.)
 const MAX_STRING_LEN: usize = 256;
@@ -223,17 +224,22 @@ async fn query_diagnostic(
     }
 }
 
-/// Stub health check endpoint. Does not perform real service checks.
-async fn get_health() -> impl IntoResponse {
-    (
-        StatusCode::NOT_IMPLEMENTED,
-        Json(serde_json::json!({
-            "status": "not_implemented",
-            "message": "Health dependency checks are not implemented yet. Implement real probes before using this endpoint for availability decisions.",
-            "stub": true
-        })),
-    )
-        .into_response()
+/// Basic health check endpoint.
+/// Checks connectivity to the primary database.
+async fn get_health(Extension(db): Extension<Arc<DatabaseConnection>>) -> impl IntoResponse {
+    match db.execute(Statement::from_string(DbBackend::Postgres, "SELECT 1".to_owned())).await {
+        Ok(_) => (StatusCode::OK, Json(serde_json::json!({"status": "ok"}))).into_response(),
+        Err(e) => {
+            tracing::error!("Health check failed (DB): {}", e);
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({
+                    "status": "error",
+                    "details": "Database connectivity failed"
+                })),
+            ).into_response()
+        }
+    }
 }
 
 async fn get_policy(Extension(ctx): Extension<TenantContext>) -> impl IntoResponse {

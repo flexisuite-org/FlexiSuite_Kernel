@@ -10,9 +10,54 @@ pub use kernel_data::auth_context::{
 
 use serde::{Deserialize, Serialize};
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash, Copy)]
+pub struct RoleId(uuid::Uuid);
+
+impl From<uuid::Uuid> for RoleId {
+    fn from(id: uuid::Uuid) -> Self {
+        Self(id)
+    }
+}
+
+impl From<RoleId> for uuid::Uuid {
+    fn from(id: RoleId) -> Self {
+        id.0
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash, Copy)]
+pub struct PermissionId(uuid::Uuid);
+
+impl From<uuid::Uuid> for PermissionId {
+    fn from(id: uuid::Uuid) -> Self {
+        Self(id)
+    }
+}
+
+impl From<PermissionId> for uuid::Uuid {
+    fn from(id: PermissionId) -> Self {
+        id.0
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash, Copy)]
+pub struct GroupId(uuid::Uuid);
+
+impl From<uuid::Uuid> for GroupId {
+    fn from(id: uuid::Uuid) -> Self {
+        Self(id)
+    }
+}
+
+impl From<GroupId> for uuid::Uuid {
+    fn from(id: GroupId) -> Self {
+        id.0
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Role {
-    pub id: uuid::Uuid,
+    pub id: RoleId,
     pub tenant_id: TenantId,
     pub name: String,
     pub description: String,
@@ -22,9 +67,9 @@ pub struct Role {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Permission {
-    pub id: uuid::Uuid,
+    pub id: PermissionId,
     pub tenant_id: TenantId,
-    pub role_id: uuid::Uuid,
+    pub role_id: RoleId,
     pub resource: String,
     pub action: String,
     pub created_at: chrono::DateTime<chrono::Utc>,
@@ -33,7 +78,7 @@ pub struct Permission {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Group {
-    pub id: uuid::Uuid,
+    pub id: GroupId,
     pub tenant_id: TenantId,
     pub name: String,
     pub description: String,

@@ -21,13 +21,50 @@ use sea_orm::{DatabaseBackend, MockDatabase};
 use serde_json::Value;
 use tower::ServiceExt;
 
+use sea_orm::{MockExecResult, MockRow};
+
+fn default_mock_db() -> sea_orm::DatabaseConnection {
+    // Default mock that allows up to 20 successful authorizations and permission checks.
+    // This covers most integration tests that expect success.
+    // Tests expecting failure or specific DB behavior should use setup_app_with_db.
+    let mut exec_results = Vec::new();
+    let mut query_results: Vec<Vec<MockRow>> = Vec::new();
+
+    for _ in 0..20 {
+        // authorize_tenant
+        exec_results.push(MockExecResult {
+            last_insert_id: 0,
+            rows_affected: 1,
+        });
+        // get_user_permissions (empty list of permissions)
+        query_results.push(vec![]);
+    }
+
+    MockDatabase::new(DatabaseBackend::Postgres)
+        .append_exec_results(exec_results)
+        .append_query_results(query_results)
+        .into_connection()
+}
+
 pub async fn setup_app() -> axum::Router {
-    setup_app_with_config(MiddlewareConfig::default(), None).await
+    setup_app_with_db(default_mock_db()).await
+}
+
+pub async fn setup_app_with_db(db: sea_orm::DatabaseConnection) -> axum::Router {
+    setup_app_with_config_and_db(MiddlewareConfig::default(), None, db).await
 }
 
 pub async fn setup_app_with_config(
+    config: MiddlewareConfig,
+    store: Option<Arc<dyn IdempotencyStore>>,
+) -> axum::Router {
+    setup_app_with_config_and_db(config, store, default_mock_db()).await
+}
+
+pub async fn setup_app_with_config_and_db(
     mut config: MiddlewareConfig,
     store: Option<Arc<dyn IdempotencyStore>>,
+    db: sea_orm::DatabaseConnection,
 ) -> axum::Router {
     config.require_redis = false;
     let state = if let Some(s) = store {
@@ -42,8 +79,6 @@ pub async fn setup_app_with_config(
             .await
             .expect("middleware state")
     };
-
-    let db = MockDatabase::new(DatabaseBackend::Postgres).into_connection();
 
     let (app, _cleanup) = kernel_api::build_app_with_state(state, db.into());
     app

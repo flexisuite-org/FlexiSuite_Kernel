@@ -1,5 +1,5 @@
 use axum::{
-    extract::Request,
+    extract::{Extension, Request},
     http::StatusCode,
     middleware::Next,
     response::Response,
@@ -7,6 +7,7 @@ use axum::{
 use kernel_data::{RBACRepository, TenantContext, with_tenant_tx};
 use std::collections::HashSet;
 use tracing::{error, warn};
+use crate::middleware::BearerToken;
 
 #[derive(Clone, Debug)]
 pub struct UserPermissions(pub HashSet<String>);
@@ -18,6 +19,7 @@ impl UserPermissions {
 }
 
 pub async fn load_permissions_middleware(
+    Extension(token_ext): Extension<BearerToken>,
     mut req: Request,
     next: Next,
 ) -> Result<Response, StatusCode> {
@@ -46,20 +48,7 @@ pub async fn load_permissions_middleware(
         return Ok(next.run(req).await);
     }
 
-    // Extract the raw token from the Authorization header to pass to with_tenant_tx.
-    // This is required to establish the RLS session context properly.
-    let auth_header = req
-        .headers()
-        .get(axum::http::header::AUTHORIZATION)
-        .and_then(|h| h.to_str().ok())
-        .ok_or(StatusCode::UNAUTHORIZED)?;
-
-    let token = if let Some(t) = auth_header.strip_prefix("Bearer ") {
-        t
-    } else {
-        warn!("Invalid Authorization header format");
-        return Err(StatusCode::UNAUTHORIZED);
-    };
+    let token = &token_ext.0;
 
     // Execute within a tenant-scoped transaction to ensure RLS is active.
     // RBACRepository now demands a TenantScoped connection.

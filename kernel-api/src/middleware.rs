@@ -219,6 +219,9 @@ pub struct IdempotencyScopeKey {
     pub idempotency_key: String,
 }
 
+#[derive(Clone, Debug)]
+pub struct BearerToken(pub String);
+
 /// Abstract Store Trait to allow switching to Redis (REQ: Production Readiness)
 #[async_trait]
 pub trait IdempotencyStore: Send + Sync {
