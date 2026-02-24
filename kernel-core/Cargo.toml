@@ -28,6 +28,9 @@ chrono = { version = "0.4.43", features = ["serde"] }
 
 [dev-dependencies]
 kernel-data = { path = "../kernel-data", features = ["test-utils"] }
+ed25519-dalek = { workspace = true }
+hex = "0.4"
+rand = "0.8"
 
 [features]
 default = []
