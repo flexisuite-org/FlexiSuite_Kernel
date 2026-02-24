@@ -34,8 +34,11 @@ pub async fn load_permissions_middleware(
         .extensions()
         .get::<TenantContext>()
         .cloned()
-        .ok_or(StatusCode::UNAUTHORIZED)?;
+        .ok_or_else(|| {
+            StatusCode::UNAUTHORIZED
+        })?;
 
+<<<<<<< HEAD
     // Manually extract BearerToken to avoid 500 on missing extension
     let token_ext = req
         .extensions()
@@ -46,12 +49,16 @@ pub async fn load_permissions_middleware(
     // We need a DB connection to fetch permissions
     let db = match ctx.db() {
         Ok(db) => db,
+=======
+    match ctx.db() {
+        Ok(_) => { }
+>>>>>>> 2c0f4d2 (feat: Implement Row-Level Security (RLS) authorization for RBAC queries using `TenantContext` and enable `test-utils` for authentication-related testing.)
         Err(_) => {
-            warn!("Database connection missing in TenantContext");
             return Err(StatusCode::INTERNAL_SERVER_ERROR);
         }
     };
 
+<<<<<<< HEAD
     // Note: user_id existence is checked inside RBACRepository::get_user_permissions
     // via TenantContext, but we can fast-fail here if needed.
     if ctx.user_id().is_none() {
@@ -127,6 +134,29 @@ pub async fn load_permissions_middleware(
                 kernel_data::DataError::DbError(_) => error!("Failed to fetch permissions: Database error"),
                 _ => error!("Failed to fetch permissions: Internal error"),
             }
+=======
+    if ctx.user_id().is_none() {
+        req.extensions_mut()
+            .insert(UserPermissions(HashSet::new()));
+        return Ok(next.run(req).await);
+    }
+
+    // Generate a temporary tenant token for RLS authorization
+    let token = match kernel_core::auth::KeyManager::generate_tenant_token(&ctx, ctx.tenant_id()).await {
+        Ok(t) => t,
+        Err(e) => {
+            warn!("Failed to generate tenant token for RBAC: {}", e);
+            return Err(StatusCode::INTERNAL_SERVER_ERROR);
+        }
+    };
+
+    let ctx_with_token = ctx.with_token(token);
+
+    let permissions_list = match RBACRepository::get_user_permissions(&ctx_with_token).await {
+        Ok(perms) => perms,
+        Err(e) => {
+            warn!("Failed to fetch permissions: {}", e);
+>>>>>>> 2c0f4d2 (feat: Implement Row-Level Security (RLS) authorization for RBAC queries using `TenantContext` and enable `test-utils` for authentication-related testing.)
             return Err(StatusCode::INTERNAL_SERVER_ERROR);
         }
     };
