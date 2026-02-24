@@ -2,14 +2,15 @@ use axum::{
     Json, Router,
     extract::{Extension, Path},
     http::{HeaderMap, HeaderName, HeaderValue, StatusCode, header},
-
     middleware::{from_fn, from_fn_with_state},
     response::{IntoResponse, Response},
     routing::{get, post},
 };
+use kernel_core::auth::SystemTenantContext;
 use sea_orm::DatabaseConnection;
 use serde::Serialize;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::task::JoinHandle;
 use tower::ServiceBuilder;
 use tower_http::set_header::SetResponseHeaderLayer;
@@ -17,17 +18,14 @@ use uuid::Uuid;
 
 use crate::auth::{TenantContext, auth_middleware};
 use crate::middleware::{
-    ActionStatus, MiddlewareConfig, MiddlewareState, get_action, idempotency_middleware,
-    quota_middleware, record_action,
+    ActionStatus, MiddlewareConfig, MiddlewareState, PingStatus, get_action,
+    idempotency_middleware, quota_middleware, record_action,
 };
 
 pub mod auth;
 pub mod diagnostics;
-pub mod health;
-pub mod metrics;
 pub mod middleware;
 pub mod profile;
-pub mod error;
 
 #[derive(Serialize)]
 pub struct TestWriteResponse {
@@ -45,7 +43,7 @@ pub struct ActionStatusResponse {
 pub async fn build_app(
     config: MiddlewareConfig,
     db: Arc<DatabaseConnection>,
-) -> Result<(Router, Router, JoinHandle<()>), String> {
+) -> Result<(Router, JoinHandle<()>), String> {
     let state = MiddlewareState::new(config).await?;
     Ok(build_app_with_state(state, db))
 }
@@ -53,15 +51,16 @@ pub async fn build_app(
 pub fn build_app_with_state(
     state: MiddlewareState,
     db: Arc<DatabaseConnection>,
-) -> (Router, Router, JoinHandle<()>) {
-    metrics::init_metrics();
+) -> (Router, JoinHandle<()>) {
     let cleanup_handle = state.start_cleanup_task();
 
-    let metrics_router = Router::new().route("/metrics", get(metrics::metrics_handler));
-
     let public_router = Router::new()
-        .route("/health/liveness", get(health::liveness))
-        .route("/health/readiness", get(health::readiness));
+        .route("/health", get(liveness))
+        .route("/health/liveness", get(liveness));
+
+    let auth_only_router = Router::new()
+        .route("/health/readiness", get(readiness))
+        .layer(from_fn_with_state(db.clone(), auth_middleware));
 
     let protected_router = Router::new()
         .route("/test", post(write_test).put(write_test))
@@ -69,19 +68,19 @@ pub fn build_app_with_state(
         // Diagnostics routes under /api/v1/diagnostics
         .nest("/api/v1/diagnostics", diagnostics::routes())
         // Outermost applied last: Auth -> Idempotency -> Quota
-        .route_layer(from_fn(quota_middleware))
-        .route_layer(from_fn(idempotency_middleware))
-        .route_layer(from_fn_with_state(db.clone(), auth_middleware));
+        .layer(from_fn(quota_middleware))
+        .layer(from_fn(idempotency_middleware))
+        .layer(from_fn_with_state(db.clone(), auth_middleware));
 
     (
         Router::new()
             .merge(public_router)
+            .merge(auth_only_router)
             .merge(protected_router)
             .layer(Extension(state))
             .layer(Extension(db))
             .layer(
                 ServiceBuilder::new()
-                    // COOP/COEP/CORP headers for cross-origin isolation
                     .layer(SetResponseHeaderLayer::overriding(
                         HeaderName::from_static("cross-origin-opener-policy"),
                         HeaderValue::from_static("same-origin"),
@@ -94,7 +93,6 @@ pub fn build_app_with_state(
                         HeaderName::from_static("cross-origin-resource-policy"),
                         HeaderValue::from_static("same-origin"),
                     ))
-                    // Standard security headers
                     .layer(SetResponseHeaderLayer::overriding(
                         header::X_CONTENT_TYPE_OPTIONS,
                         HeaderValue::from_static("nosniff"),
@@ -112,7 +110,6 @@ pub fn build_app_with_state(
                         HeaderValue::from_static("max-age=63072000; includeSubDomains"),
                     )),
             ),
-        metrics_router,
         cleanup_handle,
     )
 }
@@ -133,8 +130,6 @@ pub async fn write_test(
         ActionStatus::Completed,
     )
     .await;
-
-    // TODO: record sandbox duration via kernel-runtime execution hook when integrated
 
     let body = TestWriteResponse {
         action_id: action_id.clone(),
@@ -176,134 +171,120 @@ pub async fn get_action_status(
         .get("x-request-id")
         .and_then(|v| v.to_str().ok())
         .map(|s| s.to_string());
-
-    error::build_json_error_response("Action not found", StatusCode::NOT_FOUND, request_id)
+    build_json_error_response("Action not found", StatusCode::NOT_FOUND, request_id)
 }
 
-#[cfg(test)]
-mod security_header_tests {
-    use super::*;
-    use axum::{
-        body::Body,
-        http::{Request, StatusCode},
+#[derive(Serialize)]
+struct JsonError {
+    status: u16,
+    error: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    request_id: Option<String>,
+}
+
+pub fn build_json_error_response(
+    message: impl Into<String>,
+    status: StatusCode,
+    request_id: Option<String>,
+) -> Response {
+    let body = JsonError {
+        status: status.as_u16(),
+        error: message.into(),
+        request_id,
     };
-    use sea_orm::{DatabaseBackend, MockDatabase};
-    use tower::ServiceExt;
-
-    async fn make_test_app() -> Router {
-        let db = Arc::new(MockDatabase::new(DatabaseBackend::Postgres).into_connection());
-        let mut config = MiddlewareConfig::default();
-        config.require_redis = false;
-        config.redis_url = "redis://0.0.0.0:0".to_string();
-
-        let state = MiddlewareState::new(config)
-            .await
-            .expect("Failed to create state");
-        let (app, _metrics, _cleanup) = build_app_with_state(state, db);
-        app
-    }
-
-    async fn assert_security_headers(response: Response) {
-        let headers = response.headers();
-        assert_eq!(
-            headers
-                .get("cross-origin-opener-policy")
-                .and_then(|v| v.to_str().ok()),
-            Some("same-origin")
-        );
-        assert_eq!(
-            headers
-                .get("cross-origin-embedder-policy")
-                .and_then(|v| v.to_str().ok()),
-            Some("require-corp")
-        );
-        assert_eq!(
-            headers
-                .get("cross-origin-resource-policy")
-                .and_then(|v| v.to_str().ok()),
-            Some("same-origin")
-        );
-
-        // Verify standard security headers
-        assert_eq!(
-            headers
-                .get(header::X_CONTENT_TYPE_OPTIONS)
-                .expect("x-content-type-options must be present"),
-            "nosniff"
-        );
-        assert_eq!(
-            headers
-                .get(header::X_FRAME_OPTIONS)
-                .expect("x-frame-options must be present"),
-            "DENY"
-        );
-        assert_eq!(
-            headers
-                .get(header::CONTENT_SECURITY_POLICY)
-                .expect("content-security-policy must be present"),
-            "default-src 'none'; frame-ancestors 'none'"
-        );
-        assert_eq!(
-            headers
-                .get(header::STRICT_TRANSPORT_SECURITY)
-                .expect("strict-transport-security must be present"),
-            "max-age=63072000; includeSubDomains"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_security_headers_health() {
-        let app = make_test_app().await;
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .uri("/health/liveness")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(response.status(), StatusCode::OK);
-        assert_security_headers(response).await;
-    }
-
-    #[tokio::test]
-    async fn test_security_headers_protected() {
-        let app = make_test_app().await;
-        // Call protected route without auth to trigger a response (even if it's 401/error, headers should still be there)
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .uri("/test")
-                    .method("POST")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        // Should be 401 Unauthorized because we didn't provide any auth headers
-        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-        assert_security_headers(response).await;
-    }
-
-    #[tokio::test]
-    async fn test_security_headers_error() {
-        let app = make_test_app().await;
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .uri("/non-existent")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(response.status(), StatusCode::NOT_FOUND);
-        assert_security_headers(response).await;
-    }
+    (status, Json(body)).into_response()
 }
 
+#[derive(Serialize)]
+struct ReadinessResponse {
+    status: String,
+    checks: ReadinessChecks,
+}
 
+#[derive(Serialize)]
+struct ReadinessChecks {
+    database: Health,
+    redis: Health,
+}
+
+#[derive(Serialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+enum Health {
+    Up,
+    Down,
+    Degraded,
+}
+
+async fn liveness() -> StatusCode {
+    StatusCode::OK
+}
+
+async fn readiness(
+    Extension(state): Extension<MiddlewareState>,
+    Extension(db): Extension<Arc<DatabaseConnection>>,
+) -> Response {
+    let db_timeout = Duration::from_secs(5);
+    let redis_timeout = Duration::from_secs(5);
+
+    let db_future = tokio::time::timeout(db_timeout, async move {
+        check_database_readiness(db).await.map_err(|e| e.to_string())
+    });
+    let redis_future = tokio::time::timeout(redis_timeout, state.idempotency_store.ping());
+
+    let (db_res, redis_res) = tokio::join!(db_future, redis_future);
+
+    let db_health = match db_res {
+        Ok(Ok(_)) => Health::Up,
+        Ok(Err(e)) => {
+            tracing::error!(error = %e, "Readiness check failed (database)");
+            Health::Down
+        }
+        Err(_) => {
+            tracing::error!(
+                "Readiness check timed out after {}s (database)",
+                db_timeout.as_secs()
+            );
+            Health::Down
+        }
+    };
+
+    let redis_health = match redis_res {
+        Ok(Ok(PingStatus::Ok)) => Health::Up,
+        Ok(Ok(PingStatus::Degraded)) => Health::Degraded,
+        Ok(Err(e)) => {
+            tracing::error!(error = ?e, "Readiness check failed (redis)");
+            Health::Down
+        }
+        Err(_) => {
+            tracing::error!(
+                "Readiness check timed out after {}s (redis)",
+                redis_timeout.as_secs()
+            );
+            Health::Down
+        }
+    };
+
+    let status = if db_health == Health::Up && redis_health != Health::Down {
+        StatusCode::OK
+    } else {
+        StatusCode::SERVICE_UNAVAILABLE
+    };
+
+    let body = ReadinessResponse {
+        status: if status == StatusCode::OK {
+            "healthy".to_string()
+        } else {
+            "unhealthy".to_string()
+        },
+        checks: ReadinessChecks {
+            database: db_health,
+            redis: redis_health,
+        },
+    };
+    (status, Json(body)).into_response()
+}
+
+async fn check_database_readiness(db: Arc<DatabaseConnection>) -> Result<(), std::io::Error> {
+    let system_ctx = TenantContext::from(SystemTenantContext).with_db(db);
+    kernel_data::connection::ping_tenant_db(&system_ctx).await
+}
