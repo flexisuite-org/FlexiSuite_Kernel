@@ -113,6 +113,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         None => default_output_path()?,
     };
 
+    // Collision guard: Ensure manifest path doesn't clobber private key path
+    if output_path == args.private_key_output {
+        return Err(io::Error::other(format!(
+            "manifest output path collides with private key output path: {}",
+            output_path.display()
+        ))
+        .into());
+    }
+
     write_private_key(
         &args.private_key_output,
         private_key_bytes.as_slice(),
@@ -170,7 +179,10 @@ fn write_private_key(
 
     #[cfg(not(unix))]
     {
-        fs::write(path, private_key_bytes)?;
+        return Err(io::Error::other(
+            "Secure private key creation with restricted permissions is only supported on Unix systems. \
+             Aborting to prevent insecure file creation on this platform."
+        ));
     }
 
     log_info(
