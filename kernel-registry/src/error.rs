@@ -22,7 +22,4 @@ pub enum RegistryError {
 
     #[error("Invalid manifest: {0}")]
     InvalidManifest(String),
-
-    #[error("Trust root error: {0}")]
-    TrustRootError(String),
 }

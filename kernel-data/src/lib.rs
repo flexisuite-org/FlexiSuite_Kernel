@@ -11,6 +11,3 @@ pub use connection::{TenantScoped, with_tenant_tx};
 pub use error::DataError;
 pub use repository::TenantRepository;
 pub use rbac::RBACRepository;
- 
-#[cfg(feature = "test-utils")]
-pub mod tests;
