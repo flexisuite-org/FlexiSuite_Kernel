@@ -18,7 +18,7 @@ anyhow = "1.0"
 thiserror = "1.0"
 url = "2.4"
 async-trait = "0.1"
-kernel-core = { path = "../../kernel-core" }
+kernel-core = { path = "../../kernel-core", features = ["test-utils"] }
 kernel-data = { path = "../../kernel-data" }
 kernel-api = { path = "../../kernel-api" }
 # TODO(security): Pinned to =0.1.43 to avoid upstream regression in 0.1.44 (10MB bloat due to included test-macros).
