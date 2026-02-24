@@ -159,7 +159,7 @@ fn default_output_path() -> Result<PathBuf, std::io::Error> {
 }
 
 fn write_private_key(
-    path: &PathBuf,
+    path: &std::path::Path,
     private_key_bytes: &[u8],
     private_key_to_stdout: bool,
 ) -> Result<(), io::Error> {
@@ -188,21 +188,21 @@ fn write_private_key(
         file.write_all(private_key_bytes)?;
         file.flush()?;
         fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
+
+        log_info(
+            private_key_to_stdout,
+            format_args!("Wrote private key bytes to {}", path.display()),
+        );
+        Ok(())
     }
 
     #[cfg(not(unix))]
     {
-        return Err(io::Error::other(
+        Err(io::Error::other(
             "Secure private key creation with restricted permissions is only supported on Unix systems. \
              Aborting to prevent insecure file creation on this platform."
-        ));
+        ))
     }
-
-    log_info(
-        private_key_to_stdout,
-        format_args!("Wrote private key bytes to {}", path.display()),
-    );
-    Ok(())
 }
 
 fn log_info(to_stderr: bool, args: std::fmt::Arguments<'_>) {
