@@ -183,6 +183,15 @@ impl RegistryStorage {
         None
     }
 
+    fn canonical_manifest_digest_for_save(digest: &str) -> Option<String> {
+        let value = digest.trim();
+        let hex_part = value.strip_prefix("sha384-")?;
+        if hex_part.is_empty() || !hex_part.chars().all(|c| c.is_ascii_hexdigit()) {
+            return None;
+        }
+        Some(Self::canonical_manifest_digest(hex_part))
+    }
+
     fn normalize_value(v: serde_json::Value) -> serde_json::Value {
         use serde_json::Value;
         match v {
@@ -302,8 +311,27 @@ impl RegistryStorage {
             ));
         }
 
+        let submitted_digest =
+            Self::canonical_manifest_digest_for_save(&manifest.security.manifest_digest)
+                .ok_or_else(|| {
+                    RegistryError::InvalidManifest(
+                        "security.manifest_digest must be canonical sha384-<hex>".to_string(),
+                    )
+                })?;
+
         // security section excluded from the hashed payload (canonical "sha384-{hex}" format).
         let computed_digest = Self::manifest_payload_digest(manifest)?;
+        if submitted_digest != computed_digest {
+            warn!(
+                submitted = %submitted_digest,
+                computed = %computed_digest,
+                "Manifest rejected: submitted digest does not match payload digest"
+            );
+            return Err(RegistryError::InvalidManifest(format!(
+                "security.manifest_digest mismatch: submitted={}, computed={}",
+                submitted_digest, computed_digest
+            )));
+        }
 
         // Validate Security
         let trusted_key = self
@@ -319,7 +347,7 @@ impl RegistryStorage {
 
         let core_manifest = Manifest {
             id: manifest.id.clone(),
-            digest: manifest.security.manifest_digest.clone(),
+            digest: submitted_digest.clone(),
             signature: manifest.security.manifest_signature.clone(),
             kid: manifest.security.manifest_signature_kid.clone(),
         };
@@ -358,7 +386,7 @@ impl RegistryStorage {
         }
 
         let mut persisted = manifest.clone();
-        persisted.security.manifest_digest = computed_digest.clone();
+        persisted.security.manifest_digest = submitted_digest;
 
         let path = self.manifest_path(&manifest.id, &manifest.version);
         let data = serde_json::to_vec(&persisted)?;
