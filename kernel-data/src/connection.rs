@@ -205,6 +205,41 @@ fn parse_tenant_from_token(token: &str) -> Option<String> {
         }
     }
 
+<<<<<<< HEAD
+=======
+        // PASETO v4.public payload includes the signature (64 bytes) at the end: m || sig
+        if payload_and_sig_bytes.len() < 64 {
+            error!("Payload too short for signature (len={})", payload_and_sig_bytes.len());
+            return None;
+        }
+        let payload_len = payload_and_sig_bytes.len() - 64;
+        let payload_bytes = &payload_and_sig_bytes[..payload_len];
+
+        let payload_str = match std::str::from_utf8(payload_bytes) {
+            Ok(s) => s,
+            Err(e) => {
+                error!("UTF8 decode failed: {}", e);
+                return None;
+            }
+        };
+        let json: serde_json::Value = match serde_json::from_str(payload_str) {
+            Ok(j) => j,
+            Err(e) => {
+                error!("JSON parse failed (len={}): {}", payload_str.len(), e);
+                return None;
+            }
+        };
+        let tid = json
+            .get("tenant_id")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        if tid.is_none() {
+             error!("tenant_id missing in token payload");
+        }
+        return tid;
+    }
+
+>>>>>>> c2e2bb5 (fix(rbac): harden dev tokens, diagnostics, and supply chain verification)
     #[cfg(feature = "test-utils")]
     if let Some(tenant_id) = token.strip_prefix("dev-token:") {
         // Special dev token for tests/debug with tenant ID
