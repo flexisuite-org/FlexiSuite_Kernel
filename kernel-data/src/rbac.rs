@@ -9,10 +9,22 @@ impl RBACRepository {
     // TODO: Add Redis caching for this query. This is a hot path (called on every request)
     // and involves a 5-table join.
     pub async fn get_user_permissions(
-        db: &impl ConnectionTrait,
-        tenant_id: &str,
-        user_id: &str,
+        ctx: &crate::auth_context::TenantContext,
     ) -> Result<Vec<permission::Model>, DbErr> {
+        let db = ctx.db().map_err(|e| DbErr::Custom(e))?;
+        let tenant_id = ctx.tenant_id().as_str();
+        let user_id = ctx.user_id().map(|u| u.as_str()).unwrap_or("");
+
+        // Set RLS context if token is available
+        if let Some(token) = ctx.db_token() {
+            db.execute(sea_orm::Statement::from_sql_and_values(
+                sea_orm::DbBackend::Postgres,
+                "SELECT flexi.authorize_tenant($1)",
+                [token.into()],
+            ))
+            .await?;
+        }
+
         let permissions = permission::Entity::find()
             .filter(permission::Column::TenantId.eq(tenant_id))
             .join(JoinType::InnerJoin, permission::Relation::Role.def())

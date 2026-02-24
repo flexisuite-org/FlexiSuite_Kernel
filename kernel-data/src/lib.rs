@@ -13,3 +13,6 @@ pub use connection::{TenantScoped, init_hmac_secret, with_tenant_tx};
 pub use error::DataError;
 pub use repository::TenantRepository;
 pub use rbac::RBACRepository;
+ 
+#[cfg(feature = "test-utils")]
+pub mod tests;

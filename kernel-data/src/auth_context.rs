@@ -90,6 +90,8 @@ pub struct TenantContext {
     user_id: Option<UserId>,
     #[serde(skip)]
     db: Option<std::sync::Arc<sea_orm::DatabaseConnection>>,
+    #[serde(skip)]
+    db_token: Option<String>,
 }
 
 impl TenantContext {
@@ -98,11 +100,17 @@ impl TenantContext {
             tenant_id,
             user_id,
             db: None,
+            db_token: None,
         }
     }
 
     pub fn with_db(mut self, db: std::sync::Arc<sea_orm::DatabaseConnection>) -> Self {
         self.db = Some(db);
+        self
+    }
+
+    pub fn with_token(mut self, token: String) -> Self {
+        self.db_token = Some(token);
         self
     }
 
@@ -112,6 +120,10 @@ impl TenantContext {
 
     pub fn user_id(&self) -> Option<&UserId> {
         self.user_id.as_ref()
+    }
+
+    pub fn db_token(&self) -> Option<&str> {
+        self.db_token.as_deref()
     }
 
     pub fn is_system(&self) -> bool {
@@ -138,6 +150,7 @@ impl From<SystemTenantContext> for TenantContext {
             tenant_id: TenantId::new_unchecked("system"),
             user_id: None,
             db: None,
+            db_token: None,
         }
     }
 }

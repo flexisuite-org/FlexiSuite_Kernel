@@ -28,7 +28,8 @@ pub mod diagnostics;
 pub mod middleware;
 pub mod profile;
 
-// Re-export entities from kernel-data for use in tests and other consumers
+// Re-export entities from kernel-data for use in tests and other consumers (Test-only)
+#[cfg(feature = "test-utils")]
 pub use kernel_data::entities;
 
 #[derive(Serialize)]
@@ -68,8 +69,12 @@ pub fn build_app_with_state(
 
     let protected_router = Router::new()
         .route("/test", post(write_test).put(write_test))
-        .route("/actions/:action_id", get(get_action_status))
-        .route("/test/protected", get(|| async { "Access Granted" }).layer(from_fn(|req, next| require_permission("test:read", req, next))))
+        .route("/actions/:action_id", get(get_action_status));
+
+    #[cfg(feature = "test-utils")]
+    let protected_router = protected_router.route("/test/protected", get(|| async { "Access Granted" }).layer(from_fn(|req, next| require_permission("test:read", req, next))));
+
+    let protected_router = protected_router
         // Diagnostics routes under /api/v1/diagnostics
         .nest("/api/v1/diagnostics", diagnostics::routes())
         // Outermost applied last: Auth -> Permissions -> Idempotency -> Quota
