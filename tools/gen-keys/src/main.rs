@@ -113,11 +113,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         None => default_output_path()?,
     };
 
-    // Collision guard: Ensure manifest path doesn't clobber private key path
-    if output_path == args.private_key_output {
+    // Collision guard: Ensure manifest path doesn't clobber private key path.
+    // We resolve to absolute paths to catch equivalent relative paths (e.g. "./f" vs "f").
+    let cwd = std::env::current_dir()?;
+    let abs_output = if output_path.is_absolute() {
+        output_path.clone()
+    } else {
+        cwd.join(&output_path)
+    };
+    let abs_private = if args.private_key_output.is_absolute() {
+        args.private_key_output.clone()
+    } else {
+        cwd.join(&args.private_key_output)
+    };
+
+    if abs_output == abs_private && !private_key_to_stdout {
         return Err(io::Error::other(format!(
             "manifest output path collides with private key output path: {}",
-            output_path.display()
+            abs_output.display()
         ))
         .into());
     }
