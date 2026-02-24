@@ -1,15 +1,28 @@
-use crate::api::middleware_integration::setup_app;
+use crate::api::middleware_integration::setup_app_with_db;
 use crate::auth::helpers::{generate_token, generate_token_with_kid, setup};
 use axum::body::Body;
 use axum::http::Request;
 use axum::http::StatusCode;
+use sea_orm::{MockDatabase, MockExecResult, MockRow};
 use tower::ServiceExt; // for oneshot
 
 #[tokio::test]
 async fn test_key_revocation_slo() {
     setup();
-    // Use public setup_app
-    let app = setup_app().await;
+
+    // Mock DB that expects one successful authorization (for Case 1)
+    // Case 2 and 3 should be rejected by Auth middleware (stateless/cached) and not hit DB.
+    let db = MockDatabase::new(sea_orm::DatabaseBackend::Postgres)
+        .append_exec_results(vec![
+            MockExecResult {
+                last_insert_id: 0,
+                rows_affected: 1,
+            },
+        ])
+        .append_query_results(vec![vec![] as Vec<MockRow>])
+        .into_connection();
+
+    let app = setup_app_with_db(db).await;
 
     // REQ-KEY-REVOCATION-SLO: Revoked key must be rejected.
 

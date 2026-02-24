@@ -1,5 +1,6 @@
 use crate::auth_context::TenantContext;
 use crate::error::DataError;
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use futures::future::BoxFuture;
 use sea_orm::{
     ConnectionTrait, DatabaseConnection, DatabaseTransaction, DbBackend, DbErr, Statement,
@@ -159,7 +160,58 @@ where
     }
 }
 
-fn parse_tenant_from_token(token: &str) -> Option<&str> {
+fn parse_tenant_from_token(token: &str) -> Option<String> {
+    if token.starts_with("v4.public.") {
+        let parts: Vec<&str> = token.split('.').collect();
+        // v4.public.payload.footer -> expects 4 parts
+        if parts.len() < 3 {
+            error!("Token parts len: {}", parts.len());
+            return None;
+        }
+        let payload_b64 = parts[2];
+        let payload_and_sig_bytes = match URL_SAFE_NO_PAD.decode(payload_b64) {
+            Ok(b) => b,
+            Err(e) => {
+                error!("Base64 decode failed for {}: {}", payload_b64, e);
+                return None;
+            }
+        };
+
+        // PASETO v4.public payload includes the signature (64 bytes) at the end: m || sig
+        if payload_and_sig_bytes.len() < 64 {
+            error!("Payload too short for signature (len={})", payload_and_sig_bytes.len());
+            return None;
+        }
+        let payload_len = payload_and_sig_bytes.len() - 64;
+        let payload_bytes = &payload_and_sig_bytes[..payload_len];
+
+        let payload_str = match std::str::from_utf8(payload_bytes) {
+            Ok(s) => s,
+            Err(e) => {
+                error!("UTF8 decode failed: {}", e);
+                return None;
+            }
+        };
+        let json: serde_json::Value = match serde_json::from_str(&payload_str) {
+            Ok(j) => j,
+            Err(e) => {
+                error!("JSON parse failed for {}: {}", payload_str, e);
+                return None;
+            }
+        };
+        let tid = json
+            .get("tenant_id")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        if tid.is_none() {
+             error!("tenant_id missing in json: {:?}", json);
+        }
+        return tid;
+    } else if let Some(tenant_id) = token.strip_prefix("dev-token:") {
+        // Special dev token for tests/debug with tenant ID
+        return Some(tenant_id.to_string());
+    }
+
     let mut parts = token.split(':');
     let ver = parts.next()?;
     let _kid = parts.next()?;
@@ -170,7 +222,7 @@ fn parse_tenant_from_token(token: &str) -> Option<&str> {
     if ver != "v2" || parts.next().is_some() {
         return None;
     }
-    Some(tenant_id)
+    Some(tenant_id.to_string())
 }
 
 // Legacy exports retained for binary compatibility during migration.

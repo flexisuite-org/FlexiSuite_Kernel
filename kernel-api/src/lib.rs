@@ -14,8 +14,11 @@ use uuid::Uuid;
 use crate::auth::{TenantContext, auth_middleware};
 use crate::middleware::{
     ActionStatus, MiddlewareConfig, MiddlewareState, get_action, idempotency_middleware,
-    quota_middleware, record_action, load_permissions_middleware, require_permission,
+    quota_middleware, record_action, load_permissions_middleware,
 };
+
+#[cfg(feature = "test-utils")]
+use crate::middleware::require_permission;
 
 pub mod auth;
 pub mod diagnostics;
@@ -23,6 +26,7 @@ pub mod middleware;
 pub mod profile;
 
 // Re-export entities from kernel-data for use in tests and other consumers
+#[cfg(feature = "test-utils")]
 pub use kernel_data::entities;
 
 #[derive(Serialize)]
@@ -54,23 +58,34 @@ pub fn build_app_with_state(
 
     let public_router = Router::new().route("/health", get(|| async { "OK" }));
 
-    let protected_router = Router::new()
+    // Reordered Middleware Stack:
+    // 1. Auth (Outermost, establishes identity)
+    // 2. Quota (Protect system resources)
+    // 3. Idempotency (Handle replays early to avoid DB work)
+    // 4. Permissions (RBAC, requires DB access via load_permissions_middleware)
+
+    let mut protected_router = Router::new()
         .route("/test", post(write_test).put(write_test))
         .route("/actions/:action_id", get(get_action_status))
-        .route("/test/protected", get(|| async { "Access Granted" }).layer(from_fn(|req, next| require_permission("test:read", req, next))))
         // Diagnostics routes under /api/v1/diagnostics
         .nest("/api/v1/diagnostics", diagnostics::routes())
-        // Outermost applied last: Auth -> Permissions -> Idempotency -> Quota
-        .layer(from_fn(quota_middleware))
-        .layer(from_fn(idempotency_middleware))
+        // Outermost applied last
         .layer(from_fn(load_permissions_middleware))
+        .layer(from_fn(idempotency_middleware))
+        .layer(from_fn(quota_middleware))
         .layer(from_fn_with_state(db.clone(), auth_middleware));
+
+    #[cfg(feature = "test-utils")]
+    {
+        protected_router = protected_router.route("/test/protected", get(|| async { "Access Granted" }).layer(from_fn(|req, next| require_permission("test:read", req, next))));
+    }
 
     (
         Router::new()
             .merge(public_router)
             .merge(protected_router)
-            .layer(Extension(state)),
+            .layer(Extension(state))
+            .layer(Extension(db)),
         cleanup_handle,
     )
 }

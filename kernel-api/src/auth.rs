@@ -15,6 +15,7 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub use kernel_core::auth::{TenantContext, TenantId, UserId};
+use crate::middleware::BearerToken;
 
 #[derive(Debug)]
 enum AuthError {
@@ -41,13 +42,14 @@ pub async fn auth_middleware(
     mut req: Request<Body>,
     next: Next,
 ) -> Result<Response, StatusCode> {
-    let context = if let Some(header) = req.headers().get("Authorization") {
+    let (context, token_str) = if let Some(header) = req.headers().get("Authorization") {
         let value = header.to_str().map_err(|_| {
             tracing::warn!("Invalid Authorization header encoding");
             StatusCode::UNAUTHORIZED
         })?;
+        let token_part = extract_bearer_token(value).unwrap_or("").to_string();
         match verify_paseto_v4_public_from_env(value) {
-            Ok(ctx) => ctx,
+            Ok(ctx) => (ctx, token_part),
             Err(AuthError::Unauthorized) => {
                 tracing::warn!("PASETO token verification failed: Unauthorized");
                 return Err(StatusCode::UNAUTHORIZED);
@@ -83,7 +85,7 @@ pub async fn auth_middleware(
                     None
                 };
 
-                TenantContext::new(tenant_id, user_id)
+                (TenantContext::new(tenant_id.clone(), user_id), format!("dev-token:{}", tenant_id))
             } else {
                 tracing::warn!(
                     "Missing Authorization header (and no X-Tenant-Id for debug bypass)"
@@ -100,6 +102,7 @@ pub async fn auth_middleware(
     };
 
     req.extensions_mut().insert(context.with_db(db));
+    req.extensions_mut().insert(BearerToken(token_str));
     Ok(next.run(req).await)
 }
 

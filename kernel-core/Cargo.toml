@@ -26,6 +26,9 @@ serde_json = "1.0.149"
 uuid = { version = "1.21.0", features = ["serde", "v7"] }
 chrono = { version = "0.4.43", features = ["serde"] }
 
+[dev-dependencies]
+kernel-data = { path = "../kernel-data", features = ["test-utils"] }
+
 [features]
 default = []
-test-utils = []
+test-utils = ["kernel-data/test-utils"]

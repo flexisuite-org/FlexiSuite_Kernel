@@ -93,6 +93,8 @@ pub fn verify_manifest(
     }
 
     // 3. Signature Verification (Mock)
+    // TODO: Implement real cryptographic verification (verify_signature) using trusted_key.
+    // Tracking Issue: https://github.com/flexisuite-org/FlexiSuite_Kernel/issues/52 (Supply Chain Hardening)
     if manifest.signature == "invalid" {
         return VerificationResult::SignatureInvalid;
     }
