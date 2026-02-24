@@ -6,6 +6,7 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{get, post},
 };
+use kernel_core::auth::SystemTenantContext;
 use sea_orm::{ConnectionTrait, DatabaseConnection, Statement};
 use serde::Serialize;
 use std::sync::Arc;
@@ -222,11 +223,7 @@ async fn readiness(
     let redis_timeout = Duration::from_secs(5);
 
     let db_future = tokio::time::timeout(db_timeout, async move {
-        let stmt = Statement::from_string(db.get_database_backend(), "SELECT 1".to_string());
-        db.execute(stmt)
-            .await
-            .map(|_| ())
-            .map_err(|e| e.to_string())
+        check_database_readiness(db).await.map_err(|e| e.to_string())
     });
     let redis_future = tokio::time::timeout(redis_timeout, state.idempotency_store.ping());
 
@@ -281,4 +278,17 @@ async fn readiness(
         },
     };
     (status, Json(body)).into_response()
+}
+
+async fn check_database_readiness(db: Arc<DatabaseConnection>) -> Result<(), std::io::Error> {
+    let system_ctx = TenantContext::from(SystemTenantContext).with_db(db);
+    let db_conn = system_ctx
+        .db()
+        .map_err(std::io::Error::other)?;
+    let stmt = Statement::from_string(db_conn.get_database_backend(), "SELECT 1".to_string());
+    db_conn
+        .execute(stmt)
+        .await
+        .map(|_| ())
+        .map_err(std::io::Error::other)
 }

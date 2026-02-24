@@ -29,10 +29,10 @@ struct Args {
     #[arg(long, env = "GEN_KEYS_VALIDITY_DAYS", default_value_t = 365)]
     validity_days: u64,
 
-    /// Optional output path for the generated 32-byte Ed25519 private key.
+    /// Output path for the generated 32-byte Ed25519 private key.
     /// Use "-" to write raw bytes to stdout.
     #[arg(long, env = "GEN_KEYS_PRIVATE_KEY_OUTPUT")]
-    private_key_output: Option<PathBuf>,
+    private_key_output: PathBuf,
 }
 
 #[derive(Serialize)]
@@ -54,6 +54,7 @@ struct Key {
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
+    let private_key_to_stdout = args.private_key_output.as_os_str() == "-";
     let mut csprng = OsRng;
     let signing_key: SigningKey = SigningKey::generate(&mut csprng);
     let private_key_bytes = signing_key.to_bytes();
@@ -85,8 +86,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let generated_kid = format!("store-key-{}-{}", now_secs, hex::encode(kid_suffix));
     let kid = args.kid.unwrap_or(generated_kid);
 
-    println!("Public Key: {}", pub_hex);
-    println!("Key ID: {}", kid);
+    log_info(private_key_to_stdout, format_args!("Public Key: {}", pub_hex));
+    log_info(private_key_to_stdout, format_args!("Key ID: {}", kid));
 
     let trust_root = TrustRoot {
         version,
@@ -112,14 +113,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     fs::write(&output_path, json)?;
-    println!(
-        "Wrote manifest_trust_root.json to {}",
-        output_path.display()
+    log_info(
+        private_key_to_stdout,
+        format_args!("Wrote manifest_trust_root.json to {}", output_path.display()),
     );
 
-    if let Some(path) = args.private_key_output.as_ref() {
-        write_private_key(path, private_key_bytes.as_slice())?;
-    }
+    write_private_key(
+        &args.private_key_output,
+        private_key_bytes.as_slice(),
+        private_key_to_stdout,
+    )?;
     Ok(())
 }
 
@@ -128,11 +131,14 @@ fn default_output_path() -> Result<PathBuf, std::io::Error> {
     Ok(cwd.join("ops/trust/manifest_trust_root.json"))
 }
 
-fn write_private_key(path: &PathBuf, private_key_bytes: &[u8]) -> Result<(), io::Error> {
+fn write_private_key(
+    path: &PathBuf,
+    private_key_bytes: &[u8],
+    private_key_to_stdout: bool,
+) -> Result<(), io::Error> {
     if path.as_os_str() == "-" {
         let mut stdout = io::stdout();
         stdout.write_all(private_key_bytes)?;
-        stdout.write_all(b"\n")?;
         stdout.flush()?;
         return Ok(());
     }
@@ -162,6 +168,17 @@ fn write_private_key(path: &PathBuf, private_key_bytes: &[u8]) -> Result<(), io:
         fs::write(path, private_key_bytes)?;
     }
 
-    println!("Wrote private key bytes to {}", path.display());
+    log_info(
+        private_key_to_stdout,
+        format_args!("Wrote private key bytes to {}", path.display()),
+    );
     Ok(())
+}
+
+fn log_info(to_stderr: bool, args: std::fmt::Arguments<'_>) {
+    if to_stderr {
+        eprintln!("{args}");
+    } else {
+        println!("{args}");
+    }
 }
