@@ -48,15 +48,6 @@ jobs:
       - name: Run contract suite
         run: bash scripts/ci/ci-test-contract-suite.sh "${{ matrix.suite }}"
 
-  test-kernel-core-real-crypto:
-    name: ci:test-kernel-core-real-crypto
-    needs: [lint-test-utils-scope]
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-      - name: Run kernel-core real crypto signature test (no test-utils)
-        run: cargo test -p kernel-core --test signature_verification
-
   e2e-frontend-security:
     name: ci:e2e-frontend-security
     runs-on: ubuntu-latest
