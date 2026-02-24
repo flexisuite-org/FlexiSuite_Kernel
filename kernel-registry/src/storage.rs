@@ -4,6 +4,7 @@ use bytes::Bytes;
 use kernel_core::auth::TenantContext;
 use object_store::ObjectStore;
 use object_store::path::Path;
+use ring::signature::{ED25519, UnparsedPublicKey};
 use serde::Serialize;
 use sha2::{Digest, Sha384};
 use std::collections::BTreeMap;
@@ -14,6 +15,7 @@ pub struct RegistryStorage {
     store: Arc<dyn ObjectStore>,
     prefix: String,
     tenant_id: String,
+    manifest_verifier_public_key: Vec<u8>,
 }
 
 #[derive(Serialize)]
@@ -40,11 +42,16 @@ struct ManifestDigestPayload<'a> {
 }
 
 impl RegistryStorage {
-    pub fn new(store: Arc<dyn ObjectStore>, tenant_ctx: &TenantContext) -> Self {
+    pub fn new(
+        store: Arc<dyn ObjectStore>,
+        tenant_ctx: &TenantContext,
+        manifest_verifier_public_key: Vec<u8>,
+    ) -> Self {
         Self {
             store,
             prefix: format!("tenants/{}/", tenant_ctx.tenant_id().as_str()),
             tenant_id: tenant_ctx.tenant_id().to_string(),
+            manifest_verifier_public_key,
         }
     }
 
@@ -105,6 +112,13 @@ impl RegistryStorage {
     /// update stored manifests, add migration steps, and add digest regression
     /// tests.
     fn manifest_payload_digest(manifest: &DistManifest) -> Result<String, RegistryError> {
+        let payload_bytes = Self::manifest_payload_bytes(manifest)?;
+        let mut hasher = Sha384::new();
+        hasher.update(payload_bytes);
+        Ok(hex::encode(hasher.finalize()))
+    }
+
+    fn manifest_payload_bytes(manifest: &DistManifest) -> Result<Vec<u8>, RegistryError> {
         let payload = ManifestDigestPayload {
             schema_version: &manifest.schema_version,
             id: &manifest.id,
@@ -121,11 +135,50 @@ impl RegistryStorage {
         // Normalize numeric values to ensure digest stability (1.0 vs 1)
         let payload_value = serde_json::to_value(&payload)?;
         let normalized = Self::normalize_value(payload_value);
-        let payload_bytes = serde_json::to_vec(&normalized)?;
+        serde_json::to_vec(&normalized).map_err(RegistryError::from)
+    }
 
-        let mut hasher = Sha384::new();
-        hasher.update(payload_bytes);
-        Ok(hex::encode(hasher.finalize()))
+    fn manifest_signature_payload(manifest: &DistManifest, digest: &str) -> String {
+        format!(
+            "flexisuite-registry-manifest:v1:{}:{}:{}:{}",
+            manifest.id, manifest.version, manifest.security.manifest_signature_kid, digest
+        )
+    }
+
+    pub fn signature_payload_for_signing(manifest: &DistManifest) -> Result<Vec<u8>, RegistryError> {
+        let digest = Self::manifest_payload_digest(manifest)?;
+        Ok(Self::manifest_signature_payload(manifest, &digest).into_bytes())
+    }
+
+    fn verify_manifest_signature(
+        &self,
+        manifest: &DistManifest,
+        computed_digest: &str,
+    ) -> Result<(), RegistryError> {
+        if self.manifest_verifier_public_key.is_empty() {
+            return Err(RegistryError::IntegrityCheckFailed {
+                expected: "configured manifest verification key".to_string(),
+                actual: "missing manifest verification key".to_string(),
+            });
+        }
+
+        let signature_hex = manifest
+            .security
+            .manifest_signature
+            .strip_prefix("ed25519:")
+            .unwrap_or(&manifest.security.manifest_signature);
+        let signature = hex::decode(signature_hex).map_err(|_| RegistryError::IntegrityCheckFailed {
+            expected: "hex-encoded ed25519 signature".to_string(),
+            actual: "invalid manifest signature encoding".to_string(),
+        })?;
+
+        let payload = Self::manifest_signature_payload(manifest, computed_digest);
+        UnparsedPublicKey::new(&ED25519, &self.manifest_verifier_public_key)
+            .verify(payload.as_bytes(), &signature)
+            .map_err(|_| RegistryError::IntegrityCheckFailed {
+                expected: "valid manifest signature".to_string(),
+                actual: "manifest signature verification failed".to_string(),
+            })
     }
 
     fn normalize_value(v: serde_json::Value) -> serde_json::Value {
@@ -257,6 +310,7 @@ impl RegistryStorage {
         // manifest_digest is computed from the manifest with the entire
         // security section excluded from the hashed payload.
         let computed_digest = Self::manifest_payload_digest(manifest)?;
+        self.verify_manifest_signature(manifest, &computed_digest)?;
         let mut persisted = manifest.clone();
         persisted.security.manifest_digest = computed_digest.clone();
 
@@ -300,6 +354,7 @@ impl RegistryStorage {
             warn!(expected = %expected, actual = %actual, "Manifest integrity check failed");
             return Err(RegistryError::IntegrityCheckFailed { expected, actual });
         }
+        self.verify_manifest_signature(&manifest, &actual)?;
         info!(digest = %actual, "Manifest retrieved successfully");
         Ok(manifest)
     }

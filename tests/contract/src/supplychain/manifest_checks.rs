@@ -1,24 +1,60 @@
 #[cfg(test)]
 mod tests {
+    use ed25519_dalek::{Signer, SigningKey};
     use kernel_core::supplychain::{
         BreakGlassContext, KeyStatus, Manifest, TrustedKey, VerificationResult, verify_break_glass,
         verify_manifest,
     };
 
+    fn signing_key() -> SigningKey {
+        SigningKey::from_bytes(&[7u8; 32])
+    }
+
+    fn manifest_signing_payload(manifest: &Manifest) -> Vec<u8> {
+        let scheme = if manifest.digest.starts_with("sha256-") {
+            "ed25519-sha256"
+        } else if manifest.digest.starts_with("sha384-") {
+            "ed25519-sha384"
+        } else {
+            "ed25519-unknown"
+        };
+        format!(
+            "flexisuite-manifest:v1:{scheme}:{}:{}:{}",
+            manifest.id, manifest.kid, manifest.digest
+        )
+        .into_bytes()
+    }
+
+    fn sign_manifest(manifest: &Manifest, signing_key: &SigningKey) -> String {
+        let sig = signing_key.sign(&manifest_signing_payload(manifest));
+        hex::encode(sig.to_bytes())
+    }
+
     #[test]
     fn test_manifest_signature_trust_root() {
+        let signing_key = signing_key();
+        let public_key = signing_key.verifying_key().to_bytes().to_vec();
+
         let manifest_revoked = Manifest {
             id: "pkg-a".to_string(),
             digest: "sha256-123".to_string(),
-            signature: "sig".to_string(),
+            signature: String::new(),
             kid: "revoked".to_string(),
+        };
+        let manifest_revoked = Manifest {
+            signature: sign_manifest(&manifest_revoked, &signing_key),
+            ..manifest_revoked
         };
 
         let manifest_ok = Manifest {
             id: "pkg-b".to_string(),
             digest: "sha256-456".to_string(),
-            signature: "sig".to_string(),
+            signature: String::new(),
             kid: "active".to_string(),
+        };
+        let manifest_ok = Manifest {
+            signature: sign_manifest(&manifest_ok, &signing_key),
+            ..manifest_ok
         };
 
         // Mock time
@@ -30,26 +66,31 @@ mod tests {
         // Trusted Keys
         let key_active = TrustedKey {
             kid: "active".to_string(),
+            public_key: public_key.clone(),
             status: KeyStatus::Active,
             retired_at: None,
         };
         let key_revoked = TrustedKey {
             kid: "revoked".to_string(),
+            public_key: public_key.clone(),
             status: KeyStatus::Revoked,
             retired_at: None,
         };
         let key_retired_ok = TrustedKey {
             kid: "active".to_string(),
+            public_key: public_key.clone(),
             status: KeyStatus::Retired,
             retired_at: Some(retired_at_ok),
         };
         let key_retired_fail = TrustedKey {
             kid: "active".to_string(),
+            public_key: public_key.clone(),
             status: KeyStatus::Retired,
             retired_at: Some(retired_at_fail),
         };
         let key_next = TrustedKey {
             kid: "active".to_string(),
+            public_key: public_key.clone(),
             status: KeyStatus::Next,
             retired_at: None,
         };
@@ -72,8 +113,12 @@ mod tests {
         let manifest_sha384 = Manifest {
             id: "pkg-c".to_string(),
             digest: "sha384-abc".to_string(),
-            signature: "sig".to_string(),
+            signature: String::new(),
             kid: "active".to_string(),
+        };
+        let manifest_sha384 = Manifest {
+            signature: sign_manifest(&manifest_sha384, &signing_key),
+            ..manifest_sha384
         };
 
         // Verifying dash prefix support
@@ -85,6 +130,7 @@ mod tests {
         // Test Key Mismatch
         let key_wrong = TrustedKey {
             kid: "wrong".to_string(),
+            public_key: public_key.clone(),
             status: KeyStatus::Active,
             retired_at: None,
         };

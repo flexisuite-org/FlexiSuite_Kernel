@@ -1,3 +1,5 @@
+use ring::signature::{ED25519, UnparsedPublicKey};
+
 #[derive(Debug, Clone)]
 pub struct Manifest {
     pub id: String,
@@ -37,8 +39,37 @@ pub struct BreakGlassContext {
 
 pub struct TrustedKey {
     pub kid: String,
+    pub public_key: Vec<u8>,
     pub status: KeyStatus,
     pub retired_at: Option<u64>,
+}
+
+fn signature_scheme_for_digest(digest: &str) -> Option<&'static str> {
+    if digest.starts_with("sha256-") {
+        Some("ed25519-sha256")
+    } else if digest.starts_with("sha384-") {
+        Some("ed25519-sha384")
+    } else {
+        None
+    }
+}
+
+fn manifest_signing_payload(manifest: &Manifest, scheme: &str) -> Vec<u8> {
+    format!(
+        "flexisuite-manifest:v1:{scheme}:{}:{}:{}",
+        manifest.id, manifest.kid, manifest.digest
+    )
+    .into_bytes()
+}
+
+fn verify_signature(payload: &[u8], signature_hex: &str, public_key: &[u8]) -> bool {
+    let signature = match hex::decode(signature_hex) {
+        Ok(sig) => sig,
+        Err(_) => return false,
+    };
+    UnparsedPublicKey::new(&ED25519, public_key)
+        .verify(payload, &signature)
+        .is_ok()
 }
 
 /// Mock verification with time-aware context
@@ -48,14 +79,18 @@ pub fn verify_manifest(
     expected_artifact_digest: &str,
     now: u64,
 ) -> VerificationResult {
-    // 1. Digest Existence/Format Check
+    // 1. Digest Existence/Format Check + Scheme Selection
     // Spec: Must use "-" prefix (e.g., sha256-..., sha384-...)
     // REQ-SUPPLYCHAIN-DIGEST-FORMAT
-    let has_valid_prefix =
-        manifest.digest.starts_with("sha256-") || manifest.digest.starts_with("sha384-");
+    let scheme = match signature_scheme_for_digest(&manifest.digest) {
+        Some(scheme) => scheme,
+        None => {
+            return VerificationResult::DigestMismatch; // Malformed or unsupported digest
+        }
+    };
 
-    if !has_valid_prefix {
-        return VerificationResult::DigestMismatch; // Malformed or unsupported digest
+    if trusted_key.public_key.is_empty() {
+        return VerificationResult::SignatureInvalid;
     }
 
     // 1b. Artifact Digest Verification (Contract: Manifest must match artifact)
@@ -92,8 +127,9 @@ pub fn verify_manifest(
         KeyStatus::Active => {}
     }
 
-    // 3. Signature Verification (Mock)
-    if manifest.signature == "invalid" {
+    // 3. Cryptographic Signature Verification (fail closed)
+    let payload = manifest_signing_payload(manifest, scheme);
+    if !verify_signature(&payload, &manifest.signature, &trusted_key.public_key) {
         return VerificationResult::SignatureInvalid;
     }
 

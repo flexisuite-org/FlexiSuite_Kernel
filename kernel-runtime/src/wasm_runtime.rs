@@ -1,6 +1,7 @@
 use crate::{RuntimeOptions, SandboxError, SandboxRuntime};
 use async_trait::async_trait;
 use futures_util::StreamExt;
+use serde::Deserialize;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -83,12 +84,48 @@ struct SyncWasi(pub WasiP1Ctx);
 /// when using this wrapper.
 unsafe impl Sync for SyncWasi {}
 
+impl SyncWasi {
+    fn new_checked(wasi: WasiP1Ctx) -> Self {
+        assert_wasi_stream_sync_invariants();
+        Self(wasi)
+    }
+}
+
+fn assert_wasi_stream_sync_invariants() {
+    fn assert_sync<T: Sync>() {}
+    assert_sync::<MemoryInputPipe>();
+    assert_sync::<MemoryOutputPipe>();
+}
+
+fn build_sandbox_wasi(
+    input_json: String,
+    stdout: MemoryOutputPipe,
+    stderr: MemoryOutputPipe,
+) -> WasiP1Ctx {
+    // `SyncWasi` の unsafe 前提をここで固定する:
+    // stdin/stdout/stderr は必ず `Memory*Pipe` を使い、型は `Sync` であることを
+    // コンパイル時に検証する。
+    assert_wasi_stream_sync_invariants();
+    let mut wasi_builder = WasiCtxBuilder::new();
+    wasi_builder.stdin(MemoryInputPipe::new(input_json.into_bytes()));
+    wasi_builder.stdout(stdout);
+    wasi_builder.stderr(stderr);
+    wasi_builder.build_p1()
+}
+
 struct Ctx {
     wasi: SyncWasi,
     limits: StoreLimits,
     stdout: MemoryOutputPipe,
     client: reqwest::Client,
     allowlist: Vec<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum HeaderInputValue {
+    Single(String),
+    Multi(Vec<String>),
 }
 
 fn map_wasm_error(error: anyhow::Error) -> SandboxError {
@@ -205,30 +242,23 @@ impl SandboxRuntime for WasmSandbox {
                         let mut builder = client.request(method, url);
 
                         if !headers_str.is_empty() {
-                            // Note: We expect the input headers JSON to be either Map<String, String> or Map<String, Vec<String>>.
-                            // However, since we cannot easily dynamically type check without Value, let's try to parse as Map<String, Vec<String>> first
-                            // to support multi-values, or fall back to Map<String, String> logic?
-                            // Actually, serde_json::Value is safer.
+                            let headers_val: std::collections::HashMap<String, HeaderInputValue> =
+                                match serde_json::from_str(&headers_str) {
+                                    Ok(v) => v,
+                                    Err(_) => return Ok(ERR_PARSE_HEADERS),
+                                };
 
-                            let headers_val: serde_json::Value = match serde_json::from_str(&headers_str) {
-                                Ok(v) => v,
-                                Err(_) => return Ok(ERR_PARSE_HEADERS),
-                            };
-
-                            if let Some(obj) = headers_val.as_object() {
-                                for (k, v) in obj {
-                                    if let Some(s) = v.as_str() {
+                            for (k, v) in headers_val {
+                                match v {
+                                    HeaderInputValue::Single(s) => {
                                         builder = builder.header(k, s);
-                                    } else if let Some(arr) = v.as_array() {
-                                        for item in arr {
-                                            if let Some(s) = item.as_str() {
-                                                builder = builder.header(k, s);
-                                            }
+                                    }
+                                    HeaderInputValue::Multi(values) => {
+                                        for value in values {
+                                            builder = builder.header(&k, value);
                                         }
                                     }
                                 }
-                            } else {
-                                return Ok(ERR_PARSE_HEADERS);
                             }
                         }
 
@@ -296,12 +326,10 @@ impl SandboxRuntime for WasmSandbox {
         let effective_max_stdout = self.options.max_output_size.unwrap_or(DEFAULT_MAX_STDOUT);
         let stdout_capacity = effective_max_stdout.saturating_add(1);
         let stdout = MemoryOutputPipe::new(stdout_capacity);
+        let stderr = MemoryOutputPipe::new(stdout_capacity);
         let input_json = serde_json::to_string(&input)
             .map_err(|e| SandboxError::RuntimeError(format!("failed to serialize input: {e}")))?;
-        let mut wasi_builder = WasiCtxBuilder::new();
-        wasi_builder.stdin(MemoryInputPipe::new(input_json.into_bytes()));
-        wasi_builder.stdout(stdout.clone());
-        let wasi = wasi_builder.build_p1();
+        let wasi = build_sandbox_wasi(input_json, stdout.clone(), stderr);
 
         let limits = StoreLimitsBuilder::new()
             .memory_size(self.options.memory_limit)
@@ -320,7 +348,7 @@ impl SandboxRuntime for WasmSandbox {
         let mut store = Store::new(
             &self.engine,
             Ctx {
-                wasi: SyncWasi(wasi),
+                wasi: SyncWasi::new_checked(wasi),
                 limits,
                 stdout,
                 client,

@@ -35,6 +35,14 @@ pub struct ActionStatusResponse {
     pub status: ActionStatus,
 }
 
+#[derive(Serialize)]
+pub struct ErrorResponse {
+    pub error: String,
+    pub code: String,
+    pub action_id: Option<String>,
+    pub tenant_id: String,
+}
+
 pub async fn build_app(
     config: MiddlewareConfig,
     db: Arc<DatabaseConnection>,
@@ -113,7 +121,7 @@ pub async fn get_action_status(
     Path(action_id): Path<String>,
     Extension(state): Extension<MiddlewareState>,
     Extension(ctx): Extension<TenantContext>,
-) -> Result<Json<ActionStatusResponse>, StatusCode> {
+) -> Result<Json<ActionStatusResponse>, (StatusCode, Json<ErrorResponse>)> {
     if let Some(record) = get_action(&state, ctx.tenant_id().clone(), &action_id).await {
         return Ok(Json(ActionStatusResponse {
             action_id,
@@ -121,5 +129,13 @@ pub async fn get_action_status(
         }));
     }
 
-    Err(StatusCode::NOT_FOUND)
+    Err((
+        StatusCode::NOT_FOUND,
+        Json(ErrorResponse {
+            error: "action not found".to_string(),
+            code: "ACTION_NOT_FOUND".to_string(),
+            action_id: Some(action_id),
+            tenant_id: ctx.tenant_id().to_string(),
+        }),
+    ))
 }

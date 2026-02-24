@@ -1,6 +1,7 @@
 use async_trait::async_trait;
 use axum::{
     body::{Body, to_bytes},
+    extract::Json,
     http::{
         HeaderMap, HeaderName, HeaderValue, Method, Request, StatusCode, header::CONTENT_LENGTH,
     },
@@ -1530,9 +1531,40 @@ pub async fn get_action(
 pub async fn idempotency_middleware(
     req: Request<Body>,
     next: Next,
-) -> Result<Response, StatusCode> {
+) -> Response {
+    fn make_error_response(
+        status: StatusCode,
+        code: &'static str,
+        message: &'static str,
+        tenant_id: Option<&str>,
+        action_id: Option<&str>,
+        request_id: Option<&str>,
+    ) -> Response {
+        let mut response = (
+            status,
+            Json(serde_json::json!({
+                "error": message,
+                "code": code,
+                "tenant_id": tenant_id,
+                "action_id": action_id,
+            })),
+        )
+            .into_response();
+        if let Some(req_id) = request_id.and_then(|s| HeaderValue::from_str(s).ok()) {
+            response
+                .headers_mut()
+                .insert(HeaderName::from_static("x-request-id"), req_id);
+        }
+        response
+    }
+
     let (parts, body) = req.into_parts();
     let method = parts.method.clone();
+    let request_id = parts
+        .headers
+        .get("x-request-id")
+        .and_then(|v| v.to_str().ok())
+        .map(ToOwned::to_owned);
 
     let idempotency_key = match parts.headers.get("Idempotency-Key") {
         Some(val) => {
@@ -1540,12 +1572,26 @@ pub async fn idempotency_middleware(
                 Ok(k) => k,
                 Err(_) => {
                     warn!("Invalid Idempotency-Key encoding");
-                    return Err(StatusCode::BAD_REQUEST);
+                    return make_error_response(
+                        StatusCode::BAD_REQUEST,
+                        "IDEMPOTENCY_KEY_INVALID_ENCODING",
+                        "invalid Idempotency-Key encoding",
+                        None,
+                        None,
+                        request_id.as_deref(),
+                    );
                 }
             };
             if validate_idempotency_key(key).is_err() {
                 warn!(key = %key, "Invalid Idempotency-Key format");
-                return Err(StatusCode::BAD_REQUEST);
+                return make_error_response(
+                    StatusCode::BAD_REQUEST,
+                    "IDEMPOTENCY_KEY_INVALID_FORMAT",
+                    "invalid Idempotency-Key format",
+                    None,
+                    None,
+                    request_id.as_deref(),
+                );
             }
             key.to_string()
         }
@@ -1556,18 +1602,34 @@ pub async fn idempotency_middleware(
                 || method == Method::PATCH
             {
                 warn!(method = %method, "Missing Idempotency-Key for write operation");
-                return Err(StatusCode::BAD_REQUEST);
+                return make_error_response(
+                    StatusCode::BAD_REQUEST,
+                    "IDEMPOTENCY_KEY_REQUIRED",
+                    "Idempotency-Key is required for write operations",
+                    None,
+                    None,
+                    request_id.as_deref(),
+                );
             }
-            return Ok(next.run(Request::from_parts(parts, body)).await);
+            return next.run(Request::from_parts(parts, body)).await;
         }
     };
 
-    let tenant_ctx = parts
-        .extensions
-        .get::<TenantContext>()
-        .ok_or(StatusCode::UNAUTHORIZED)?;
+    let tenant_id = match parts.extensions.get::<TenantContext>() {
+        Some(ctx) => ctx.tenant_id().clone(),
+        None => {
+            return make_error_response(
+                StatusCode::UNAUTHORIZED,
+                "TENANT_CONTEXT_MISSING",
+                "tenant context is missing",
+                None,
+                None,
+                request_id.as_deref(),
+            );
+        }
+    };
 
-    tracing::Span::current().record("tenant_id", &tenant_ctx.tenant_id().to_string());
+    tracing::Span::current().record("tenant_id", &tenant_id.to_string());
     tracing::Span::current().record("method", method.as_str());
     tracing::Span::current().record("path", parts.uri.path());
 
@@ -1576,7 +1638,7 @@ pub async fn idempotency_middleware(
     let canonical_target = canonicalize_request_target(path, query);
 
     let scope_key = IdempotencyScopeKey {
-        tenant_id: tenant_ctx.tenant_id().clone(),
+        tenant_id: tenant_id.clone(),
         method: method.as_str().to_string(),
         canonical_target: canonical_target.clone(),
         idempotency_key: idempotency_key.clone(),
@@ -1587,11 +1649,19 @@ pub async fn idempotency_middleware(
     // Note: This forces buffering. For streams > 10MB, Idempotency is not supported by this middleware.
 
     // Check Store
-    let state = parts
-        .extensions
-        .get::<MiddlewareState>()
-        .cloned()
-        .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+    let state = match parts.extensions.get::<MiddlewareState>().cloned() {
+        Some(state) => state,
+        None => {
+            return make_error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "MIDDLEWARE_STATE_MISSING",
+                "middleware state is missing",
+                Some(tenant_id.as_str()),
+                None,
+                request_id.as_deref(),
+            );
+        }
+    };
 
     let body_bytes = match to_bytes(body, state.config.max_body_size).await {
         Ok(b) => b,
@@ -1600,7 +1670,14 @@ pub async fn idempotency_middleware(
                 "Request body exceeded max_body_size ({})",
                 state.config.max_body_size
             );
-            return Err(StatusCode::BAD_REQUEST);
+            return make_error_response(
+                StatusCode::BAD_REQUEST,
+                "REQUEST_BODY_TOO_LARGE",
+                "request body exceeded max_body_size",
+                Some(tenant_id.as_str()),
+                None,
+                request_id.as_deref(),
+            );
         }
     };
 
@@ -1629,7 +1706,7 @@ pub async fn idempotency_middleware(
                 res.headers_mut()
                     .insert(axum::http::header::RETRY_AFTER, val);
             }
-            return Ok(res);
+            return res;
         }
 
         match store
@@ -1649,10 +1726,17 @@ pub async fn idempotency_middleware(
                             key = %idempotency_key,
                             "Idempotency conflict detected (Completed)"
                         );
-                        return Err(StatusCode::CONFLICT);
+                        return make_error_response(
+                            StatusCode::CONFLICT,
+                            "IDEMPOTENCY_CONFLICT",
+                            "idempotency key conflict",
+                            Some(tenant_id.as_str()),
+                            Some(&record.action_id),
+                            request_id.as_deref(),
+                        );
                     }
                     info!(key = %idempotency_key, "Replaying idempotent response");
-                    return Ok(build_replay_response(&record));
+                    return build_replay_response(&record);
                 }
                 IdempotencyEntry::InFlight {
                     body_hash: existing_hash,
@@ -1664,7 +1748,14 @@ pub async fn idempotency_middleware(
                             key = %idempotency_key,
                             "Idempotency conflict detected (InFlight)"
                         );
-                        return Err(StatusCode::CONFLICT);
+                        return make_error_response(
+                            StatusCode::CONFLICT,
+                            "IDEMPOTENCY_CONFLICT",
+                            "idempotency key conflict",
+                            Some(tenant_id.as_str()),
+                            None,
+                            request_id.as_deref(),
+                        );
                     }
 
                     let notified = notify.notified();
@@ -1691,13 +1782,20 @@ pub async fn idempotency_middleware(
                             res.headers_mut()
                                 .insert(axum::http::header::RETRY_AFTER, val);
                         }
-                        return Ok(res);
+                        return res;
                     }
                 }
             },
             Err(IdempotencyStoreError::BackendUnavailable) => {
                 error!("Idempotency store unavailable during acquire");
-                return Err(StatusCode::SERVICE_UNAVAILABLE);
+                return make_error_response(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "IDEMPOTENCY_BACKEND_UNAVAILABLE",
+                    "idempotency backend unavailable",
+                    Some(tenant_id.as_str()),
+                    None,
+                    request_id.as_deref(),
+                );
             }
         }
     };
@@ -1712,7 +1810,7 @@ pub async fn idempotency_middleware(
                 state.config.max_replay_body_size
             );
             let _ = store.release_inflight(&scope_key, &lease).await;
-            return Ok(Response::from_parts(parts, body));
+            return Response::from_parts(parts, body);
         }
 
         let body_bytes = match body.collect().await {
@@ -1725,7 +1823,7 @@ pub async fn idempotency_middleware(
                 let mut res = Response::from_parts(parts, Body::empty());
                 let val = HeaderValue::from_static("cache-buffer-error");
                 res.headers_mut().insert("X-Idempotency-Cache-Error", val);
-                return Ok(res);
+                return res;
             }
         };
         if body_bytes.len() > state.config.max_replay_body_size {
@@ -1734,7 +1832,7 @@ pub async fn idempotency_middleware(
                 state.config.max_replay_body_size
             );
             let _ = store.release_inflight(&scope_key, &lease).await;
-            return Ok(Response::from_parts(parts, Body::from(body_bytes)));
+            return Response::from_parts(parts, Body::from(body_bytes));
         }
         let action_id = parts
             .headers
@@ -1760,11 +1858,11 @@ pub async fn idempotency_middleware(
             let _ = store.release_inflight(&scope_key, &lease).await;
             error!("Failed to complete idempotency record");
         }
-        return Ok(Response::from_parts(parts, Body::from(body_bytes)));
+        return Response::from_parts(parts, Body::from(body_bytes));
     }
 
     let _ = store.release_inflight(&scope_key, &lease).await;
-    Ok(response)
+    response
 }
 
 fn compute_body_hash(body: &[u8]) -> String {

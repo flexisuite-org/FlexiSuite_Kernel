@@ -5,6 +5,7 @@ use kernel_registry::storage::RegistryStorage;
 use object_store::ObjectStore;
 use object_store::memory::InMemory;
 use object_store::path::Path;
+use ed25519_dalek::{Signer, SigningKey};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -12,8 +13,23 @@ fn test_tenant_ctx() -> TenantContext {
     TenantContext::new(TenantId::new("tenant_test").expect("valid tenant id"), None)
 }
 
+fn test_signing_key() -> SigningKey {
+    SigningKey::from_bytes(&[9u8; 32])
+}
+
+fn test_signing_public_key() -> Vec<u8> {
+    test_signing_key().verifying_key().to_bytes().to_vec()
+}
+
+fn sign_manifest(manifest: &mut DistManifest) {
+    let payload = RegistryStorage::signature_payload_for_signing(manifest)
+        .expect("signature payload generation must succeed");
+    let signature = test_signing_key().sign(&payload);
+    manifest.security.manifest_signature = format!("ed25519:{}", hex::encode(signature.to_bytes()));
+}
+
 fn test_manifest(id: &str, version: &str) -> DistManifest {
-    DistManifest {
+    let mut manifest = DistManifest {
         schema_version: "1.0".to_string(),
         id: id.to_string(),
         version: version.into(),
@@ -32,17 +48,19 @@ fn test_manifest(id: &str, version: &str) -> DistManifest {
         configuration: BTreeMap::new(),
         security: Security {
             manifest_digest: "".to_string(),
-            manifest_signature: "sig_default".to_string(),
+            manifest_signature: String::new(),
             manifest_signature_kid: "kid_default".to_string(),
             trust_root_version: "v1".to_string(),
         },
-    }
+    };
+    sign_manifest(&mut manifest);
+    manifest
 }
 
 #[tokio::test]
 async fn test_save_and_get_artifact() {
     let store = Arc::new(InMemory::new());
-    let registry = RegistryStorage::new(store, &test_tenant_ctx());
+    let registry = RegistryStorage::new(store, &test_tenant_ctx(), test_signing_public_key());
 
     let data = b"hello world";
     let digest = registry
@@ -75,11 +93,12 @@ async fn test_save_and_get_artifact() {
 #[tokio::test]
 async fn test_save_and_get_manifest() {
     let store = Arc::new(InMemory::new());
-    let registry = RegistryStorage::new(store, &test_tenant_ctx());
+    let registry = RegistryStorage::new(store, &test_tenant_ctx(), test_signing_public_key());
 
     let mut manifest = test_manifest("app_test", "1.0.0");
     manifest.security.manifest_signature = "sig_...".to_string();
     manifest.security.manifest_signature_kid = "key1".to_string();
+    sign_manifest(&mut manifest);
 
     let (digest, persisted) = registry.save_manifest(&manifest).await.unwrap();
     assert_eq!(digest.len(), 96); // SHA-384 hex string length
@@ -114,15 +133,16 @@ async fn test_save_and_get_manifest() {
 #[tokio::test]
 async fn test_manifest_digest_excludes_security_section() {
     let store_a = Arc::new(InMemory::new());
-    let registry_a = RegistryStorage::new(store_a, &test_tenant_ctx());
+    let registry_a = RegistryStorage::new(store_a, &test_tenant_ctx(), test_signing_public_key());
 
     let store_b = Arc::new(InMemory::new());
-    let registry_b = RegistryStorage::new(store_b, &test_tenant_ctx());
+    let registry_b = RegistryStorage::new(store_b, &test_tenant_ctx(), test_signing_public_key());
 
     let mut manifest_a = test_manifest("app_security_digest", "1.0.0");
     manifest_a.name = "Security Digest Test".to_string();
     manifest_a.security.manifest_signature = "sig_A".to_string();
     manifest_a.security.manifest_signature_kid = "kid_A".to_string();
+    sign_manifest(&mut manifest_a);
 
     let mut manifest_b = manifest_a.clone();
     // Intentionally keep `manifest_b` with the same id/version/payload as `manifest_a`.
@@ -131,6 +151,7 @@ async fn test_manifest_digest_excludes_security_section() {
     manifest_b.security.manifest_signature = "sig_B".to_string();
     manifest_b.security.manifest_signature_kid = "kid_B".to_string();
     manifest_b.security.trust_root_version = "v2".to_string();
+    sign_manifest(&mut manifest_b);
 
     let (digest_a, _) = registry_a.save_manifest(&manifest_a).await.unwrap();
     let (digest_b, _) = registry_b.save_manifest(&manifest_b).await.unwrap();
@@ -141,7 +162,7 @@ async fn test_manifest_digest_excludes_security_section() {
 #[tokio::test]
 async fn test_get_missing_manifest_returns_manifest_not_found() {
     let store = Arc::new(InMemory::new());
-    let registry = RegistryStorage::new(store, &test_tenant_ctx());
+    let registry = RegistryStorage::new(store, &test_tenant_ctx(), test_signing_public_key());
 
     let result = registry.get_manifest("missing_id", "0.0.0").await;
     match result {
@@ -155,7 +176,7 @@ async fn test_get_missing_manifest_returns_manifest_not_found() {
 #[tokio::test]
 async fn test_save_manifest_rejects_empty_security_fields() {
     let store = Arc::new(InMemory::new());
-    let registry = RegistryStorage::new(store, &test_tenant_ctx());
+    let registry = RegistryStorage::new(store, &test_tenant_ctx(), test_signing_public_key());
 
     let mut manifest = test_manifest("app_invalid_security", "1.0.0");
     manifest.name = "Invalid Security".to_string();
@@ -174,7 +195,7 @@ async fn test_save_manifest_rejects_empty_security_fields() {
 #[tokio::test]
 async fn test_save_manifest_rejects_empty_security_kid() {
     let store = Arc::new(InMemory::new());
-    let registry = RegistryStorage::new(store, &test_tenant_ctx());
+    let registry = RegistryStorage::new(store, &test_tenant_ctx(), test_signing_public_key());
 
     let mut manifest = test_manifest("app_invalid_security_kid", "1.0.0");
     manifest.name = "Invalid Security Kid".to_string();
@@ -193,7 +214,7 @@ async fn test_save_manifest_rejects_empty_security_kid() {
 #[tokio::test]
 async fn test_save_manifest_rejects_empty_trust_root_version() {
     let store = Arc::new(InMemory::new());
-    let registry = RegistryStorage::new(store, &test_tenant_ctx());
+    let registry = RegistryStorage::new(store, &test_tenant_ctx(), test_signing_public_key());
 
     let mut manifest = test_manifest("app_invalid_trust_root_version", "1.0.0");
     manifest.name = "Invalid Trust Root Version".to_string();
@@ -214,12 +235,13 @@ async fn test_save_manifest_rejects_empty_trust_root_version() {
 async fn test_get_manifest_detects_tampered_stored_json() {
     let store = Arc::new(InMemory::new());
     let tenant_ctx = test_tenant_ctx();
-    let registry = RegistryStorage::new(store.clone(), &tenant_ctx);
+    let registry = RegistryStorage::new(store.clone(), &tenant_ctx, test_signing_public_key());
 
     let mut manifest = test_manifest("app_tamper_test", "1.0.0");
     manifest.name = "Tamper Test".to_string();
     manifest.security.manifest_signature = "sig_...".to_string();
     manifest.security.manifest_signature_kid = "key1".to_string();
+    sign_manifest(&mut manifest);
 
     let (_, persisted) = registry.save_manifest(&manifest).await.unwrap();
 
@@ -247,7 +269,7 @@ async fn test_get_manifest_detects_tampered_stored_json() {
 #[tokio::test]
 async fn test_save_manifest_rejects_control_character_in_id() {
     let store = Arc::new(InMemory::new());
-    let registry = RegistryStorage::new(store, &test_tenant_ctx());
+    let registry = RegistryStorage::new(store, &test_tenant_ctx(), test_signing_public_key());
 
     let mut manifest = test_manifest("app_\0_test", "1.0.0");
     manifest.name = "Invalid Key".to_string();
@@ -269,21 +291,23 @@ async fn test_save_manifest_rejects_control_character_in_id() {
 #[tokio::test]
 async fn test_manifest_digest_numeric_normalization() {
     let store_a = Arc::new(InMemory::new());
-    let registry_a = RegistryStorage::new(store_a, &test_tenant_ctx());
+    let registry_a = RegistryStorage::new(store_a, &test_tenant_ctx(), test_signing_public_key());
 
     let store_b = Arc::new(InMemory::new());
-    let registry_b = RegistryStorage::new(store_b, &test_tenant_ctx());
+    let registry_b = RegistryStorage::new(store_b, &test_tenant_ctx(), test_signing_public_key());
 
     // Both must use SAME ID/Version/etc for digest to match
     let mut manifest_int = test_manifest("app_numeric", "1.0.0");
     manifest_int
         .configuration
         .insert("count".to_string(), serde_json::json!(1));
+    sign_manifest(&mut manifest_int);
 
     let mut manifest_float = test_manifest("app_numeric", "1.0.0");
     manifest_float
         .configuration
         .insert("count".to_string(), serde_json::json!(1.0));
+    sign_manifest(&mut manifest_float);
 
     // Ensure our input assumption is correct: json!(1) != json!(1.0) usually in serde_json Value representation
     // (though partial_eq might say they are equal, their serialization might differ without normalization)
@@ -302,7 +326,7 @@ async fn test_manifest_digest_numeric_normalization() {
 #[tokio::test]
 async fn test_manifest_digest_big_int_normalization() {
     let store_a = Arc::new(InMemory::new());
-    let registry_a = RegistryStorage::new(store_a, &test_tenant_ctx());
+    let registry_a = RegistryStorage::new(store_a, &test_tenant_ctx(), test_signing_public_key());
 
     // Test with i64::MAX and u64::MAX to ensure precision is kept
     let mut manifest_big = test_manifest("app_big_int", "1.0.0");
@@ -312,6 +336,7 @@ async fn test_manifest_digest_big_int_normalization() {
     manifest_big
         .configuration
         .insert("big_u64".to_string(), serde_json::json!(u64::MAX));
+    sign_manifest(&mut manifest_big);
 
     let (digest, _) = registry_a.save_manifest(&manifest_big).await.unwrap();
     assert_eq!(digest.len(), 96);
@@ -320,7 +345,7 @@ async fn test_manifest_digest_big_int_normalization() {
 #[tokio::test]
 async fn test_get_artifact_returns_artifact_not_found_for_missing_key() {
     let store = Arc::new(InMemory::new());
-    let registry = RegistryStorage::new(store, &test_tenant_ctx());
+    let registry = RegistryStorage::new(store, &test_tenant_ctx(), test_signing_public_key());
 
     let result = registry.get_artifact("missing_artifact", None).await;
     match result {
@@ -334,7 +359,7 @@ async fn test_get_artifact_returns_artifact_not_found_for_missing_key() {
 #[tokio::test]
 async fn test_registry_key_validation_invalid_paths() {
     let store = Arc::new(InMemory::new());
-    let registry = RegistryStorage::new(store, &test_tenant_ctx());
+    let registry = RegistryStorage::new(store, &test_tenant_ctx(), test_signing_public_key());
 
     let invalid_keys = vec![
         "../traversal",
@@ -369,7 +394,7 @@ async fn test_registry_key_validation_invalid_paths() {
 #[tokio::test]
 async fn test_save_manifest_rejects_whitespace_security_fields() {
     let store = Arc::new(InMemory::new());
-    let registry = RegistryStorage::new(store, &test_tenant_ctx());
+    let registry = RegistryStorage::new(store, &test_tenant_ctx(), test_signing_public_key());
 
     let mut manifest = test_manifest("app_whitespace_sig", "1.0.0");
     manifest.security.manifest_signature = "   ".to_string();

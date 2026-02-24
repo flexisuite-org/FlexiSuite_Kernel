@@ -15,7 +15,9 @@ hex = "0.4"
 bytes = "1.5"
 kernel-core = { path = "../kernel-core" }
 tracing = "=0.1.43"
+ring = "0.17"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full"] }
 tempfile = "3"
+ed25519-dalek = "2.2"

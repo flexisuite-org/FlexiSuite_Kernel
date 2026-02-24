@@ -226,10 +226,10 @@ async fn query_diagnostic(
 /// Stub health check endpoint. Does not perform real service checks.
 async fn get_health() -> impl IntoResponse {
     (
-        StatusCode::NOT_IMPLEMENTED,
+        StatusCode::OK,
         Json(serde_json::json!({
-            "status": "not_implemented",
-            "message": "Health dependency checks are not implemented yet. Implement real probes before using this endpoint for availability decisions.",
+            "status": "ok",
+            "message": "This endpoint is a non-production stub. Dependency-level health probes are not implemented yet.",
             "stub": true
         })),
     )
