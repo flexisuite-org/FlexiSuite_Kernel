@@ -25,35 +25,41 @@ pub async fn load_permissions_middleware(
         .extensions()
         .get::<TenantContext>()
         .cloned()
-        .ok_or(StatusCode::UNAUTHORIZED)?;
+        .ok_or_else(|| {
+            StatusCode::UNAUTHORIZED
+        })?;
 
-    let db = match ctx.db() {
-        Ok(db) => db,
+    match ctx.db() {
+        Ok(_) => { }
         Err(_) => {
-            warn!("Database connection missing in TenantContext");
             return Err(StatusCode::INTERNAL_SERVER_ERROR);
         }
     };
 
-    let user_id = match ctx.user_id() {
-        Some(uid) => uid,
-        None => {
-            req.extensions_mut()
-                .insert(UserPermissions(HashSet::new()));
-            return Ok(next.run(req).await);
+    if ctx.user_id().is_none() {
+        req.extensions_mut()
+            .insert(UserPermissions(HashSet::new()));
+        return Ok(next.run(req).await);
+    }
+
+    // Generate a temporary tenant token for RLS authorization
+    let token = match kernel_core::auth::KeyManager::generate_tenant_token(&ctx, ctx.tenant_id()).await {
+        Ok(t) => t,
+        Err(e) => {
+            warn!("Failed to generate tenant token for RBAC: {}", e);
+            return Err(StatusCode::INTERNAL_SERVER_ERROR);
         }
     };
 
-    let permissions_list =
-        match RBACRepository::get_user_permissions(db, ctx.tenant_id().as_str(), user_id.as_str())
-            .await
-        {
-            Ok(perms) => perms,
-            Err(e) => {
-                warn!("Failed to fetch permissions: {}", e);
-                return Err(StatusCode::INTERNAL_SERVER_ERROR);
-            }
-        };
+    let ctx_with_token = ctx.with_token(token);
+
+    let permissions_list = match RBACRepository::get_user_permissions(&ctx_with_token).await {
+        Ok(perms) => perms,
+        Err(e) => {
+            warn!("Failed to fetch permissions: {}", e);
+            return Err(StatusCode::INTERNAL_SERVER_ERROR);
+        }
+    };
 
     let mut permissions_set = HashSet::new();
     for p in permissions_list {
