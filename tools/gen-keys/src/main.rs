@@ -4,6 +4,7 @@ use ed25519_dalek::{SigningKey, VerifyingKey};
 use rand::RngCore;
 use rand::rngs::OsRng;
 use serde::Serialize;
+use std::io;
 use std::fs;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -55,10 +56,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let pub_hex = hex::encode(verifying_key.to_bytes());
     let now_duration = SystemTime::now().duration_since(UNIX_EPOCH)?;
     let now_secs = now_duration.as_secs();
+    let subsec_nanos = now_duration.subsec_nanos();
     let now_dt = Utc
-        .timestamp_opt(now_secs as i64, now_duration.subsec_nanos())
+        .timestamp_opt(now_secs as i64, subsec_nanos)
         .single()
-        .expect("SystemTime::now() and UNIX_EPOCH must produce a valid UTC timestamp");
+        .ok_or_else(|| {
+            io::Error::other(format!(
+                "failed to convert SystemTime to UTC timestamp: now_secs={now_secs}, subsec_nanos={subsec_nanos}"
+            ))
+        })?;
     let generated_at = now_dt.to_rfc3339();
 
     let validity_secs = args.validity_days.saturating_mul(24 * 60 * 60);

@@ -2022,34 +2022,11 @@ pub fn violation_to_response(v: &QuotaViolation, request_id: Option<String>) -> 
         .and_then(|(_, value)| value.parse::<u64>().ok())
         .unwrap_or(v.retry_after_s);
 
-    let limit = quota_headers
-        .iter()
-        .find(|(name, _)| name.eq_ignore_ascii_case("X-RateLimit-Limit"))
-        .and_then(|(_, value)| value.parse::<u64>().ok());
-    let remaining = quota_headers
-        .iter()
-        .find(|(name, _)| name.eq_ignore_ascii_case("X-RateLimit-Remaining"))
-        .and_then(|(_, value)| value.parse::<u64>().ok());
-    let period = quota_headers
-        .iter()
-        .find(|(name, _)| name.eq_ignore_ascii_case("X-RateLimit-Period"))
-        .cloned()
-        .map(|(_, value)| value);
-
     let mut body = serde_json::Map::new();
     body.insert("status".to_string(), serde_json::json!(status.as_u16()));
     body.insert("error".to_string(), serde_json::json!(message));
     body.insert("retry_after".to_string(), serde_json::json!(retry_after));
     body.insert("request_id".to_string(), serde_json::json!(request_id));
-    if let Some(value) = limit {
-        body.insert("limit".to_string(), serde_json::json!(value));
-    }
-    if let Some(value) = remaining {
-        body.insert("remaining".to_string(), serde_json::json!(value));
-    }
-    if let Some(value) = period {
-        body.insert("period".to_string(), serde_json::json!(value));
-    }
     let mut res = (status, Json(serde_json::Value::Object(body))).into_response();
 
     // Inject headers from violation

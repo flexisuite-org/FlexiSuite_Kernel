@@ -226,6 +226,34 @@ async fn test_get_manifest_accepts_legacy_raw_hex_digest() {
 }
 
 #[tokio::test]
+async fn test_save_manifest_rejects_legacy_raw_hex_digest() {
+    let store = Arc::new(InMemory::new());
+    let (registry, signing_key, kid) = setup_registry_with_keys(store);
+
+    let mut manifest = test_manifest("app_legacy_save_reject", "1.0.0");
+    manifest.security.manifest_signature_kid = kid;
+    let prefixed_digest = compute_digest(&manifest);
+    let legacy_digest = prefixed_digest
+        .strip_prefix("sha384-")
+        .expect("computed digest should be sha384-prefixed")
+        .to_string();
+    manifest.security.manifest_digest = legacy_digest.clone();
+    manifest.security.manifest_signature =
+        hex::encode(signing_key.sign(legacy_digest.as_bytes()).to_bytes());
+
+    let result = registry.save_manifest(&manifest).await;
+    match result {
+        Err(RegistryError::InvalidManifest(msg)) => {
+            assert_eq!(
+                msg,
+                "security.manifest_digest must be canonical sha384-<hex>"
+            );
+        }
+        other => panic!("expected InvalidManifest for legacy digest, got {other:?}"),
+    }
+}
+
+#[tokio::test]
 async fn test_manifest_digest_excludes_security_section() {
     let store_a = Arc::new(InMemory::new());
     let (registry_a, key_a, kid_a) = setup_registry_with_keys(store_a);
@@ -540,7 +568,9 @@ async fn test_save_manifest_verifies_signature() {
     // 2. Invalid Signature (Tampered Payload)
     let mut manifest_bad = manifest.clone();
     manifest_bad.name = "Changed".to_string(); // Changes digest
-    // Keep old signature
+    let tampered_digest = compute_digest(&manifest_bad);
+    manifest_bad.security.manifest_digest = tampered_digest;
+    // Keep old signature so signature verification must fail.
     let result = registry.save_manifest(&manifest_bad).await;
     match result {
         Err(RegistryError::InvalidManifest(msg)) => {
@@ -571,7 +601,13 @@ async fn test_save_manifest_rejects_unknown_kid() {
         RegistryStorage::new_with_trust_provider(store, &test_tenant_ctx(), trust_provider);
 
     let mut manifest = test_manifest("app_unknown_kid", "1.0.0");
-    manifest.security.manifest_signature = "dummy-signature".to_string();
+    let digest = compute_digest(&manifest);
+    manifest.security.manifest_digest = digest.clone();
+    manifest.security.manifest_signature = hex::encode(
+        ed25519_dalek::SigningKey::generate(&mut OsRng)
+            .sign(digest.as_bytes())
+            .to_bytes(),
+    );
     manifest.security.manifest_signature_kid = "missing-key-id".to_string();
 
     let result = registry.save_manifest(&manifest).await;
