@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 use axum::{
+    Json,
     body::{Body, to_bytes},
     http::{
         HeaderMap, HeaderName, HeaderValue, Method, Request, StatusCode, header::CONTENT_LENGTH,
@@ -22,7 +23,7 @@ use tokio::sync::{Mutex, Notify};
 use tracing::{error, info, instrument, warn};
 
 use crate::auth::TenantContext;
-use crate::error::build_json_error_response;
+use crate::build_json_error_response;
 
 #[derive(Clone)]
 pub struct MiddlewareConfig {
@@ -886,10 +887,7 @@ impl IdempotencyStore for RedisIdempotencyStore {
     /// and check backend availability.
     async fn ping(&self) -> Result<PingStatus, IdempotencyStoreError> {
         let mut conn = self.manager.clone();
-        match redis::cmd("PING")
-            .query_async::<String>(&mut conn)
-            .await
-        {
+        match redis::cmd("PING").query_async::<String>(&mut conn).await {
             Ok(_) => Ok(PingStatus::Ok),
             Err(e) => {
                 error!("Redis ping error: {}", e);
@@ -1560,10 +1558,7 @@ pub async fn get_action(
 }
 
 #[instrument(skip_all, fields(tenant_id, method, path))]
-pub async fn idempotency_middleware(
-    req: Request<Body>,
-    next: Next,
-) -> Result<Response, Response> {
+pub async fn idempotency_middleware(req: Request<Body>, next: Next) -> Result<Response, Response> {
     let (parts, body) = req.into_parts();
     let method = parts.method.clone();
     let request_id = parts
@@ -1612,9 +1607,9 @@ pub async fn idempotency_middleware(
         }
     };
 
-    let tenant_ctx = parts.extensions.get::<TenantContext>().ok_or(
-        build_json_error_response("Unauthorized", StatusCode::UNAUTHORIZED, request_id.clone()),
-    )?;
+    let tenant_ctx = parts.extensions.get::<TenantContext>().ok_or_else(|| {
+        build_json_error_response("Unauthorized", StatusCode::UNAUTHORIZED, request_id.clone())
+    })?;
 
     tracing::Span::current().record("tenant_id", &tenant_ctx.tenant_id().to_string());
     tracing::Span::current().record("method", method.as_str());
@@ -1635,11 +1630,13 @@ pub async fn idempotency_middleware(
         .extensions
         .get::<MiddlewareState>()
         .cloned()
-        .ok_or(build_json_error_response(
-            "Internal Server Error",
-            StatusCode::INTERNAL_SERVER_ERROR,
-            request_id.clone(),
-        ))?;
+        .ok_or_else(|| {
+            build_json_error_response(
+                "Internal Server Error",
+                StatusCode::INTERNAL_SERVER_ERROR,
+                request_id.clone(),
+            )
+        })?;
 
     let body_bytes = match to_bytes(body, state.config.max_body_size).await {
         Ok(b) => b,
@@ -1944,37 +1941,34 @@ pub async fn quota_middleware(req: Request<Body>, next: Next) -> Result<Response
     #[cfg(any(test, feature = "test-utils"))]
     {
         if parts.headers.contains_key("X-Mock-Quota-System") {
-            let mut violation = QuotaViolation {
+            let violation = QuotaViolation {
                 layer: QuotaLayer::SystemHardLimit,
                 retry_after_s: 100,
             };
-            violation.clamp_retry_after();
             warn!("System Hard Limit exceeded (Mock)");
             return Err(violation_to_response(&violation, request_id));
         }
 
         if parts.headers.contains_key("X-Mock-Quota-Tenant") {
-            let mut violation = QuotaViolation {
+            let violation = QuotaViolation {
                 layer: QuotaLayer::TenantBudget,
                 retry_after_s: 5,
             };
-            violation.clamp_retry_after();
             warn!("Tenant Budget exceeded (Mock)");
             return Err(violation_to_response(&violation, request_id));
         }
 
         if parts.headers.contains_key("X-Mock-Quota-Api") {
-            let mut violation = QuotaViolation {
+            let violation = QuotaViolation {
                 layer: QuotaLayer::ApiRateLimit,
                 retry_after_s: 60,
             };
-            violation.clamp_retry_after();
             warn!("API Rate Limit exceeded (Mock)");
             return Err(violation_to_response(&violation, request_id));
         }
     }
 
-    if let Err(mut v) = state
+    if let Err(v) = state
         .quota_store
         .check_and_update_multi(
             tenant_ctx.tenant_id(),
@@ -1986,7 +1980,6 @@ pub async fn quota_middleware(req: Request<Body>, next: Next) -> Result<Response
         )
         .await
     {
-        v.clamp_retry_after();
         return Err(violation_to_response(&v, request_id));
     }
 
@@ -2009,25 +2002,28 @@ pub fn violation_to_status(v: &QuotaViolation) -> StatusCode {
 }
 
 pub fn violation_to_response(v: &QuotaViolation, request_id: Option<String>) -> Response {
-    let violation_type = match v.layer {
-        QuotaLayer::SystemHardLimit => "system_hard_limit",
-        QuotaLayer::CircuitBreaker => "circuit_breaker",
-        QuotaLayer::TenantBudget => "tenant_budget",
-        QuotaLayer::ApiRateLimit => "api_rate_limit",
-    };
-    crate::metrics::record_quota_reject(violation_type);
     let status = violation_to_status(v);
     let message = match status {
         StatusCode::TOO_MANY_REQUESTS => "Rate limit exceeded",
         _ => "Quota limit exceeded",
     };
+    let quota_headers = v.headers();
+    let retry_after = quota_headers
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case("Retry-After"))
+        .and_then(|(_, value)| value.parse::<u64>().ok())
+        .unwrap_or(v.retry_after_s);
 
-    // Construct the standard JSON error
-    let mut res = build_json_error_response(message, status, request_id);
+    let mut body = serde_json::Map::new();
+    body.insert("status".to_string(), serde_json::json!(status.as_u16()));
+    body.insert("error".to_string(), serde_json::json!(message));
+    body.insert("retry_after".to_string(), serde_json::json!(retry_after));
+    body.insert("request_id".to_string(), serde_json::json!(request_id));
+    let mut res = (status, Json(serde_json::Value::Object(body))).into_response();
 
     // Inject headers from violation
     let headers = res.headers_mut();
-    for (name, value) in v.headers() {
+    for (name, value) in quota_headers {
         if let Ok(hname) = HeaderName::from_bytes(name.as_bytes()) {
             if let Ok(hval) = HeaderValue::from_str(&value) {
                 headers.insert(hname, hval);
@@ -2037,6 +2033,12 @@ pub fn violation_to_response(v: &QuotaViolation, request_id: Option<String>) -> 
 
     #[cfg(any(test, feature = "test-utils"))]
     {
+        let violation_type = match v.layer {
+            QuotaLayer::SystemHardLimit => "system_hard_limit",
+            QuotaLayer::CircuitBreaker => "circuit_breaker",
+            QuotaLayer::TenantBudget => "tenant_budget",
+            QuotaLayer::ApiRateLimit => "api_rate_limit",
+        };
         // For tests, we might want to inspect specific violation details via headers
         headers.insert(
             "X-Violation-Type",

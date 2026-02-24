@@ -225,17 +225,7 @@ async fn query_diagnostic(
 
 /// Health probe entry-point. For availability decisions, use /health/liveness or /health/readiness.
 async fn get_health() -> impl IntoResponse {
-    (
-        StatusCode::OK,
-        Json(serde_json::json!({
-            "status": "up",
-            "probes": {
-                "liveness": "/health/liveness",
-                "readiness": "/health/readiness"
-            }
-        })),
-    )
-        .into_response()
+    (StatusCode::OK, Json(serde_json::json!({ "status": "ok" }))).into_response()
 }
 
 async fn get_policy(Extension(ctx): Extension<TenantContext>) -> impl IntoResponse {

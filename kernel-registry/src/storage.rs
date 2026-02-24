@@ -1,192 +1,28 @@
 use crate::error::RegistryError;
 use crate::model::{Dependencies, DistManifest, Kind, Route};
-use base64::Engine;
-use base64::prelude::BASE64_URL_SAFE_NO_PAD;
+use crate::trust::{FileTrustProvider, TrustProvider};
 use bytes::Bytes;
-use ed25519_dalek::{Signature, VerifyingKey};
 use kernel_core::auth::TenantContext;
-use object_store::path::Path;
+use kernel_core::supplychain::{Manifest, VerificationResult, verify_manifest};
 use object_store::ObjectStore;
+use object_store::path::Path;
 use serde::Serialize;
 use sha2::{Digest, Sha384};
-use std::collections::{BTreeMap, HashMap, HashSet};
-use std::sync::{Arc, LazyLock, RwLock};
+use std::collections::BTreeMap;
+use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::{error, info, instrument, warn};
-
-// Cached Trust Roots
-static TRUST_ROOTS: LazyLock<RwLock<HashMap<String, VerifyingKey>>> = LazyLock::new(|| {
-    let map = load_trust_roots_from_env();
-    RwLock::new(map)
-});
-
-fn load_trust_roots_from_env() -> HashMap<String, VerifyingKey> {
-    let mut map = HashMap::new();
-    let mut source_suffixes = HashMap::<String, String>::new();
-    let mut collisions = HashSet::<String>::new();
-
-    for (key, val) in std::env::vars_os() {
-        let key = match key.into_string() {
-            Ok(v) => v,
-            Err(_) => {
-                warn!("Skipping non-UTF-8 environment variable name while loading trust roots");
-                continue;
-            }
-        };
-        if let Some(kid_suffix) = key.strip_prefix("FLEXI_REGISTRY_TRUST_ROOT_KEY_B64URL_") {
-            if kid_suffix.is_empty() {
-                continue;
-            }
-            let val = match val.into_string() {
-                Ok(v) => v,
-                Err(_) => {
-                    warn!(
-                        "Ignoring trust root env var {} because value is not valid UTF-8",
-                        key
-                    );
-                    continue;
-                }
-            };
-            // Normalize checks: The suffix MUST be alphanumeric + underscore only.
-            // We reuse normalize_kid logic or just check it directly.
-            // Since this comes from environment keys (often shell constrained), uppercase is expected.
-            // We validate to prevent garbage keys.
-            if !kid_suffix
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
-            {
-                warn!("Ignoring invalid trust root env key suffix: {}", kid_suffix);
-                continue;
-            }
-
-            let normalized_kid = normalize_kid(kid_suffix);
-            if collisions.contains(&normalized_kid) {
-                warn!(
-                    kid_suffix = %kid_suffix,
-                    normalized_kid = %normalized_kid,
-                    "Ignoring trust root key because this normalized KID is in collision state"
-                );
-                continue;
-            }
-            if let Some(existing_suffix) = source_suffixes.get(&normalized_kid) {
-                if existing_suffix != kid_suffix {
-                    warn!(
-                        existing_suffix = %existing_suffix,
-                        conflicting_suffix = %kid_suffix,
-                        normalized_kid = %normalized_kid,
-                        "Rejecting normalized KID collision in trust root env vars"
-                    );
-                    map.remove(&normalized_kid);
-                    source_suffixes.remove(&normalized_kid);
-                    collisions.insert(normalized_kid);
-                    continue;
-                }
-            }
-
-            match BASE64_URL_SAFE_NO_PAD.decode(&val) {
-                Ok(bytes) => {
-                    if bytes.len() != 32 {
-                        warn!(
-                            "Invalid Ed25519 public key length for env var {}: expected 32, got {}",
-                            key,
-                            bytes.len()
-                        );
-                        continue;
-                    }
-                    if let Ok(vk) = VerifyingKey::from_bytes(
-                        bytes.as_slice().try_into().expect("Checked length is 32"),
-                    ) {
-                        source_suffixes.insert(normalized_kid.clone(), kid_suffix.to_string());
-                        map.insert(normalized_kid, vk);
-                    } else {
-                        warn!("Invalid Ed25519 public key format for env var {}", key);
-                    }
-                }
-                Err(_) => {
-                    warn!("Invalid Base64URL encoding for env var {}", key);
-                }
-            }
-        }
-    }
-    if !collisions.is_empty() {
-        warn!(
-            collisions = ?collisions,
-            "Detected trust root key normalization collisions; affected KIDs were rejected"
-        );
-    }
-    info!("Loaded {} trust root keys from environment", map.len());
-    map
-}
-
-/// Explicitly reloads trust root keys from environment variables.
-/// Call this after updating environment variables (e.g., in tests or during config refresh).
-pub fn reload_trust_root_keys() {
-    let new_map = load_trust_roots_from_env();
-    let mut write_guard = TRUST_ROOTS.write().expect("Trust root lock poisoned");
-
-    // Calculate diff for logging
-    let old_keys: Vec<_> = write_guard.keys().cloned().collect();
-    let new_keys: Vec<_> = new_map.keys().cloned().collect();
-
-    let added: Vec<_> = new_keys
-        .iter()
-        .filter(|k| !write_guard.contains_key(*k))
-        .collect();
-    let removed: Vec<_> = old_keys
-        .iter()
-        .filter(|k| !new_map.contains_key(*k))
-        .collect();
-    
-    // Detect rotated keys (same KID, different value)
-    let rotated: Vec<_> = new_keys
-        .iter()
-        .filter(|k| {
-            if let (Some(old_val), Some(new_val)) = (write_guard.get(*k), new_map.get(*k)) {
-                // VerifyingKey implements PartialEq
-                old_val != new_val
-            } else {
-                false
-            }
-        })
-        .collect();
-
-    if !added.is_empty() || !removed.is_empty() || !rotated.is_empty() {
-        info!(
-            "Reloading trust roots. Added: {:?}, Removed: {:?}, Rotated: {:?}",
-            added, removed, rotated
-        );
-    } else {
-        info!("Reloading trust roots. No changes detected.");
-    }
-
-    *write_guard = new_map;
-}
-
-pub fn normalize_kid(kid: &str) -> String {
-    // Alphanumeric -> Uppercase
-    // Hyphen -> Hyphen (preserved)
-    // Others -> Underscore
-    // This matches the ENV var pattern FLEXI_REGISTRY_TRUST_ROOT_KEY_B64URL_{NORMALIZED}
-    kid.chars()
-        .map(|ch| {
-            if ch.is_ascii_alphanumeric() {
-                ch.to_ascii_uppercase()
-            } else if ch == '-' {
-                '-'
-            } else {
-                '_'
-            }
-        })
-        .collect::<String>()
-}
 
 pub struct RegistryStorage {
     store: Arc<dyn ObjectStore>,
     prefix: String,
     tenant_id: String,
+    trust_provider: Arc<dyn TrustProvider>,
 }
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
+/// Digest payload for `manifest_payload_digest`.
 struct ManifestDigestPayload<'a> {
     schema_version: &'a str,
     id: &'a str,
@@ -201,11 +37,60 @@ struct ManifestDigestPayload<'a> {
 }
 
 impl RegistryStorage {
-    pub fn new(store: Arc<dyn ObjectStore>, tenant_ctx: &TenantContext) -> Self {
+    const SHA384_HEX_LEN: usize = 96;
+
+    fn is_ascii_hex_of_len(value: &str, expected_len: usize) -> bool {
+        value.len() == expected_len && value.chars().all(|c| c.is_ascii_hexdigit())
+    }
+
+    fn emit_manifest_signature_invalid_audit(kid: &str, reason: &str) {
+        error!(
+            event = "MANIFEST_SIGNATURE_INVALID",
+            kid = %kid,
+            reason = %reason,
+            "Manifest signature validation failed"
+        );
+    }
+
+    pub fn new(
+        store: Arc<dyn ObjectStore>,
+        tenant_ctx: &TenantContext,
+    ) -> Result<Self, RegistryError> {
+        let trust_path_str = std::env::var("MANIFEST_TRUST_ROOT_PATH")
+            .unwrap_or_else(|_| "ops/trust/manifest_trust_root.json".to_string());
+        let trust_path = std::path::PathBuf::from(&trust_path_str);
+
+        if !trust_path.exists() {
+            return Err(RegistryError::TrustRootError(format!(
+                "Trust root file not found: {:?}. Set MANIFEST_TRUST_ROOT_PATH to a valid trust root path (current value: {}).",
+                trust_path, trust_path_str
+            )));
+        }
+
+        let trust_provider = FileTrustProvider::new(trust_path.clone()).map_err(|e| {
+            RegistryError::TrustRootError(format!(
+                "Failed to load trust root from {:?}: {}",
+                trust_path, e
+            ))
+        })?;
+
+        Ok(Self::new_with_trust_provider(
+            store,
+            tenant_ctx,
+            Arc::new(trust_provider),
+        ))
+    }
+
+    pub fn new_with_trust_provider(
+        store: Arc<dyn ObjectStore>,
+        tenant_ctx: &TenantContext,
+        trust_provider: Arc<dyn TrustProvider>,
+    ) -> Self {
         Self {
             store,
             prefix: format!("tenants/{}/", tenant_ctx.tenant_id().as_str()),
             tenant_id: tenant_ctx.tenant_id().to_string(),
+            trust_provider,
         }
     }
 
@@ -257,7 +142,7 @@ impl RegistryStorage {
         ))
     }
 
-    pub fn manifest_payload_digest(manifest: &DistManifest) -> Result<String, RegistryError> {
+    fn manifest_payload_digest(manifest: &DistManifest) -> Result<String, RegistryError> {
         let payload = ManifestDigestPayload {
             schema_version: &manifest.schema_version,
             id: &manifest.id,
@@ -277,7 +162,42 @@ impl RegistryStorage {
 
         let mut hasher = Sha384::new();
         hasher.update(payload_bytes);
-        Ok(hex::encode(hasher.finalize()))
+        Ok(Self::canonical_manifest_digest(&hex::encode(
+            hasher.finalize(),
+        )))
+    }
+
+    pub fn compute_manifest_digest(manifest: &DistManifest) -> Result<String, RegistryError> {
+        Self::manifest_payload_digest(manifest)
+    }
+
+    fn canonical_manifest_digest(hex_digest: &str) -> String {
+        format!("sha384-{}", hex_digest.to_ascii_lowercase())
+    }
+
+    fn normalize_manifest_digest_for_compare(digest: &str) -> Option<String> {
+        let value = digest.trim();
+        // Read path keeps backward compatibility for legacy raw SHA-384 hex persisted
+        // before canonical prefix enforcement; save path only accepts "sha384-<hex>".
+        if let Some(hex_part) = value.strip_prefix("sha384-") {
+            if Self::is_ascii_hex_of_len(hex_part, Self::SHA384_HEX_LEN) {
+                return Some(Self::canonical_manifest_digest(hex_part));
+            }
+            return None;
+        }
+        if Self::is_ascii_hex_of_len(value, Self::SHA384_HEX_LEN) {
+            return Some(Self::canonical_manifest_digest(value));
+        }
+        None
+    }
+
+    fn canonical_manifest_digest_for_save(digest: &str) -> Option<String> {
+        let value = digest.trim();
+        let hex_part = value.strip_prefix("sha384-")?;
+        if !Self::is_ascii_hex_of_len(hex_part, Self::SHA384_HEX_LEN) {
+            return None;
+        }
+        Some(Self::canonical_manifest_digest(hex_part))
     }
 
     fn normalize_value(v: serde_json::Value) -> serde_json::Value {
@@ -318,71 +238,6 @@ impl RegistryStorage {
         }
     }
 
-    fn verify_signature(kid: &str, digest: &str, signature: &str) -> Result<(), RegistryError> {
-        // 1. Validate KID Format
-        // Strict allowlist: Alphanumeric, hyphen, underscore only.
-        // Replaced Regex with manual check for reduced dependency.
-        if !kid
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
-        {
-            warn!(kid = %kid, "Invalid KID format rejected");
-            return Err(RegistryError::KeyNotFound(format!(
-                "Invalid KID format: {}",
-                kid
-            )));
-        }
-
-        // 2. Normalize KID for Lookup
-        let normalized_kid = normalize_kid(kid);
-
-        // 3. Lookup Public Key from Cache
-        // Extract the key OUT of the lock scope to avoid holding lock during crypto
-        let public_key = {
-            let trust_roots = TRUST_ROOTS.read().expect("Trust root lock poisoned");
-            trust_roots.get(&normalized_kid).cloned()
-        };
-
-        let public_key = public_key.ok_or_else(|| {
-            warn!(kid = %kid, normalized = %normalized_kid, "Trust root key not found");
-            RegistryError::KeyNotFound(format!("Public key for kid '{kid}' not found"))
-        })?;
-
-        // 4. Decode Signature
-        let signature_bytes = BASE64_URL_SAFE_NO_PAD.decode(signature).map_err(|e| {
-            warn!(kid = %kid, "Invalid base64 signature");
-            RegistryError::SignatureVerificationFailed(format!("Invalid signature encoding: {e}"))
-        })?;
-        let signature_obj = Signature::from_slice(&signature_bytes).map_err(|e| {
-            warn!(kid = %kid, "Invalid signature length");
-            RegistryError::SignatureVerificationFailed(format!("Invalid signature format: {e}"))
-        })?;
-
-        // 5. Verify (Ed25519)
-        // Verify raw SHA-384 digest bytes (48 bytes), NOT the hex string bytes.
-        let digest_bytes = hex::decode(digest).map_err(|e| {
-            warn!(kid = %kid, "Invalid digest hex encoding");
-            RegistryError::InvalidManifest(format!("Invalid digest hex: {e}"))
-        })?;
-
-        if digest_bytes.len() != 48 {
-            warn!(kid = %kid, digest = %digest, len = digest_bytes.len(), "Invalid digest length");
-            return Err(RegistryError::InvalidManifest(format!(
-                "Invalid digest length: expected 48, got {}",
-                digest_bytes.len()
-            )));
-        }
-
-        // Use verify_strict to reject weak keys
-        public_key
-            .verify_strict(&digest_bytes, &signature_obj)
-            .map_err(|_| {
-                warn!(kid = %kid, digest = %digest, "Signature verification failed");
-                RegistryError::SignatureVerificationFailed("Invalid signature".to_string())
-            })
-    }
-
-    /// Saves binary data and returns the SHA-384 digest (hex string).
     #[instrument(skip(self, data), fields(tenant = %self.tenant_id, artifact = %key))]
     pub async fn save_artifact(&self, key: &str, data: Bytes) -> Result<String, RegistryError> {
         Self::validate_key(key)?;
@@ -400,7 +255,6 @@ impl RegistryStorage {
         Ok(digest)
     }
 
-    /// Retrieves binary data. If expected_digest is provided, verifies SHA-384.
     #[instrument(skip(self), fields(tenant = %self.tenant_id, artifact = %key))]
     pub async fn get_artifact(
         &self,
@@ -439,8 +293,6 @@ impl RegistryStorage {
         Ok(data)
     }
 
-    /// Saves a DistManifest to `manifests/{id}/{version}/manifest.json`.
-    /// Returns the SHA-384 digest and persisted manifest with manifest_digest set.
     #[instrument(skip(self, manifest), fields(tenant = %self.tenant_id, manifest.id = %manifest.id, manifest.version = %manifest.version))]
     pub async fn save_manifest(
         &self,
@@ -467,19 +319,84 @@ impl RegistryStorage {
             ));
         }
 
-        // manifest_digest is computed from the manifest with the entire
-        // security section excluded from the hashed payload.
-        let computed_digest = Self::manifest_payload_digest(manifest)?;
+        // Save path enforces canonical SHA-384 format to keep persisted manifests
+        // aligned with payload hashing and signature verification behavior.
+        let submitted_digest =
+            Self::canonical_manifest_digest_for_save(&manifest.security.manifest_digest)
+                .ok_or_else(|| {
+                    RegistryError::InvalidManifest(
+                        "security.manifest_digest must be canonical sha384-<hex>".to_string(),
+                    )
+                })?;
 
-        // Verify signature BEFORE accepting/persisting
-        Self::verify_signature(
-            &manifest.security.manifest_signature_kid,
+        // security section excluded from the hashed payload (canonical "sha384-{hex}" format).
+        let computed_digest = Self::manifest_payload_digest(manifest)?;
+        if submitted_digest != computed_digest {
+            warn!(
+                submitted = %submitted_digest,
+                computed = %computed_digest,
+                "Manifest rejected: submitted digest does not match payload digest"
+            );
+            return Err(RegistryError::InvalidManifest(format!(
+                "security.manifest_digest mismatch: submitted={}, computed={}",
+                submitted_digest, computed_digest
+            )));
+        }
+
+        // Validate Security
+        let trusted_key = self
+            .trust_provider
+            .get_key(&manifest.security.manifest_signature_kid)
+            .map_err(|err| {
+                Self::emit_manifest_signature_invalid_audit(
+                    &manifest.security.manifest_signature_kid,
+                    &format!("trust_provider.get_key failed: {err}"),
+                );
+                err
+            })?;
+
+        let core_manifest = Manifest {
+            id: manifest.id.clone(),
+            digest: submitted_digest.clone(),
+            signature: manifest.security.manifest_signature.clone(),
+            kid: manifest.security.manifest_signature_kid.clone(),
+        };
+
+        let now = match SystemTime::now().duration_since(UNIX_EPOCH) {
+            Ok(duration) => duration.as_secs(),
+            Err(err) => {
+                warn!(
+                    error = %err,
+                    "System clock is before UNIX_EPOCH; falling back to now=0 for manifest verification"
+                );
+                0
+            }
+        };
+
+        match verify_manifest(
+            &self.tenant_id,
+            &core_manifest,
+            &trusted_key,
             &computed_digest,
-            &manifest.security.manifest_signature,
-        )?;
+            now,
+        ) {
+            VerificationResult::Ok => {
+                info!("Manifest signature verified successfully");
+            }
+            err => {
+                Self::emit_manifest_signature_invalid_audit(
+                    &trusted_key.kid,
+                    &format!("verify_manifest failed: {err:?}"),
+                );
+                return Err(RegistryError::InvalidManifest(format!(
+                    "Signature verification failed: {:?}",
+                    err
+                )));
+            }
+        }
 
         let mut persisted = manifest.clone();
-        persisted.security.manifest_digest = computed_digest.clone();
+        persisted.security.manifest_digest = submitted_digest;
 
         let path = self.manifest_path(&manifest.id, &manifest.version);
         let data = serde_json::to_vec(&persisted)?;
@@ -493,7 +410,6 @@ impl RegistryStorage {
         Ok((computed_digest, persisted))
     }
 
-    /// Retrieves a DistManifest from `manifests/{id}/{version}/manifest.json`.
     #[instrument(skip(self), fields(tenant = %self.tenant_id, manifest.id = %id, manifest.version = %version))]
     pub async fn get_manifest(
         &self,
@@ -516,18 +432,65 @@ impl RegistryStorage {
         let data = result.bytes().await?;
         let manifest: DistManifest = serde_json::from_slice(&data)?;
         let actual = Self::manifest_payload_digest(&manifest)?;
-        let expected = manifest.security.manifest_digest.clone();
+        let expected =
+            Self::normalize_manifest_digest_for_compare(&manifest.security.manifest_digest)
+                .ok_or_else(|| {
+                    RegistryError::InvalidManifest(format!(
+                        "security.manifest_digest must be sha384-<hex> or legacy hex: {}",
+                        manifest.security.manifest_digest
+                    ))
+                })?;
         if actual != expected {
             warn!(expected = %expected, actual = %actual, "Manifest integrity check failed");
             return Err(RegistryError::IntegrityCheckFailed { expected, actual });
         }
 
-        // Verify signature
-        Self::verify_signature(
-            &manifest.security.manifest_signature_kid,
+        let trusted_key = self
+            .trust_provider
+            .get_key(&manifest.security.manifest_signature_kid)
+            .map_err(|err| {
+                Self::emit_manifest_signature_invalid_audit(
+                    &manifest.security.manifest_signature_kid,
+                    &format!("trust_provider.get_key failed: {err}"),
+                );
+                err
+            })?;
+
+        let core_manifest = Manifest {
+            id: manifest.id.clone(),
+            digest: manifest.security.manifest_digest.clone(),
+            signature: manifest.security.manifest_signature.clone(),
+            kid: manifest.security.manifest_signature_kid.clone(),
+        };
+        let now = match SystemTime::now().duration_since(UNIX_EPOCH) {
+            Ok(duration) => duration.as_secs(),
+            Err(err) => {
+                warn!(
+                    error = %err,
+                    "System clock is before UNIX_EPOCH; falling back to now=0 for manifest read verification"
+                );
+                0
+            }
+        };
+        match verify_manifest(
+            &self.tenant_id,
+            &core_manifest,
+            &trusted_key,
             &actual,
-            &manifest.security.manifest_signature,
-        )?;
+            now,
+        ) {
+            VerificationResult::Ok => {}
+            reason => {
+                Self::emit_manifest_signature_invalid_audit(
+                    &trusted_key.kid,
+                    &format!("verify_manifest failed on read: {reason:?}"),
+                );
+                return Err(RegistryError::InvalidManifest(format!(
+                    "Signature verification failed: {:?}",
+                    reason
+                )));
+            }
+        }
 
         info!(digest = %actual, "Manifest retrieved successfully");
         Ok(manifest)

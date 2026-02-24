@@ -1,4 +1,0 @@
-## 2024-05-23 - Manifest Signature Verification Pattern
-**Vulnerability:** The registry initially accepted manifests without verifying their digital signatures, relying only on digest integrity. This allowed potential tampering if an attacker could upload a manifest with a matching digest but invalid signature.
-**Learning:** `RegistryStorage` is a library, not a service, so it lacks a global configuration injection point. However, security (trust roots) must be enforced at the storage boundary. Using environment variables `FLEXI_REGISTRY_TRUST_ROOT_KEY_B64URL_{KID}` allows for a decentralized, self-contained trust configuration that works across services without complex dependency injection refactoring.
-**Prevention:** Always verify signatures *before* persistence. Use `temp-env` for safe parallel testing of environment-dependent logic, but be aware of `tokio` runtime nesting issues when mixing synchronous closures with async tests.
