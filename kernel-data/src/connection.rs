@@ -207,7 +207,10 @@ fn parse_tenant_from_token(token: &str) -> Option<String> {
              error!("tenant_id missing in token payload");
         }
         return tid;
-    } else if let Some(tenant_id) = token.strip_prefix("dev-token:") {
+    }
+
+    #[cfg(feature = "test-utils")]
+    if let Some(tenant_id) = token.strip_prefix("dev-token:") {
         // Special dev token for tests/debug with tenant ID
         return Some(tenant_id.to_string());
     }

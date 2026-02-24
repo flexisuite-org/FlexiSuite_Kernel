@@ -234,7 +234,7 @@ async fn get_health(Extension(ctx): Extension<TenantContext>) -> impl IntoRespon
         }
     };
 
-    match db.execute(Statement::from_string(DbBackend::Postgres, "SELECT 1".to_owned())).await {
+    match db.ping().await {
         Ok(_) => (StatusCode::OK, Json(serde_json::json!({"status": "ok"}))).into_response(),
         Err(e) => {
             tracing::error!("Health check failed (DB): {}", e);
