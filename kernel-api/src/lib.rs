@@ -7,8 +7,7 @@ use axum::{
     routing::{get, post},
 };
 use kernel_core::auth::SystemTenantContext;
-use kernel_data::entities::key_record;
-use sea_orm::{DatabaseConnection, EntityTrait};
+use sea_orm::DatabaseConnection;
 use serde::Serialize;
 use std::sync::Arc;
 use std::time::Duration;
@@ -287,13 +286,5 @@ async fn readiness(
 
 async fn check_database_readiness(db: Arc<DatabaseConnection>) -> Result<(), std::io::Error> {
     let system_ctx = TenantContext::from(SystemTenantContext).with_db(db);
-    let db_conn = system_ctx.db().map_err(std::io::Error::other)?;
-
-    // Use tenant-scoped API via SeaORM query builder instead of raw SQL.
-    // This ensures isolation rules are respected even for health checks.
-    key_record::Entity::find()
-        .one(db_conn)
-        .await
-        .map(|_| ())
-        .map_err(std::io::Error::other)
+    kernel_data::connection::ping_tenant_db(&system_ctx).await
 }
