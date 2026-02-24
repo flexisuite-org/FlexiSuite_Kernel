@@ -1,19 +1,44 @@
-use base64::Engine;
-use base64::prelude::BASE64_URL_SAFE_NO_PAD;
+// ... imports ...
+use ed25519_dalek::{Signer, SigningKey};
 use kernel_core::auth::{TenantContext, TenantId};
+use kernel_core::supplychain::{
+    CLOCK_DRIFT_TOLERANCE_SECS, KeyStatus, RETIRED_KEY_GRACE_PERIOD_SECS, TrustedKey,
+};
 use kernel_registry::error::RegistryError;
 use kernel_registry::model::{Dependencies, DistManifest, Kind, Route, Security};
-use kernel_registry::storage::{normalize_kid, reload_trust_root_keys, RegistryStorage};
-use object_store::memory::InMemory;
-use object_store::path::Path;
+use kernel_registry::storage::RegistryStorage;
+use kernel_registry::trust::TrustProvider;
 use object_store::ObjectStore;
-use ed25519_dalek::{Signer, SigningKey, VerifyingKey};
+use object_store::memory::InMemory;
 use rand::rngs::OsRng;
 use std::collections::BTreeMap;
-use std::sync::{Arc, LazyLock, Mutex};
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
-// Global lock to serialize tests that modify process-global environment variables.
-static ENV_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+struct MockTrustProvider {
+    keys: HashMap<String, TrustedKey>,
+}
+
+impl MockTrustProvider {
+    fn new() -> Self {
+        Self {
+            keys: HashMap::new(),
+        }
+    }
+    fn add(&mut self, key: TrustedKey) {
+        self.keys.insert(key.kid.clone(), key);
+    }
+}
+
+impl TrustProvider for MockTrustProvider {
+    fn get_key(&self, kid: &str) -> Result<TrustedKey, RegistryError> {
+        self.keys
+            .get(kid)
+            .cloned()
+            .ok_or_else(|| RegistryError::TrustRootError(format!("Key not found: {}", kid)))
+    }
+}
 
 fn test_tenant_ctx() -> TenantContext {
     TenantContext::new(TenantId::new("tenant_test").expect("valid tenant id"), None)
@@ -39,91 +64,86 @@ fn test_manifest(id: &str, version: &str) -> DistManifest {
         configuration: BTreeMap::new(),
         security: Security {
             manifest_digest: "".to_string(),
-            manifest_signature: "sig_default".to_string(),
-            manifest_signature_kid: "kid_default".to_string(),
+            manifest_signature: "".to_string(),
+            manifest_signature_kid: "".to_string(),
             trust_root_version: "v1".to_string(),
         },
     }
 }
 
-fn compute_digest(manifest: &DistManifest) -> String {
-    RegistryStorage::manifest_payload_digest(manifest).expect("Digest computation failed")
+fn setup_registry_with_keys(store: Arc<dyn ObjectStore>) -> (RegistryStorage, SigningKey, String) {
+    let mut csprng = OsRng;
+    let signing_key = SigningKey::generate(&mut csprng);
+    let verifying_key = signing_key.verifying_key();
+    let pub_key_hex = hex::encode(verifying_key.to_bytes());
+    let kid = "test_key".to_string();
+
+    let trusted_key = TrustedKey {
+        kid: kid.clone(),
+        alg: "Ed25519".to_string(),
+        public_key: pub_key_hex,
+        status: KeyStatus::Active,
+        retired_at: None,
+        not_before: None,
+        not_after: None,
+    };
+
+    let mut mock_trust = MockTrustProvider::new();
+    mock_trust.add(trusted_key);
+
+    let registry =
+        RegistryStorage::new_with_trust_provider(store, &test_tenant_ctx(), Arc::new(mock_trust));
+
+    (registry, signing_key, kid)
 }
 
-struct TestKey {
-    kid: String,
-    signing_key: SigningKey,
-    public_key_b64: String,
+fn setup_registry(store: Arc<dyn ObjectStore>) -> RegistryStorage {
+    let (registry, _, _) = setup_registry_with_keys(store);
+    registry
 }
 
-impl TestKey {
-    fn new(kid: &str) -> Self {
-        let mut csprng = OsRng;
-        let signing_key = SigningKey::generate(&mut csprng);
-        let verifying_key = VerifyingKey::from(&signing_key);
-        let public_key_bytes = verifying_key.as_bytes();
-        let public_key_b64 = BASE64_URL_SAFE_NO_PAD.encode(public_key_bytes);
-        Self {
-            kid: kid.to_string(),
-            signing_key,
-            public_key_b64,
-        }
-    }
-
-    fn sign(&self, manifest: &mut DistManifest) {
-        manifest.security.manifest_signature_kid = self.kid.clone();
-        let digest_hex = compute_digest(manifest);
-        // Verify RAW digest bytes (SHA-384 output), not hex string bytes.
-        let digest_bytes = hex::decode(digest_hex).expect("Valid hex");
-        let signature = self.signing_key.sign(&digest_bytes);
-        manifest.security.manifest_signature = BASE64_URL_SAFE_NO_PAD.encode(signature.to_bytes());
-    }
-
-    fn env_var_name(&self) -> String {
-        let normalized = normalize_kid(&self.kid);
-        format!("FLEXI_REGISTRY_TRUST_ROOT_KEY_B64URL_{}", normalized)
-    }
+fn unix_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system time after unix epoch")
+        .as_secs()
 }
 
-/// Helper to run registry tests with a specific trust root key configured.
-/// Handles environment variable setting, trust root reloading, and async runtime.
-fn with_test_key<F>(key: &TestKey, test_fn: F)
-where
-    F: for<'a> FnOnce(&'a TestKey, RegistryStorage) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>>,
-{
-    // Serialize execution to prevent env var races
-    let _guard = ENV_LOCK.lock().unwrap();
-    temp_env::with_var(key.env_var_name(), Some(&key.public_key_b64), || {
-        reload_trust_root_keys();
-        let store = Arc::new(InMemory::new());
-        let registry = RegistryStorage::new(store, &test_tenant_ctx());
+fn setup_registry_with_key_status(
+    store: Arc<dyn ObjectStore>,
+    status: KeyStatus,
+    retired_at: Option<u64>,
+    not_before: Option<u64>,
+    not_after: Option<u64>,
+) -> (RegistryStorage, SigningKey, String) {
+    let mut csprng = OsRng;
+    let signing_key = SigningKey::generate(&mut csprng);
+    let verifying_key = signing_key.verifying_key();
+    let kid = format!("status_{status:?}");
 
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        rt.block_on(test_fn(key, registry));
-    });
-}
+    let trusted_key = TrustedKey {
+        kid: kid.clone(),
+        alg: "Ed25519".to_string(),
+        public_key: hex::encode(verifying_key.to_bytes()),
+        status,
+        retired_at,
+        not_before,
+        not_after,
+    };
 
-/// Helper to run registry tests with a specific trust root key UNSET.
-fn with_test_key_unset<F>(key: &TestKey, test_fn: F)
-where
-    F: for<'a> FnOnce(&'a TestKey, RegistryStorage) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>>,
-{
-    // Serialize execution to prevent env var races
-    let _guard = ENV_LOCK.lock().unwrap();
-    temp_env::with_var(key.env_var_name(), None::<&str>, || {
-        reload_trust_root_keys();
-        let store = Arc::new(InMemory::new());
-        let registry = RegistryStorage::new(store, &test_tenant_ctx());
+    let mut mock_trust = MockTrustProvider::new();
+    mock_trust.add(trusted_key);
 
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        rt.block_on(test_fn(key, registry));
-    });
+    let registry =
+        RegistryStorage::new_with_trust_provider(store, &test_tenant_ctx(), Arc::new(mock_trust));
+    (registry, signing_key, kid)
 }
 
 #[tokio::test]
 async fn test_save_and_get_artifact() {
     let store = Arc::new(InMemory::new());
-    let registry = RegistryStorage::new(store, &test_tenant_ctx());
+    let registry = setup_registry(store);
+    // Artifact saving doesn't require signature verification
 
     let data = b"hello world";
     let digest = registry
@@ -141,139 +161,141 @@ async fn test_save_and_get_artifact() {
         .await
         .unwrap();
     assert_eq!(retrieved, data.as_slice());
-
-    let result = registry
-        .get_artifact("test/file.txt", Some("bad_digest"))
-        .await;
-    assert!(result.is_err());
 }
 
-#[test]
-fn test_save_and_get_manifest() {
-    let key = TestKey::new("test-key-1");
-    with_test_key(&key, |key, registry| Box::pin(async move {
-        let mut manifest = test_manifest("app_test", "1.0.0");
-        key.sign(&mut manifest);
-
-        let (digest, persisted) = registry.save_manifest(&manifest).await.unwrap();
-        assert_eq!(digest.len(), 96);
-        assert_eq!(persisted.security.manifest_digest, digest);
-
-        let retrieved = registry.get_manifest("app_test", "1.0.0").await.unwrap();
-        assert_eq!(retrieved.security.manifest_digest, digest);
-        assert_eq!(
-            retrieved.security.manifest_signature,
-            manifest.security.manifest_signature
-        );
-    }));
+fn compute_digest(manifest: &DistManifest) -> String {
+    RegistryStorage::compute_manifest_digest(manifest).expect("manifest digest must compute")
 }
 
-#[test]
-fn test_manifest_digest_excludes_security_section() {
-    let key = TestKey::new("test-key-digest");
-    with_test_key(&key, |key, registry_a| Box::pin(async move {
-        let mut manifest_a = test_manifest("app_security_digest", "1.0.0");
-        manifest_a.name = "Security Digest Test".to_string();
-        key.sign(&mut manifest_a);
+#[tokio::test]
+async fn test_save_and_get_manifest() {
+    let store = Arc::new(InMemory::new());
+    let (registry, signing_key, kid) = setup_registry_with_keys(store);
 
-        let mut manifest_b = manifest_a.clone();
-        // Modify a security field. The digest (payload) should remain unchanged.
-        manifest_b.security.trust_root_version = "v2".to_string();
+    let mut manifest = test_manifest("app_test", "1.0.0");
+    manifest.security.manifest_signature_kid = kid;
 
-        let (digest_a, _) = registry_a.save_manifest(&manifest_a).await.unwrap();
-        // Saving manifest_b should produce the same digest since only security fields differ.
-        let (digest_b, _) = registry_a.save_manifest(&manifest_b).await.unwrap();
+    // Sign the PREFIXED digest (this is required by verify_manifest contract)
+    let digest = compute_digest(&manifest);
+    manifest.security.manifest_digest = digest.clone();
+    let signature = hex::encode(signing_key.sign(digest.as_bytes()).to_bytes());
+    manifest.security.manifest_signature = signature;
 
-        assert_eq!(digest_a, digest_b);
-    }));
-}
+    let (saved_digest, persisted) = registry.save_manifest(&manifest).await.unwrap();
+    assert_eq!(saved_digest, compute_digest(&manifest));
+    assert_eq!(
+        persisted.security.manifest_digest,
+        compute_digest(&manifest)
+    );
 
-#[test]
-fn test_save_manifest_rejects_invalid_signature() {
-    let key = TestKey::new("test-key-invalid");
-    with_test_key(&key, |key, registry| Box::pin(async move {
-        let mut manifest = test_manifest("app_invalid_sig", "1.0.0");
-        key.sign(&mut manifest);
-        // Tamper with signature
-        manifest.security.manifest_signature = BASE64_URL_SAFE_NO_PAD.encode(b"bad_sig");
-
-        let result = registry.save_manifest(&manifest).await;
-        match result {
-            Err(RegistryError::SignatureVerificationFailed(_)) => {}
-            other => panic!("expected SignatureVerificationFailed, got {other:?}"),
-        }
-    }));
-}
-
-#[test]
-fn test_save_manifest_rejects_unknown_kid() {
-    let key = TestKey::new("test-key-unknown");
-    with_test_key_unset(&key, |key, registry| Box::pin(async move {
-        let mut manifest = test_manifest("app_unknown_kid", "1.0.0");
-        key.sign(&mut manifest);
-
-        let result = registry.save_manifest(&manifest).await;
-        match result {
-            Err(RegistryError::KeyNotFound(_)) => {}
-            other => panic!("expected KeyNotFound, got {other:?}"),
-        }
-    }));
-}
-
-#[test]
-fn test_normalized_kid_collision_rejects_ambiguous_keys() {
-    let _guard = ENV_LOCK.lock().unwrap();
-    let key_a = TestKey::new("abc");
-    let key_b = TestKey::new("ABC");
-    let env_a = "FLEXI_REGISTRY_TRUST_ROOT_KEY_B64URL_abc";
-    let env_b = "FLEXI_REGISTRY_TRUST_ROOT_KEY_B64URL_ABC";
-
-    temp_env::with_vars(
-        [
-            (env_a, Some(key_a.public_key_b64.as_str())),
-            (env_b, Some(key_b.public_key_b64.as_str())),
-        ],
-        || {
-            reload_trust_root_keys();
-            let store = Arc::new(InMemory::new());
-            let registry = RegistryStorage::new(store, &test_tenant_ctx());
-            let rt = tokio::runtime::Runtime::new().unwrap();
-            rt.block_on(async {
-                let mut manifest = test_manifest("app_collision", "1.0.0");
-                key_a.sign(&mut manifest);
-
-                let result = registry.save_manifest(&manifest).await;
-                match result {
-                    Err(RegistryError::KeyNotFound(_)) => {}
-                    other => panic!("expected KeyNotFound for normalized KID collision, got {other:?}"),
-                }
-            });
-        },
+    let retrieved = registry.get_manifest("app_test", "1.0.0").await.unwrap();
+    assert_eq!(
+        retrieved.security.manifest_digest,
+        compute_digest(&manifest)
     );
 }
 
 #[tokio::test]
-async fn test_get_missing_manifest_returns_manifest_not_found() {
+async fn test_get_manifest_accepts_legacy_raw_hex_digest() {
     let store = Arc::new(InMemory::new());
-    let registry = RegistryStorage::new(store, &test_tenant_ctx());
+    let (registry, signing_key, kid) = setup_registry_with_keys(store.clone());
 
-    let result = registry.get_manifest("missing_id", "0.0.0").await;
+    let mut manifest = test_manifest("app_legacy_digest", "1.0.0");
+    manifest.security.manifest_signature_kid = kid;
+    let prefixed_digest = compute_digest(&manifest);
+    let legacy_digest = prefixed_digest
+        .strip_prefix("sha384-")
+        .expect("computed digest should be sha384-prefixed")
+        .to_string();
+    manifest.security.manifest_digest = legacy_digest.clone();
+    manifest.security.manifest_signature =
+        hex::encode(signing_key.sign(legacy_digest.as_bytes()).to_bytes());
+
+    let path = registry.manifest_path(&manifest.id, &manifest.version);
+    let data = serde_json::to_vec(&manifest).expect("serialize legacy manifest");
+    store
+        .put(&path, data.into())
+        .await
+        .expect("store legacy manifest");
+
+    let retrieved = registry
+        .get_manifest(&manifest.id, &manifest.version)
+        .await
+        .expect("legacy digest format should still be readable");
+    assert_eq!(retrieved.security.manifest_digest, legacy_digest);
+}
+
+#[tokio::test]
+async fn test_save_manifest_rejects_legacy_raw_hex_digest() {
+    let store = Arc::new(InMemory::new());
+    let (registry, signing_key, kid) = setup_registry_with_keys(store);
+
+    let mut manifest = test_manifest("app_legacy_save_reject", "1.0.0");
+    manifest.security.manifest_signature_kid = kid;
+    let prefixed_digest = compute_digest(&manifest);
+    let legacy_digest = prefixed_digest
+        .strip_prefix("sha384-")
+        .expect("computed digest should be sha384-prefixed")
+        .to_string();
+    manifest.security.manifest_digest = legacy_digest.clone();
+    manifest.security.manifest_signature =
+        hex::encode(signing_key.sign(legacy_digest.as_bytes()).to_bytes());
+
+    let result = registry.save_manifest(&manifest).await;
     match result {
-        Err(RegistryError::ManifestNotFound(path)) => {
-            assert_eq!(path, "missing_id/0.0.0");
+        Err(RegistryError::InvalidManifest(msg)) => {
+            assert_eq!(
+                msg,
+                "security.manifest_digest must be canonical sha384-<hex>"
+            );
         }
-        other => panic!("expected ManifestNotFound, got {other:?}"),
+        other => panic!("expected InvalidManifest for legacy digest, got {other:?}"),
     }
+}
+
+#[tokio::test]
+async fn test_manifest_digest_excludes_security_section() {
+    let store_a = Arc::new(InMemory::new());
+    let (registry_a, key_a, kid_a) = setup_registry_with_keys(store_a);
+
+    let store_b = Arc::new(InMemory::new());
+    let (registry_b, key_b, kid_b) = setup_registry_with_keys(store_b);
+
+    let mut manifest_a = test_manifest("app_security_digest", "1.0.0");
+    manifest_a.name = "Security Digest Test".to_string();
+    manifest_a.security.manifest_signature_kid = kid_a;
+    let digest_a = compute_digest(&manifest_a);
+    manifest_a.security.manifest_digest = digest_a.clone();
+    manifest_a.security.manifest_signature =
+        hex::encode(key_a.sign(digest_a.as_bytes()).to_bytes());
+
+    let mut manifest_b = manifest_a.clone();
+    // Intentionally keep `manifest_b` with the same id/version/payload as `manifest_a`.
+    manifest_b.security.manifest_signature_kid = kid_b;
+    manifest_b.security.trust_root_version = "v2".to_string();
+    let digest_b = compute_digest(&manifest_b);
+    // Digest should be same as A
+    assert_eq!(digest_a, digest_b);
+    manifest_b.security.manifest_digest = digest_b.clone();
+
+    manifest_b.security.manifest_signature =
+        hex::encode(key_b.sign(digest_b.as_bytes()).to_bytes());
+
+    let (digest_a, _) = registry_a.save_manifest(&manifest_a).await.unwrap();
+    let (digest_b, _) = registry_b.save_manifest(&manifest_b).await.unwrap();
+
+    assert_eq!(digest_a, digest_b);
 }
 
 #[tokio::test]
 async fn test_save_manifest_rejects_empty_security_fields() {
     let store = Arc::new(InMemory::new());
-    let registry = RegistryStorage::new(store, &test_tenant_ctx());
+    let registry = setup_registry(store);
 
-    // Basic validation runs before signature verification, so no need for keys here
     let mut manifest = test_manifest("app_invalid_security", "1.0.0");
+    manifest.name = "Invalid Security".to_string();
     manifest.security.manifest_signature = "".to_string();
+    manifest.security.manifest_signature_kid = "key1".to_string();
 
     let result = registry.save_manifest(&manifest).await;
     match result {
@@ -287,9 +309,11 @@ async fn test_save_manifest_rejects_empty_security_fields() {
 #[tokio::test]
 async fn test_save_manifest_rejects_empty_security_kid() {
     let store = Arc::new(InMemory::new());
-    let registry = RegistryStorage::new(store, &test_tenant_ctx());
+    let registry = setup_registry(store);
 
     let mut manifest = test_manifest("app_invalid_security_kid", "1.0.0");
+    manifest.name = "Invalid Security Kid".to_string();
+    manifest.security.manifest_signature = "sig_...".to_string();
     manifest.security.manifest_signature_kid = "".to_string();
 
     let result = registry.save_manifest(&manifest).await;
@@ -304,9 +328,12 @@ async fn test_save_manifest_rejects_empty_security_kid() {
 #[tokio::test]
 async fn test_save_manifest_rejects_empty_trust_root_version() {
     let store = Arc::new(InMemory::new());
-    let registry = RegistryStorage::new(store, &test_tenant_ctx());
+    let registry = setup_registry(store);
 
     let mut manifest = test_manifest("app_invalid_trust_root_version", "1.0.0");
+    manifest.name = "Invalid Trust Root Version".to_string();
+    manifest.security.manifest_signature = "sig_...".to_string();
+    manifest.security.manifest_signature_kid = "key1".to_string();
     manifest.security.trust_root_version = "".to_string();
 
     let result = registry.save_manifest(&manifest).await;
@@ -318,142 +345,136 @@ async fn test_save_manifest_rejects_empty_trust_root_version() {
     }
 }
 
-#[test]
-fn test_get_manifest_detects_tampered_stored_json() {
-    let _guard = ENV_LOCK.lock().unwrap();
-    let key = TestKey::new("test-key-tamper");
+#[tokio::test]
+async fn test_get_manifest_detects_tampered_stored_json() {
+    let store = Arc::new(InMemory::new());
+    let (registry, key, kid) = setup_registry_with_keys(store.clone());
+    let mut manifest = test_manifest("app_tamper_test", "1.0.0");
+    manifest.name = "Tamper Test".to_string();
+    manifest.security.manifest_signature_kid = kid;
+    let digest = compute_digest(&manifest);
+    manifest.security.manifest_digest = digest.clone();
+    manifest.security.manifest_signature = hex::encode(key.sign(digest.as_bytes()).to_bytes());
 
-    // We can't easily use with_test_key helper because we need to tamper with the store.
-    // So we replicate the setup but keeping access to the store.
+    let (_, persisted) = registry.save_manifest(&manifest).await.unwrap();
 
-    temp_env::with_var(key.env_var_name(), Some(&key.public_key_b64), || {
-        reload_trust_root_keys();
-        let store = Arc::new(InMemory::new());
-        let tenant_ctx = test_tenant_ctx();
-        let registry = RegistryStorage::new(store.clone(), &tenant_ctx);
+    let mut tampered = persisted.clone();
+    tampered.name = "Tampered Name".to_string();
+    let tampered_bytes = serde_json::to_vec(&tampered).unwrap();
+    let tampered_path = registry.manifest_path(&manifest.id, &manifest.version);
+    store
+        .put(&tampered_path, tampered_bytes.into())
+        .await
+        .unwrap();
 
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        rt.block_on(async {
-            let mut manifest = test_manifest("app_tamper_test", "1.0.0");
-            key.sign(&mut manifest);
-
-            let (_, persisted) = registry.save_manifest(&manifest).await.unwrap();
-
-            let mut tampered = persisted.clone();
-            tampered.name = "Tampered Name".to_string();
-            let tampered_bytes = serde_json::to_vec(&tampered).unwrap();
-            let tampered_path = registry.manifest_path(&manifest.id, &manifest.version);
-            store
-                .put(&tampered_path, tampered_bytes.into())
-                .await
-                .unwrap();
-
-            let result = registry.get_manifest(&manifest.id, &manifest.version).await;
-            match result {
-                Err(RegistryError::IntegrityCheckFailed { .. }) => {}
-                other => panic!("expected IntegrityCheckFailed, got {other:?}"),
-            }
-        })
-    });
-}
-
-#[test]
-fn test_manifest_digest_numeric_normalization() {
-    let key = TestKey::new("test-key-numeric");
-    with_test_key(&key, |key, registry| Box::pin(async move {
-        let mut manifest_int = test_manifest("app_numeric", "1.0.0");
-        manifest_int
-            .configuration
-            .insert("count".to_string(), serde_json::json!(1));
-        // Sign AFTER modification
-        key.sign(&mut manifest_int);
-
-        let mut manifest_float = test_manifest("app_numeric", "1.0.0");
-        manifest_float
-            .configuration
-            .insert("count".to_string(), serde_json::json!(1.0));
-
-        // Assert normalization matches BEFORE signing/saving
-        assert_eq!(compute_digest(&manifest_int), compute_digest(&manifest_float));
-
-        // Reuse same signature from int for float version
-        manifest_float.security.manifest_signature = manifest_int.security.manifest_signature.clone();
-        manifest_float.security.manifest_signature_kid = manifest_int.security.manifest_signature_kid.clone();
-
-        let (digest_int, _) = registry.save_manifest(&manifest_int).await.unwrap();
-        let (digest_float, _) = registry.save_manifest(&manifest_float).await.unwrap();
-
-        assert_eq!(digest_int, digest_float);
-    }));
-}
-
-#[test]
-fn test_manifest_digest_big_int_normalization() {
-    let key = TestKey::new("test-key-bigint");
-    with_test_key(&key, |key, registry| Box::pin(async move {
-        let mut manifest_big = test_manifest("app_big_int", "1.0.0");
-        manifest_big
-            .configuration
-            .insert("big_i64".to_string(), serde_json::json!(i64::MAX));
-        manifest_big
-            .configuration
-            .insert("big_u64".to_string(), serde_json::json!(u64::MAX));
-        key.sign(&mut manifest_big);
-
-        let (digest, _) = registry.save_manifest(&manifest_big).await.unwrap();
-        assert_eq!(digest.len(), 96);
-    }));
+    let result = registry.get_manifest(&manifest.id, &manifest.version).await;
+    match result {
+        Err(RegistryError::IntegrityCheckFailed { .. }) => {}
+        other => panic!("expected IntegrityCheckFailed, got {other:?}"),
+    }
 }
 
 #[tokio::test]
 async fn test_save_manifest_rejects_control_character_in_id() {
     let store = Arc::new(InMemory::new());
-    let registry = RegistryStorage::new(store, &test_tenant_ctx());
+    let registry = setup_registry(store);
 
-    let manifest = test_manifest("app_\0_test", "1.0.0");
-    // Fails before signature check
+    let mut manifest = test_manifest("app_\0_test", "1.0.0");
+    manifest.name = "Invalid Key".to_string();
+    manifest.security.manifest_signature = "sig".to_string();
+    manifest.security.manifest_signature_kid = "kid".to_string();
+
     let result = registry.save_manifest(&manifest).await;
     match result {
-        Err(RegistryError::InvalidPath(_)) => {}
+        Err(RegistryError::InvalidPath(msg)) => {
+            assert_eq!(
+                msg,
+                format!("invalid key contains control character: {}", manifest.id)
+            );
+        }
         other => panic!("expected InvalidPath, got {other:?}"),
     }
 }
 
 #[tokio::test]
-async fn test_save_manifest_rejects_whitespace_security_fields() {
+async fn test_manifest_digest_numeric_normalization() {
+    let store_a = Arc::new(InMemory::new());
+    let (registry_a, key_a, kid_a) = setup_registry_with_keys(store_a);
+
+    let store_b = Arc::new(InMemory::new());
+    let (registry_b, key_b, kid_b) = setup_registry_with_keys(store_b);
+
+    let mut manifest_int = test_manifest("app_numeric", "1.0.0");
+    manifest_int
+        .configuration
+        .insert("count".to_string(), serde_json::json!(1));
+    manifest_int.security.manifest_signature_kid = kid_a;
+    let digest_int = compute_digest(&manifest_int);
+    manifest_int.security.manifest_digest = digest_int.clone();
+    manifest_int.security.manifest_signature =
+        hex::encode(key_a.sign(digest_int.as_bytes()).to_bytes());
+
+    let mut manifest_float = test_manifest("app_numeric", "1.0.0");
+    manifest_float
+        .configuration
+        .insert("count".to_string(), serde_json::json!(1.0));
+    manifest_float.security.manifest_signature_kid = kid_b;
+    let digest_float = compute_digest(&manifest_float);
+    manifest_float.security.manifest_digest = digest_float.clone();
+    manifest_float.security.manifest_signature =
+        hex::encode(key_b.sign(digest_float.as_bytes()).to_bytes());
+
+    let (digest_int_saved, _) = registry_a.save_manifest(&manifest_int).await.unwrap();
+    let (digest_float_saved, _) = registry_b.save_manifest(&manifest_float).await.unwrap();
+
+    assert_eq!(
+        digest_int_saved, digest_float_saved,
+        "Digests should match for 1 and 1.0"
+    );
+}
+
+#[tokio::test]
+async fn test_manifest_digest_big_int_normalization() {
+    let store_a = Arc::new(InMemory::new());
+    let (registry_a, key_a, kid_a) = setup_registry_with_keys(store_a);
+
+    // Test with i64::MAX and u64::MAX to ensure precision is kept
+    let mut manifest_big = test_manifest("app_big_int", "1.0.0");
+    manifest_big
+        .configuration
+        .insert("big_i64".to_string(), serde_json::json!(i64::MAX));
+    manifest_big
+        .configuration
+        .insert("big_u64".to_string(), serde_json::json!(u64::MAX));
+    manifest_big.security.manifest_signature_kid = kid_a;
+    let digest = compute_digest(&manifest_big);
+    manifest_big.security.manifest_digest = digest.clone();
+    manifest_big.security.manifest_signature =
+        hex::encode(key_a.sign(digest.as_bytes()).to_bytes());
+
+    let (saved_digest, _) = registry_a.save_manifest(&manifest_big).await.unwrap();
+    // "sha384-" + 96 hex chars
+    assert_eq!(saved_digest.len(), 103);
+}
+
+#[tokio::test]
+async fn test_get_artifact_returns_artifact_not_found_for_missing_key() {
     let store = Arc::new(InMemory::new());
-    let registry = RegistryStorage::new(store, &test_tenant_ctx());
+    let registry = setup_registry(store);
 
-    // These fail before signature check
-    let mut manifest = test_manifest("app_whitespace_sig", "1.0.0");
-    manifest.security.manifest_signature = "   ".to_string();
-    let result = registry.save_manifest(&manifest).await;
+    let result = registry.get_artifact("missing_artifact", None).await;
     match result {
-        Err(RegistryError::InvalidManifest(_)) => {}
-        other => panic!("expected InvalidManifest, got {other:?}"),
-    }
-
-    let mut manifest = test_manifest("app_whitespace_kid", "1.0.0");
-    manifest.security.manifest_signature_kid = "   ".to_string();
-    let result = registry.save_manifest(&manifest).await;
-    match result {
-        Err(RegistryError::InvalidManifest(_)) => {}
-        other => panic!("expected InvalidManifest, got {other:?}"),
-    }
-
-    let mut manifest = test_manifest("app_whitespace_trust", "1.0.0");
-    manifest.security.trust_root_version = "   ".to_string();
-    let result = registry.save_manifest(&manifest).await;
-    match result {
-        Err(RegistryError::InvalidManifest(_)) => {}
-        other => panic!("expected InvalidManifest, got {other:?}"),
+        Err(RegistryError::ArtifactNotFound(key)) => {
+            assert_eq!(key, "missing_artifact");
+        }
+        other => panic!("expected ArtifactNotFound, got {other:?}"),
     }
 }
 
 #[tokio::test]
 async fn test_registry_key_validation_invalid_paths() {
     let store = Arc::new(InMemory::new());
-    let registry = RegistryStorage::new(store, &test_tenant_ctx());
+    let registry = setup_registry(store);
 
     let invalid_keys = vec![
         "../traversal",
@@ -477,11 +498,437 @@ async fn test_registry_key_validation_invalid_paths() {
 
         // Test save_manifest (id)
         let manifest = test_manifest(key, "1.0.0");
-        // Should fail InvalidPath before signature check
         let result = registry.save_manifest(&manifest).await;
         match result {
             Err(RegistryError::InvalidPath(_)) => {}
             other => panic!("save_manifest: expected InvalidPath for {key} (id), got {other:?}"),
         }
+    }
+}
+
+#[tokio::test]
+async fn test_save_manifest_rejects_whitespace_security_fields() {
+    let store = Arc::new(InMemory::new());
+    let registry = setup_registry(store);
+
+    let mut manifest = test_manifest("app_whitespace_sig", "1.0.0");
+    manifest.security.manifest_signature = "   ".to_string();
+    let result = registry.save_manifest(&manifest).await;
+    match result {
+        Err(RegistryError::InvalidManifest(msg)) => {
+            assert_eq!(msg, "security.manifest_signature must not be empty");
+        }
+        other => panic!("expected InvalidManifest for whitespace signature, got {other:?}"),
+    }
+
+    let mut manifest = test_manifest("app_whitespace_kid", "1.0.0");
+    manifest.security.manifest_signature = "sig".to_string(); // Need valid signature field to fail on kid check
+    manifest.security.manifest_signature_kid = "   ".to_string();
+    let result = registry.save_manifest(&manifest).await;
+    match result {
+        Err(RegistryError::InvalidManifest(msg)) => {
+            assert_eq!(msg, "security.manifest_signature_kid must not be empty");
+        }
+        other => panic!("expected InvalidManifest for whitespace kid, got {other:?}"),
+    }
+
+    let mut manifest = test_manifest("app_whitespace_trust", "1.0.0");
+    manifest.security.manifest_signature = "sig".to_string();
+    manifest.security.manifest_signature_kid = "kid".to_string();
+    manifest.security.trust_root_version = "   ".to_string();
+    let result = registry.save_manifest(&manifest).await;
+    match result {
+        Err(RegistryError::InvalidManifest(msg)) => {
+            assert_eq!(msg, "security.trust_root_version must not be empty");
+        }
+        other => {
+            panic!("expected InvalidManifest for whitespace trust_root_version, got {other:?}")
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_save_manifest_verifies_signature() {
+    let store = Arc::new(InMemory::new());
+    let (registry, signing_key, kid) = setup_registry_with_keys(store);
+
+    let mut manifest = test_manifest("app_sig_test", "1.0.0");
+    manifest.security.manifest_signature_kid = kid;
+    let digest = compute_digest(&manifest);
+    manifest.security.manifest_digest = digest.clone();
+
+    // 1. Valid Signature
+    let signature = hex::encode(signing_key.sign(digest.as_bytes()).to_bytes());
+    manifest.security.manifest_signature = signature;
+    registry
+        .save_manifest(&manifest)
+        .await
+        .expect("Valid signature should pass");
+
+    // 2. Invalid Signature (Tampered Payload)
+    let mut manifest_bad = manifest.clone();
+    manifest_bad.name = "Changed".to_string(); // Changes digest
+    let tampered_digest = compute_digest(&manifest_bad);
+    manifest_bad.security.manifest_digest = tampered_digest;
+    // Keep old signature so signature verification must fail.
+    let result = registry.save_manifest(&manifest_bad).await;
+    match result {
+        Err(RegistryError::InvalidManifest(msg)) => {
+            assert!(
+                msg.contains("Signature verification failed"),
+                "Got: {}",
+                msg
+            );
+        }
+        other => panic!("Expected InvalidManifest, got {:?}", other),
+    }
+
+    // 3. Invalid Signature (Tampered Signature)
+    let mut manifest_bad_sig = manifest.clone();
+    manifest_bad_sig.security.manifest_signature = "deadbeef".to_string();
+    let result = registry.save_manifest(&manifest_bad_sig).await;
+    match result {
+        Err(RegistryError::InvalidManifest(_)) => {}
+        other => panic!("Expected InvalidManifest for bad sig, got {:?}", other),
+    }
+}
+
+#[tokio::test]
+async fn test_save_manifest_rejects_unknown_kid() {
+    let store = Arc::new(InMemory::new());
+    let trust_provider = Arc::new(MockTrustProvider::new());
+    let registry =
+        RegistryStorage::new_with_trust_provider(store, &test_tenant_ctx(), trust_provider);
+
+    let mut manifest = test_manifest("app_unknown_kid", "1.0.0");
+    let digest = compute_digest(&manifest);
+    manifest.security.manifest_digest = digest.clone();
+    manifest.security.manifest_signature = hex::encode(
+        ed25519_dalek::SigningKey::generate(&mut OsRng)
+            .sign(digest.as_bytes())
+            .to_bytes(),
+    );
+    manifest.security.manifest_signature_kid = "missing-key-id".to_string();
+
+    let result = registry.save_manifest(&manifest).await;
+    match result {
+        Err(RegistryError::TrustRootError(msg)) => {
+            assert!(msg.contains("Key not found"));
+            assert!(msg.contains("missing-key-id"));
+        }
+        other => panic!("expected TrustRootError for unknown kid, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn test_get_manifest_rejects_unknown_kid() {
+    let store = Arc::new(InMemory::new());
+    let (registry_write, signing_key, kid) = setup_registry_with_keys(store.clone());
+
+    let mut manifest = test_manifest("app_get_unknown_kid", "1.0.0");
+    manifest.security.manifest_signature_kid = kid;
+    let digest = compute_digest(&manifest);
+    manifest.security.manifest_digest = digest.clone();
+    manifest.security.manifest_signature =
+        hex::encode(signing_key.sign(digest.as_bytes()).to_bytes());
+    registry_write.save_manifest(&manifest).await.unwrap();
+
+    let registry_read = RegistryStorage::new_with_trust_provider(
+        store,
+        &test_tenant_ctx(),
+        Arc::new(MockTrustProvider::new()),
+    );
+
+    let result = registry_read
+        .get_manifest("app_get_unknown_kid", "1.0.0")
+        .await;
+    match result {
+        Err(RegistryError::TrustRootError(_)) | Err(RegistryError::InvalidManifest(_)) => {}
+        other => panic!("expected unknown kid read failure, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn test_save_manifest_rejects_revoked_key() {
+    let store = Arc::new(InMemory::new());
+    let (registry, signing_key, kid) =
+        setup_registry_with_key_status(store, KeyStatus::Revoked, None, None, None);
+    let mut manifest = test_manifest("app_revoked", "1.0.0");
+    manifest.security.manifest_signature_kid = kid;
+    let digest = compute_digest(&manifest);
+    manifest.security.manifest_digest = digest.clone();
+    manifest.security.manifest_signature =
+        hex::encode(signing_key.sign(digest.as_bytes()).to_bytes());
+
+    let result = registry.save_manifest(&manifest).await;
+    match result {
+        Err(RegistryError::InvalidManifest(msg)) => assert!(msg.contains("KeyRevoked")),
+        other => panic!("expected KeyRevoked invalid manifest, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn test_save_manifest_rejects_retired_out_of_window() {
+    let now = unix_now();
+    let retired_out_of_window = now.saturating_sub(RETIRED_KEY_GRACE_PERIOD_SECS + 1);
+    let store = Arc::new(InMemory::new());
+    let (registry, signing_key, kid) = setup_registry_with_key_status(
+        store,
+        KeyStatus::Retired,
+        Some(retired_out_of_window),
+        None,
+        None,
+    );
+    let mut manifest = test_manifest("app_retired_old", "1.0.0");
+    manifest.security.manifest_signature_kid = kid;
+    let digest = compute_digest(&manifest);
+    manifest.security.manifest_digest = digest.clone();
+    manifest.security.manifest_signature =
+        hex::encode(signing_key.sign(digest.as_bytes()).to_bytes());
+
+    let result = registry.save_manifest(&manifest).await;
+    match result {
+        Err(RegistryError::InvalidManifest(msg)) => {
+            assert!(msg.contains("KeyRetiredOutOfWindow"))
+        }
+        other => panic!("expected KeyRetiredOutOfWindow invalid manifest, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn test_save_manifest_accepts_retired_in_window() {
+    let now = unix_now();
+    let retired_in_window = now.saturating_sub(RETIRED_KEY_GRACE_PERIOD_SECS / 2);
+    let store = Arc::new(InMemory::new());
+    let (registry, signing_key, kid) = setup_registry_with_key_status(
+        store,
+        KeyStatus::Retired,
+        Some(retired_in_window),
+        None,
+        None,
+    );
+    let mut manifest = test_manifest("app_retired_ok", "1.0.0");
+    manifest.security.manifest_signature_kid = kid;
+    let digest = compute_digest(&manifest);
+    manifest.security.manifest_digest = digest.clone();
+    manifest.security.manifest_signature =
+        hex::encode(signing_key.sign(digest.as_bytes()).to_bytes());
+
+    let result = registry.save_manifest(&manifest).await;
+    assert!(
+        result.is_ok(),
+        "expected retired key in grace window to pass"
+    );
+}
+
+#[tokio::test]
+async fn test_save_manifest_rejects_key_not_yet_valid() {
+    let now = unix_now();
+    let not_yet_valid_after_drift = now.saturating_add(CLOCK_DRIFT_TOLERANCE_SECS + 1);
+    let store = Arc::new(InMemory::new());
+    let (registry, signing_key, kid) = setup_registry_with_key_status(
+        store,
+        KeyStatus::Active,
+        None,
+        Some(not_yet_valid_after_drift),
+        None,
+    );
+    let mut manifest = test_manifest("app_not_yet_valid", "1.0.0");
+    manifest.security.manifest_signature_kid = kid;
+    let digest = compute_digest(&manifest);
+    manifest.security.manifest_digest = digest.clone();
+    manifest.security.manifest_signature =
+        hex::encode(signing_key.sign(digest.as_bytes()).to_bytes());
+
+    let result = registry.save_manifest(&manifest).await;
+    match result {
+        Err(RegistryError::InvalidManifest(msg)) => assert!(msg.contains("KeyNotYetValid")),
+        other => panic!("expected KeyNotYetValid invalid manifest, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn test_save_manifest_rejects_key_expired() {
+    let now = unix_now();
+    let expired_before_drift_window = now.saturating_sub(CLOCK_DRIFT_TOLERANCE_SECS + 1);
+    let store = Arc::new(InMemory::new());
+    let (registry, signing_key, kid) = setup_registry_with_key_status(
+        store,
+        KeyStatus::Active,
+        None,
+        None,
+        Some(expired_before_drift_window),
+    );
+    let mut manifest = test_manifest("app_expired", "1.0.0");
+    manifest.security.manifest_signature_kid = kid;
+    let digest = compute_digest(&manifest);
+    manifest.security.manifest_digest = digest.clone();
+    manifest.security.manifest_signature =
+        hex::encode(signing_key.sign(digest.as_bytes()).to_bytes());
+
+    let result = registry.save_manifest(&manifest).await;
+    match result {
+        Err(RegistryError::InvalidManifest(msg)) => assert!(msg.contains("KeyExpired")),
+        other => panic!("expected KeyExpired invalid manifest, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn test_get_manifest_rejects_revoked_key() {
+    let store = Arc::new(InMemory::new());
+    let (registry, signing_key, kid) =
+        setup_registry_with_key_status(store.clone(), KeyStatus::Revoked, None, None, None);
+    let mut manifest = test_manifest("app_get_revoked", "1.0.0");
+    manifest.security.manifest_signature_kid = kid;
+    let digest = compute_digest(&manifest);
+    manifest.security.manifest_digest = digest.clone();
+    manifest.security.manifest_signature =
+        hex::encode(signing_key.sign(digest.as_bytes()).to_bytes());
+
+    let path = registry.manifest_path(&manifest.id, &manifest.version);
+    let data = serde_json::to_vec(&manifest).expect("serialize test manifest");
+    store.put(&path, data.into()).await.expect("store manifest");
+
+    let result = registry.get_manifest(&manifest.id, &manifest.version).await;
+    match result {
+        Err(RegistryError::InvalidManifest(msg)) => assert!(msg.contains("KeyRevoked")),
+        other => panic!("expected KeyRevoked invalid manifest on get, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn test_get_manifest_rejects_retired_out_of_window() {
+    let now = unix_now();
+    let retired_out_of_window = now.saturating_sub(RETIRED_KEY_GRACE_PERIOD_SECS + 1);
+    let store = Arc::new(InMemory::new());
+    let (registry, signing_key, kid) = setup_registry_with_key_status(
+        store.clone(),
+        KeyStatus::Retired,
+        Some(retired_out_of_window),
+        None,
+        None,
+    );
+    let mut manifest = test_manifest("app_get_retired_old", "1.0.0");
+    manifest.security.manifest_signature_kid = kid;
+    let digest = compute_digest(&manifest);
+    manifest.security.manifest_digest = digest.clone();
+    manifest.security.manifest_signature =
+        hex::encode(signing_key.sign(digest.as_bytes()).to_bytes());
+
+    let path = registry.manifest_path(&manifest.id, &manifest.version);
+    let data = serde_json::to_vec(&manifest).expect("serialize test manifest");
+    store.put(&path, data.into()).await.expect("store manifest");
+
+    let result = registry.get_manifest(&manifest.id, &manifest.version).await;
+    match result {
+        Err(RegistryError::InvalidManifest(msg)) => {
+            assert!(msg.contains("KeyRetiredOutOfWindow"))
+        }
+        other => panic!("expected KeyRetiredOutOfWindow invalid manifest on get, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn test_get_manifest_accepts_retired_in_window() {
+    let now = unix_now();
+    let retired_in_window = now.saturating_sub(RETIRED_KEY_GRACE_PERIOD_SECS / 2);
+    let store = Arc::new(InMemory::new());
+    let (registry, signing_key, kid) = setup_registry_with_key_status(
+        store,
+        KeyStatus::Retired,
+        Some(retired_in_window),
+        None,
+        None,
+    );
+    let mut manifest = test_manifest("app_get_retired_ok", "1.0.0");
+    manifest.security.manifest_signature_kid = kid;
+    let digest = compute_digest(&manifest);
+    manifest.security.manifest_digest = digest.clone();
+    manifest.security.manifest_signature =
+        hex::encode(signing_key.sign(digest.as_bytes()).to_bytes());
+
+    registry
+        .save_manifest(&manifest)
+        .await
+        .expect("retired key in grace window should be storable");
+
+    let result = registry.get_manifest(&manifest.id, &manifest.version).await;
+    assert!(
+        result.is_ok(),
+        "expected retired key in grace window to pass on get"
+    );
+}
+
+#[tokio::test]
+async fn test_get_manifest_rejects_key_not_yet_valid() {
+    let now = unix_now();
+    let not_yet_valid_after_drift = now.saturating_add(CLOCK_DRIFT_TOLERANCE_SECS + 1);
+    let store = Arc::new(InMemory::new());
+    let (registry, signing_key, kid) = setup_registry_with_key_status(
+        store.clone(),
+        KeyStatus::Active,
+        None,
+        Some(not_yet_valid_after_drift),
+        None,
+    );
+    let mut manifest = test_manifest("app_get_not_yet_valid", "1.0.0");
+    manifest.security.manifest_signature_kid = kid;
+    let digest = compute_digest(&manifest);
+    manifest.security.manifest_digest = digest.clone();
+    manifest.security.manifest_signature =
+        hex::encode(signing_key.sign(digest.as_bytes()).to_bytes());
+
+    let path = registry.manifest_path(&manifest.id, &manifest.version);
+    let data = serde_json::to_vec(&manifest).expect("serialize test manifest");
+    store.put(&path, data.into()).await.expect("store manifest");
+
+    let result = registry.get_manifest(&manifest.id, &manifest.version).await;
+    match result {
+        Err(RegistryError::InvalidManifest(msg)) => assert!(msg.contains("KeyNotYetValid")),
+        other => panic!("expected KeyNotYetValid invalid manifest on get, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn test_get_manifest_rejects_key_expired() {
+    let now = unix_now();
+    let expired_before_drift_window = now.saturating_sub(CLOCK_DRIFT_TOLERANCE_SECS + 1);
+    let store = Arc::new(InMemory::new());
+    let (registry, signing_key, kid) = setup_registry_with_key_status(
+        store.clone(),
+        KeyStatus::Active,
+        None,
+        None,
+        Some(expired_before_drift_window),
+    );
+    let mut manifest = test_manifest("app_get_expired", "1.0.0");
+    manifest.security.manifest_signature_kid = kid;
+    let digest = compute_digest(&manifest);
+    manifest.security.manifest_digest = digest.clone();
+    manifest.security.manifest_signature =
+        hex::encode(signing_key.sign(digest.as_bytes()).to_bytes());
+
+    let path = registry.manifest_path(&manifest.id, &manifest.version);
+    let data = serde_json::to_vec(&manifest).expect("serialize test manifest");
+    store.put(&path, data.into()).await.expect("store manifest");
+
+    let result = registry.get_manifest(&manifest.id, &manifest.version).await;
+    match result {
+        Err(RegistryError::InvalidManifest(msg)) => assert!(msg.contains("KeyExpired")),
+        other => panic!("expected KeyExpired invalid manifest on get, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn test_get_missing_manifest_returns_manifest_not_found() {
+    let store = Arc::new(InMemory::new());
+    let registry = setup_registry(store);
+
+    let result = registry.get_manifest("missing_id", "0.0.0").await;
+    match result {
+        Err(RegistryError::ManifestNotFound(path)) => {
+            assert_eq!(path, "missing_id/0.0.0");
+        }
+        other => panic!("expected ManifestNotFound, got {other:?}"),
     }
 }

@@ -123,15 +123,6 @@ impl TenantContext {
             .as_deref()
             .ok_or_else(|| "Database connection not attached to context".to_string())
     }
-
-    /// Performs a connectivity check (ping) on the attached database.
-    /// This is the preferred way for high-level handlers to check DB availability.
-    pub async fn check_connection(&self) -> Result<(), String> {
-        let db = self.db()?;
-        db.ping()
-            .await
-            .map_err(|e| format!("Database connection check failed: {e}"))
-    }
 }
 
 /// A marker type for operations that are inherently system-wide and not

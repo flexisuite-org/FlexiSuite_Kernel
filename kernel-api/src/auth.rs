@@ -14,7 +14,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-pub use kernel_core::auth::{SystemTenantContext, TenantContext, TenantId, UserId};
+pub use kernel_core::auth::{TenantContext, TenantId, UserId};
 
 #[derive(Debug)]
 enum AuthError {
@@ -44,22 +44,16 @@ pub async fn auth_middleware(
     let context = if let Some(header) = req.headers().get("Authorization") {
         let value = header.to_str().map_err(|_| {
             tracing::warn!("Invalid Authorization header encoding");
-            crate::metrics::record_token_validation("error_encoding");
             StatusCode::UNAUTHORIZED
         })?;
         match verify_paseto_v4_public_from_env(value) {
-            Ok(ctx) => {
-                crate::metrics::record_token_validation("success");
-                ctx
-            }
+            Ok(ctx) => ctx,
             Err(AuthError::Unauthorized) => {
                 tracing::warn!("PASETO token verification failed: Unauthorized");
-                crate::metrics::record_token_validation("unauthorized");
                 return Err(StatusCode::UNAUTHORIZED);
             }
             Err(AuthError::Forbidden) => {
                 tracing::warn!("PASETO token verification failed: Forbidden (invalid claims)");
-                crate::metrics::record_token_validation("forbidden");
                 return Err(StatusCode::FORBIDDEN);
             }
         }
@@ -89,13 +83,11 @@ pub async fn auth_middleware(
                     None
                 };
 
-                crate::metrics::record_token_validation("debug_bypass");
                 TenantContext::new(tenant_id, user_id)
             } else {
                 tracing::warn!(
                     "Missing Authorization header (and no X-Tenant-Id for debug bypass)"
                 );
-                crate::metrics::record_token_validation("missing");
                 return Err(StatusCode::UNAUTHORIZED);
             }
         }
@@ -103,7 +95,6 @@ pub async fn auth_middleware(
         #[cfg(not(debug_assertions))]
         {
             tracing::warn!("Missing Authorization header");
-            crate::metrics::record_token_validation("missing");
             return Err(StatusCode::UNAUTHORIZED);
         }
     };
