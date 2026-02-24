@@ -58,10 +58,13 @@ pub fn build_app_with_state(
         .route("/health", get(liveness))
         .route("/health/liveness", get(liveness));
 
+    let auth_only_router = Router::new()
+        .route("/health/readiness", get(readiness))
+        .layer(from_fn_with_state(db.clone(), auth_middleware));
+
     let protected_router = Router::new()
         .route("/test", post(write_test).put(write_test))
         .route("/actions/:action_id", get(get_action_status))
-        .route("/health/readiness", get(readiness))
         // Diagnostics routes under /api/v1/diagnostics
         .nest("/api/v1/diagnostics", diagnostics::routes())
         // Outermost applied last: Auth -> Idempotency -> Quota
@@ -72,6 +75,7 @@ pub fn build_app_with_state(
     (
         Router::new()
             .merge(public_router)
+            .merge(auth_only_router)
             .merge(protected_router)
             .layer(Extension(state))
             .layer(Extension(db))

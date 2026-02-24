@@ -74,9 +74,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         })?;
     let generated_at = now_dt.to_rfc3339();
 
-    let validity_secs = args.validity_days.saturating_mul(24 * 60 * 60);
+    let validity_secs = args
+        .validity_days
+        .checked_mul(24 * 60 * 60)
+        .ok_or_else(|| io::Error::other("validity_days is too large (overflow)"))?;
     let not_before = now_secs;
-    let not_after = now_secs.saturating_add(validity_secs);
+    let not_after = now_secs
+        .checked_add(validity_secs)
+        .ok_or_else(|| io::Error::other("Expiration timestamp overflow"))?;
     let version = args
         .version
         .unwrap_or_else(|| format!("v{}", now_dt.format("%Y%m%dT%H%M%SZ")));
@@ -108,6 +113,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         None => default_output_path()?,
     };
 
+    write_private_key(
+        &args.private_key_output,
+        private_key_bytes.as_slice(),
+        private_key_to_stdout,
+    )?;
+
     if let Some(parent) = output_path.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -117,12 +128,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         private_key_to_stdout,
         format_args!("Wrote manifest_trust_root.json to {}", output_path.display()),
     );
-
-    write_private_key(
-        &args.private_key_output,
-        private_key_bytes.as_slice(),
-        private_key_to_stdout,
-    )?;
     Ok(())
 }
 
