@@ -133,7 +133,7 @@ impl PasetoKeyset {
         }
     }
 
-    fn from_env(default_public_key: &[u8]) -> Result<Self, String> {
+    fn from_env() -> Result<Self, String> {
         let active_kid =
             std::env::var("FLEXI_PASETO_V4_ACTIVE_KID").unwrap_or_else(|_| "active".to_string());
         let next_kids = parse_kid_csv_env("FLEXI_PASETO_V4_NEXT_KIDS");
@@ -148,9 +148,6 @@ impl PasetoKeyset {
             public_keys: HashMap::new(),
             allow_legacy_no_kid,
         };
-        keyset
-            .public_keys
-            .insert(keyset.active_kid.clone(), default_public_key.to_vec());
         keyset.load_per_kid_public_keys_from_env()?;
         Ok(keyset)
     }
@@ -249,8 +246,8 @@ impl PasetoKeyset {
                     .to_string(),
             );
         }
-        if self.public_keys.is_empty() {
-            return Err("Auth keyset must include at least one public key".to_string());
+        if self.public_keys.is_empty() && !self.is_legacy_without_kid_allowed() {
+            return Err("Auth keyset must include at least one public key (or enable legacy mode)".to_string());
         }
         for (kid, key) in &self.public_keys {
             if key.len() != 32 {
@@ -285,7 +282,7 @@ pub fn init_auth_config() -> Result<(), String> {
     let key_b64 = std::env::var("FLEXI_PASETO_V4_PUBLIC_KEY_B64URL")
         .map_err(|_| "FLEXI_PASETO_V4_PUBLIC_KEY_B64URL is not set".to_string())?;
     let decoded = decode_public_key_b64url(&key_b64, "FLEXI_PASETO_V4_PUBLIC_KEY_B64URL")?;
-    let keyset = PasetoKeyset::from_env(&decoded)?;
+    let keyset = PasetoKeyset::from_env()?;
     init_auth_config_with_decoded_public_key_and_keyset(decoded, keyset)
 }
 
@@ -711,7 +708,7 @@ mod tests {
                 ],
                 || {
                     let default_key = [1_u8; 32];
-                    let keyset = PasetoKeyset::from_env(&default_key).unwrap();
+                    let keyset = PasetoKeyset::from_env().unwrap();
                     assert_eq!(keyset.active_kid, "env-active");
                     assert!(keyset.revoked_kids.contains("r1"));
                     assert!(keyset.revoked_kids.contains("r2"));
@@ -727,7 +724,7 @@ mod tests {
     fn test_paseto_keyset_initialization_requires_kid_key_for_next() {
         with_env_test_lock(|| {
             temp_env::with_vars([("FLEXI_PASETO_V4_NEXT_KIDS", Some("next-a"))], || {
-                let keyset = PasetoKeyset::from_env(&[1_u8; 32]);
+                let keyset = PasetoKeyset::from_env();
                 assert!(keyset.is_err());
             });
         });
@@ -739,7 +736,7 @@ mod tests {
             temp_env::with_vars(
                 [("FLEXI_PASETO_V4_ACTIVE_KID", Some("custom-active"))],
                 || {
-                    let keyset = PasetoKeyset::from_env(&[1_u8; 32]);
+                    let keyset = PasetoKeyset::from_env();
                     assert!(keyset.is_err());
                 },
             );
@@ -807,5 +804,46 @@ mod tests {
         assert!(keyset.revoked_kids.contains("revoked"));
         assert!(!keyset.allow_legacy_no_kid);
         assert!(!keyset.is_legacy_without_kid_allowed());
+    }
+
+    #[test]
+    fn test_paseto_keyset_no_fallback_to_generic() {
+        let generic_key = [1_u8; 32];
+        let kid_specific_key = [2_u8; 32];
+        let kid_specific_b64 = URL_SAFE_NO_PAD.encode(kid_specific_key);
+
+        with_env_test_lock(|| {
+            // Case 1: active_kid is "active", but FLEXI_PASETO_V4_PUBLIC_KEY_B64URL_ACTIVE is missing.
+            // Even if we provide the generic key to from_env, it should NOT be in public_keys["active"].
+            temp_env::with_vars(
+                [
+                    ("FLEXI_PASETO_V4_ACTIVE_KID", Some("active")),
+                    ("FLEXI_PASETO_V4_ALLOW_LEGACY_NO_KID", Some("true")),
+                ],
+                || {
+                    let keyset = PasetoKeyset::from_env().unwrap();
+                    assert!(keyset.public_key_for_kid("active").is_none());
+                },
+            );
+
+            // Case 2: active_kid is "active", and FLEXI_PASETO_V4_PUBLIC_KEY_B64URL_ACTIVE IS present.
+            // It should be used.
+            temp_env::with_vars(
+                [
+                    ("FLEXI_PASETO_V4_ACTIVE_KID", Some("active")),
+                    (
+                        "FLEXI_PASETO_V4_PUBLIC_KEY_B64URL_ACTIVE",
+                        Some(&kid_specific_b64),
+                    ),
+                ],
+                || {
+                    let keyset = PasetoKeyset::from_env().unwrap();
+                    assert_eq!(
+                        keyset.public_key_for_kid("active").unwrap(),
+                        kid_specific_key
+                    );
+                },
+            );
+        });
     }
 }
