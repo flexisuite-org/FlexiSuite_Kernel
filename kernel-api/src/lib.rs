@@ -84,8 +84,7 @@ pub fn build_app_with_state(
         Router::new()
             .merge(public_router)
             .merge(protected_router)
-            .layer(Extension(state))
-            .layer(Extension(db)),
+            .layer(Extension(state)),
         cleanup_handle,
     )
 }

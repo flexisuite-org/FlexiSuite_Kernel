@@ -14,10 +14,9 @@ use kernel_data::{
     entities::{diagnostic_policy, diagnostic_report},
     with_tenant_tx,
 };
-use sea_orm::{ActiveValue, ConnectionTrait, DatabaseConnection, Statement, DbBackend};
+use sea_orm::{ActiveValue, ConnectionTrait, Statement, DbBackend};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
-use std::sync::Arc;
 
 /// Maximum allowed length for user-supplied string fields (error_code, trace_id, etc.)
 const MAX_STRING_LEN: usize = 256;
@@ -225,8 +224,16 @@ async fn query_diagnostic(
 }
 
 /// Basic health check endpoint.
-/// Checks connectivity to the primary database.
-async fn get_health(Extension(db): Extension<Arc<DatabaseConnection>>) -> impl IntoResponse {
+/// Checks connectivity to the primary database via TenantContext to enforce scoping.
+async fn get_health(Extension(ctx): Extension<TenantContext>) -> impl IntoResponse {
+    let db = match ctx.db() {
+        Ok(db) => db,
+        Err(e) => {
+            tracing::error!("Health check failed (Context): {}", e);
+            return StatusCode::SERVICE_UNAVAILABLE.into_response();
+        }
+    };
+
     match db.execute(Statement::from_string(DbBackend::Postgres, "SELECT 1".to_owned())).await {
         Ok(_) => (StatusCode::OK, Json(serde_json::json!({"status": "ok"}))).into_response(),
         Err(e) => {
