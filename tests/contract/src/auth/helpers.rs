@@ -13,6 +13,10 @@ static TEST_KEYS: OnceLock<(Vec<u8>, String)> = OnceLock::new();
 pub fn setup() {
     let (_, pub_b64) = get_test_keypair();
     AUTH_INIT.get_or_init(|| {
+        unsafe {
+            std::env::set_var("FLEXI_PASETO_V4_PUBLIC_KEY_B64URL", &pub_b64);
+            std::env::set_var("FLEXI_PASETO_V4_PUBLIC_KEY_B64URL_ACTIVE", &pub_b64);
+        }
         let _ = tracing_subscriber::fmt().with_test_writer().try_init();
         init_auth_config_with_public_key_and_revoked_kids_and_legacy_mode(
             &pub_b64,
