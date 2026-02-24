@@ -107,10 +107,12 @@ fn current_thread_cpu_clock_id() -> Result<libc::clockid_t, SandboxError> {
     // SAFETY: pthread_self returns the current thread handle, and clock_id is valid writable memory.
     let rc = unsafe { pthread_getcpuclockid(pthread_self(), &mut clock_id) };
     if rc != 0 {
-        return Err(SandboxError::RuntimeError(format!(
-            "failed to resolve current thread CPU clock: {}",
-            std::io::Error::from_raw_os_error(rc)
-        )));
+        return Err(SandboxError::RuntimeError(
+            format!(
+                "failed to resolve current thread CPU clock: {}",
+                std::io::Error::from_raw_os_error(rc)
+            ),
+        ));
     }
     Ok(clock_id)
 }
@@ -121,10 +123,12 @@ fn thread_cpu_time(clock_id: libc::clockid_t) -> Result<Duration, SandboxError> 
     // SAFETY: ts points to valid writable memory; clock_id was obtained via pthread_getcpuclockid.
     let rc = unsafe { clock_gettime(clock_id, ts.as_mut_ptr()) };
     if rc != 0 {
-        return Err(SandboxError::RuntimeError(format!(
-            "failed to read thread CPU usage: {}",
-            std::io::Error::last_os_error()
-        )));
+        return Err(SandboxError::RuntimeError(
+            format!(
+                "failed to read thread CPU usage: {}",
+                std::io::Error::last_os_error()
+            ),
+        ));
     }
 
     // SAFETY: rc == 0 means ts is fully initialized by clock_gettime.
@@ -134,14 +138,7 @@ fn thread_cpu_time(clock_id: libc::clockid_t) -> Result<Duration, SandboxError> 
             "thread CPU clock returned negative timestamp".to_string(),
         ));
     }
-    if ts.tv_nsec >= 1_000_000_000 {
-        return Err(SandboxError::RuntimeError(format!(
-            "thread CPU clock returned out-of-range nanoseconds: {}",
-            ts.tv_nsec
-        )));
-    }
-    Ok(Duration::from_secs(ts.tv_sec as u64)
-        .saturating_add(Duration::from_nanos(ts.tv_nsec as u64)))
+    Ok(Duration::from_secs(ts.tv_sec as u64).saturating_add(Duration::from_nanos(ts.tv_nsec as u64)))
 }
 
 #[async_trait]
@@ -181,9 +178,7 @@ impl SandboxRuntime for DenoSandbox {
             .clone()
             .acquire_owned()
             .await
-            .map_err(|_| {
-                SandboxError::InitError("Deno execution semaphore is closed".to_string())
-            })?;
+            .map_err(|_| SandboxError::InitError("Deno execution semaphore is closed".to_string()))?;
 
         let options = self.options.clone();
         let code = code.to_string();

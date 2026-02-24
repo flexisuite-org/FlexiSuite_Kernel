@@ -159,21 +159,6 @@ where
     }
 }
 
-/// A tenant-scoped health helper that runs a simple query against a model.
-/// This ensures that the type system enforces isolation even for health checks.
-pub async fn ping_tenant_db(ctx: &TenantContext) -> Result<(), std::io::Error> {
-    use crate::entities::key_record;
-    use sea_orm::EntityTrait;
-
-    let db_conn = ctx.db().map_err(std::io::Error::other)?;
-
-    key_record::Entity::find()
-        .one(db_conn)
-        .await
-        .map(|_| ())
-        .map_err(std::io::Error::other)
-}
-
 fn parse_tenant_from_token(token: &str) -> Option<&str> {
     let mut parts = token.split(':');
     let ver = parts.next()?;

@@ -229,7 +229,6 @@ impl KeyManager {
         key_type: KeyType,
     ) -> Result<Model, KeyManagerError> {
         let db = ctx.db().map_err(|e| sea_orm::DbErr::Custom(e))?;
-
         let key = KeyRecord::find()
             .filter(key_record::Column::KeyType.eq(key_type.clone()))
             .filter(key_record::Column::State.eq(KeyState::Active))

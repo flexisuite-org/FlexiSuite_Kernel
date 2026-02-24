@@ -4,9 +4,9 @@ use axum::{
     middleware::Next,
     response::Response,
 };
-use kernel_data::{RBACRepository, TenantContext};
+use kernel_data::{RBACRepository, TenantContext, with_tenant_tx};
 use std::collections::HashSet;
-use tracing::warn;
+use tracing::{error, warn};
 
 #[derive(Clone, Debug)]
 pub struct UserPermissions(pub HashSet<String>);
@@ -25,38 +25,55 @@ pub async fn load_permissions_middleware(
         .extensions()
         .get::<TenantContext>()
         .cloned()
-        .ok_or_else(|| {
-            StatusCode::UNAUTHORIZED
-        })?;
+        .ok_or(StatusCode::UNAUTHORIZED)?;
 
-    match ctx.db() {
-        Ok(_) => { }
+    // We need a DB connection to fetch permissions
+    let db = match ctx.db() {
+        Ok(db) => db,
         Err(_) => {
+            warn!("Database connection missing in TenantContext");
             return Err(StatusCode::INTERNAL_SERVER_ERROR);
         }
     };
 
+    // Note: user_id existence is checked inside RBACRepository::get_user_permissions
+    // via TenantContext, but we can fast-fail here if needed.
     if ctx.user_id().is_none() {
+        // If no user_id (e.g. service account or incomplete auth),
+        // we assume no permissions.
         req.extensions_mut()
             .insert(UserPermissions(HashSet::new()));
         return Ok(next.run(req).await);
     }
 
-    // Generate a temporary tenant token for RLS authorization
-    let token = match kernel_core::auth::KeyManager::generate_tenant_token(&ctx, ctx.tenant_id()).await {
-        Ok(t) => t,
-        Err(e) => {
-            warn!("Failed to generate tenant token for RBAC: {}", e);
-            return Err(StatusCode::INTERNAL_SERVER_ERROR);
-        }
+    // Extract the raw token from the Authorization header to pass to with_tenant_tx.
+    // This is required to establish the RLS session context properly.
+    let auth_header = req
+        .headers()
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|h| h.to_str().ok())
+        .ok_or(StatusCode::UNAUTHORIZED)?;
+
+    let token = if let Some(t) = auth_header.strip_prefix("Bearer ") {
+        t
+    } else {
+        warn!("Invalid Authorization header format");
+        return Err(StatusCode::UNAUTHORIZED);
     };
 
-    let ctx_with_token = ctx.with_token(token);
+    // Execute within a tenant-scoped transaction to ensure RLS is active.
+    // RBACRepository now demands a TenantScoped connection.
+    let ctx_clone = ctx.clone();
+    let permissions_result = with_tenant_tx(db, &ctx, token, move |scoped| {
+        Box::pin(async move {
+            RBACRepository::get_user_permissions(scoped, &ctx_clone).await
+        })
+    }).await;
 
-    let permissions_list = match RBACRepository::get_user_permissions(&ctx_with_token).await {
+    let permissions_list = match permissions_result {
         Ok(perms) => perms,
         Err(e) => {
-            warn!("Failed to fetch permissions: {}", e);
+            error!(error = %e, "Failed to fetch permissions");
             return Err(StatusCode::INTERNAL_SERVER_ERROR);
         }
     };
