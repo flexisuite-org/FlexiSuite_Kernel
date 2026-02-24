@@ -56,15 +56,28 @@ impl TestAuth {
         db: &DatabaseConnection,
         tenant_id: &TenantId,
     ) -> Result<String, Box<dyn std::error::Error>> {
+        Self::generate_tenant_token_with_state(db, tenant_id, KeyState::Active).await
+    }
+
+    /// Helper that generates a token using a key in a specific state.
+    ///
+    /// NOTE: Signing tokens with keys in states other than `KeyState::Active` (e.g., `KeyState::Revoked`)
+    /// is strictly for testing `authorize_tenant` behavior. In production, `KeyManager`
+    /// would never perform signing operations with non-Active keys.
+    pub async fn generate_tenant_token_with_state(
+        db: &DatabaseConnection,
+        tenant_id: &TenantId,
+        state: KeyState,
+    ) -> Result<String, Box<dyn std::error::Error>> {
         use sea_orm::{ColumnTrait, QueryFilter, QueryOrder};
 
         let key_record = key_record::Entity::find()
             .filter(key_record::Column::KeyType.eq(KeyType::Hmac))
-            .filter(key_record::Column::State.eq(KeyState::Active))
+            .filter(key_record::Column::State.eq(state.clone()))
             .order_by_desc(key_record::Column::ActivatedAt)
             .one(db)
             .await?
-            .ok_or("No active HMAC key found")?;
+            .ok_or(format!("No key found with state {:?}", state))?;
 
         let secret = key_record.secret_bytes.ok_or("No secret bytes")?;
         let now = Utc::now().timestamp();
@@ -87,5 +100,38 @@ impl TestAuth {
             tenant_id.as_str(),
             sig
         ))
+    }
+
+    /// Revokes the currently active HMAC key.
+    ///
+    /// NOTE: This helper directly mutates the database state via SeaORM and bypasses the `KeyManager`
+    /// application layer. This is necessary because `kernel-data` cannot depend on `kernel-core`
+    /// (where `KeyManager` resides) due to circular dependency constraints
+    /// (`kernel-data` → `kernel-core` → `kernel-data`).
+    ///
+    /// Because it bypasses `KeyManager`, this helper does NOT exercise logic like audit logging
+    /// or cache invalidation. Tests using this (e.g., `test_authorize_rejects_revoked_key`) only
+    /// verify database-state enforcement, not the end-to-end revocation path.
+    ///
+    /// Tracking Issue: `docs/tech_debt/issue_kernel_token_extraction.md`
+    /// Used for testing REQ-KEY-REVOCATION-SLO.
+    pub async fn revoke_active_hmac_key(
+        db: &DatabaseConnection,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        use sea_orm::{ColumnTrait, QueryFilter};
+
+        let key_model = key_record::Entity::find()
+            .filter(key_record::Column::KeyType.eq(KeyType::Hmac))
+            .filter(key_record::Column::State.eq(KeyState::Active))
+            .one(db)
+            .await?
+            .ok_or("No active HMAC key found to revoke")?;
+
+        let mut key_active: key_record::ActiveModel = key_model.into();
+        key_active.state = Set(KeyState::Revoked);
+        key_active.revoked_at = Set(Some(Utc::now().into()));
+        key_active.update(db).await?;
+
+        Ok(())
     }
 }
