@@ -7,6 +7,10 @@ use sea_orm::{
     TransactionTrait,
 };
 #[cfg(feature = "test-utils")]
+use std::collections::HashMap;
+#[cfg(feature = "test-utils")]
+use std::sync::OnceLock;
+#[cfg(feature = "test-utils")]
 use serde::Deserialize;
 use tracing::{error, warn};
 
@@ -271,6 +275,13 @@ fn validate_paseto_claim_times(claims: &PasetoTenantClaims) -> bool {
 
 #[cfg(feature = "test-utils")]
 fn load_paseto_public_key_for_kid(kid: Option<&str>) -> Option<Vec<u8>> {
+    if let Some(keys) = TEST_PASETO_PUBLIC_KEYS.get() {
+        let key = kid
+            .and_then(|k| keys.get(k))
+            .or_else(|| keys.get("active"))?;
+        return Some(key.clone());
+    }
+
     let key_b64 = if let Some(k) = kid {
         let env_name = format!(
             "FLEXI_PASETO_V4_PUBLIC_KEY_B64URL_{}",
@@ -288,6 +299,25 @@ fn load_paseto_public_key_for_kid(kid: Option<&str>) -> Option<Vec<u8>> {
         return None;
     }
     Some(decoded)
+}
+
+#[cfg(feature = "test-utils")]
+static TEST_PASETO_PUBLIC_KEYS: OnceLock<HashMap<String, Vec<u8>>> = OnceLock::new();
+
+#[cfg(feature = "test-utils")]
+pub fn init_paseto_public_keys_for_test(active_public_key_b64url: &str) -> Result<(), String> {
+    let decoded = URL_SAFE_NO_PAD
+        .decode(active_public_key_b64url.as_bytes())
+        .map_err(|_| "invalid base64url for active public key".to_string())?;
+    if decoded.len() != 32 {
+        return Err("active public key must be 32-byte Ed25519 public key".to_string());
+    }
+
+    let mut key_map = HashMap::new();
+    key_map.insert("active".to_string(), decoded);
+    TEST_PASETO_PUBLIC_KEYS
+        .set(key_map)
+        .map_err(|_| "test paseto public keys already initialized".to_string())
 }
 
 #[cfg(feature = "test-utils")]
