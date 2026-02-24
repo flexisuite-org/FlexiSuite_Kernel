@@ -1,6 +1,7 @@
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::{Duration, SecondsFormat, Utc};
 use kernel_api::auth::init_auth_config_with_public_key_and_revoked_kids_and_legacy_mode;
+use kernel_data::init_paseto_public_keys_for_test;
 use rusty_paseto::core::{Key, PasetoAsymmetricPrivateKey};
 use rusty_paseto::prelude::*;
 use std::sync::OnceLock;
@@ -13,10 +14,8 @@ static TEST_KEYS: OnceLock<(Vec<u8>, String)> = OnceLock::new();
 pub fn setup() {
     let (_, pub_b64) = get_test_keypair();
     AUTH_INIT.get_or_init(|| {
-        unsafe {
-            std::env::set_var("FLEXI_PASETO_V4_PUBLIC_KEY_B64URL", &pub_b64);
-            std::env::set_var("FLEXI_PASETO_V4_PUBLIC_KEY_B64URL_ACTIVE", &pub_b64);
-        }
+        init_paseto_public_keys_for_test(&pub_b64)
+            .expect("kernel-data PASETO public key initialization failed");
         let _ = tracing_subscriber::fmt().with_test_writer().try_init();
         init_auth_config_with_public_key_and_revoked_kids_and_legacy_mode(
             &pub_b64,
