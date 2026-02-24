@@ -621,6 +621,34 @@ async fn test_save_manifest_rejects_unknown_kid() {
 }
 
 #[tokio::test]
+async fn test_get_manifest_rejects_unknown_kid() {
+    let store = Arc::new(InMemory::new());
+    let (registry_write, signing_key, kid) = setup_registry_with_keys(store.clone());
+
+    let mut manifest = test_manifest("app_get_unknown_kid", "1.0.0");
+    manifest.security.manifest_signature_kid = kid;
+    let digest = compute_digest(&manifest);
+    manifest.security.manifest_digest = digest.clone();
+    manifest.security.manifest_signature =
+        hex::encode(signing_key.sign(digest.as_bytes()).to_bytes());
+    registry_write.save_manifest(&manifest).await.unwrap();
+
+    let registry_read = RegistryStorage::new_with_trust_provider(
+        store,
+        &test_tenant_ctx(),
+        Arc::new(MockTrustProvider::new()),
+    );
+
+    let result = registry_read
+        .get_manifest("app_get_unknown_kid", "1.0.0")
+        .await;
+    match result {
+        Err(RegistryError::TrustRootError(_)) | Err(RegistryError::InvalidManifest(_)) => {}
+        other => panic!("expected unknown kid read failure, got {other:?}"),
+    }
+}
+
+#[tokio::test]
 async fn test_save_manifest_rejects_revoked_key() {
     let store = Arc::new(InMemory::new());
     let (registry, signing_key, kid) =

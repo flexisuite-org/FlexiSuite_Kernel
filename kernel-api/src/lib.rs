@@ -216,13 +216,12 @@ async fn liveness() -> StatusCode {
 
 async fn readiness(
     Extension(state): Extension<MiddlewareState>,
-    Extension(ctx): Extension<TenantContext>,
+    Extension(db): Extension<Arc<DatabaseConnection>>,
 ) -> Response {
     let db_timeout = Duration::from_secs(5);
     let redis_timeout = Duration::from_secs(5);
 
     let db_future = tokio::time::timeout(db_timeout, async move {
-        let db = ctx.db().map_err(|e| e.to_string())?;
         let stmt = Statement::from_string(db.get_database_backend(), "SELECT 1".to_string());
         db.execute(stmt)
             .await

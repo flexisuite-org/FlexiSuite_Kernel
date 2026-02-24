@@ -3,22 +3,24 @@ use tracing::warn;
 
 pub const RETIRED_KEY_GRACE_PERIOD_SECS: u64 = 86_400;
 pub const CLOCK_DRIFT_TOLERANCE_SECS: u64 = 30;
+const SHA384_HEX_LEN: usize = 96;
+
+fn is_ascii_hex_of_len(value: &str, expected_len: usize) -> bool {
+    value.len() == expected_len && value.chars().all(|c| c.is_ascii_hexdigit())
+}
 
 fn normalize_manifest_digest_for_compare(value: &str) -> Option<String> {
     let digest = value.trim();
-    if let Some(hex_part) = digest.strip_prefix("sha256-") {
-        if !hex_part.is_empty() && hex_part.chars().all(|c| c.is_ascii_hexdigit()) {
-            return Some(format!("sha256-{}", hex_part.to_ascii_lowercase()));
-        }
-        return None;
-    }
+    // Registry storage canonicalizes payload digests as "sha384-<96 lowercase hex>".
+    // For backward compatibility on verification/read paths, raw 96-char SHA-384 hex
+    // is also accepted and normalized into the same canonical form.
     if let Some(hex_part) = digest.strip_prefix("sha384-") {
-        if !hex_part.is_empty() && hex_part.chars().all(|c| c.is_ascii_hexdigit()) {
+        if is_ascii_hex_of_len(hex_part, SHA384_HEX_LEN) {
             return Some(format!("sha384-{}", hex_part.to_ascii_lowercase()));
         }
         return None;
     }
-    if !digest.is_empty() && digest.chars().all(|c| c.is_ascii_hexdigit()) {
+    if is_ascii_hex_of_len(digest, SHA384_HEX_LEN) {
         // Backward compatibility: legacy manifests may persist raw SHA-384 hex.
         return Some(format!("sha384-{}", digest.to_ascii_lowercase()));
     }
@@ -94,6 +96,7 @@ pub fn verify_manifest(
         );
     };
 
+    // Verification accepts only SHA-384 digests to match registry storage policy.
     let normalized_manifest_digest = match normalize_manifest_digest_for_compare(&manifest.digest) {
         Some(v) => v,
         None => {
@@ -192,6 +195,8 @@ pub fn verify_manifest(
     };
 
     let peer_public_key = signature::UnparsedPublicKey::new(&signature::ED25519, pub_key_bytes);
+    // Signature verification intentionally signs only `manifest.digest` (content-addressable model).
+    // Break-glass checks separately bind `(tenant_id, digest)` scope in `verify_break_glass`.
     match peer_public_key.verify(manifest.digest.as_bytes(), &signature_bytes) {
         Ok(()) => VerificationResult::Ok,
         Err(e) => {
