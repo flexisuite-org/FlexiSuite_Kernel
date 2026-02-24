@@ -205,18 +205,30 @@ impl SandboxRuntime for WasmSandbox {
                         let mut builder = client.request(method, url);
 
                         if !headers_str.is_empty() {
-                            // Note: We deserialize to HashMap<String, String>, which means if the input JSON
-                            // contained duplicate keys (multi-value headers), they might be lost or overwritten
-                            // depending on serde_json behavior. Wasm callers should pre-join multi-value headers
-                            // (e.g. "Header: val1, val2") or we need a more complex structure.
-                            // For this iteration, we accept this limitation.
-                            let headers: std::collections::HashMap<String, String> =
-                                match serde_json::from_str(&headers_str) {
-                                    Ok(h) => h,
-                                    Err(_) => return Ok(ERR_PARSE_HEADERS),
-                                };
-                            for (k, v) in headers {
-                                builder = builder.header(k, v);
+                            // Note: We expect the input headers JSON to be either Map<String, String> or Map<String, Vec<String>>.
+                            // However, since we cannot easily dynamically type check without Value, let's try to parse as Map<String, Vec<String>> first
+                            // to support multi-values, or fall back to Map<String, String> logic?
+                            // Actually, serde_json::Value is safer.
+
+                            let headers_val: serde_json::Value = match serde_json::from_str(&headers_str) {
+                                Ok(v) => v,
+                                Err(_) => return Ok(ERR_PARSE_HEADERS),
+                            };
+
+                            if let Some(obj) = headers_val.as_object() {
+                                for (k, v) in obj {
+                                    if let Some(s) = v.as_str() {
+                                        builder = builder.header(k, s);
+                                    } else if let Some(arr) = v.as_array() {
+                                        for item in arr {
+                                            if let Some(s) = item.as_str() {
+                                                builder = builder.header(k, s);
+                                            }
+                                        }
+                                    }
+                                }
+                            } else {
+                                return Ok(ERR_PARSE_HEADERS);
                             }
                         }
 

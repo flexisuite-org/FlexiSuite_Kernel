@@ -448,7 +448,11 @@ impl SandboxRuntime for DenoSandbox {
                     // Note: This is a subset implementation.
                     globalThis.Headers = class Headers {{
                         constructor(init) {{
-                            this.map = new Map(Object.entries(init || {{}}));
+                            this.map = new Map();
+                            const entries = Object.entries(init || {{}});
+                            for (const [key, value] of entries) {{
+                                this.map.set(key.toLowerCase(), String(value));
+                            }}
                         }}
                         append(name, value) {{
                             const k = name.toLowerCase();
