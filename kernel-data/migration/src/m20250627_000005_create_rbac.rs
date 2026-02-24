@@ -115,8 +115,6 @@ impl MigrationTrait for Migration {
         db.execute_unprepared("CREATE INDEX IF NOT EXISTS idx_group_members_tenant_user ON flexi.group_members (tenant_id, user_id)").await?;
         // Group Roles: tenant_id, group_id (to find group's roles)
         db.execute_unprepared("CREATE INDEX IF NOT EXISTS idx_group_roles_tenant_group ON flexi.group_roles (tenant_id, group_id)").await?;
-        // Group Roles: tenant_id, role_id (to find groups with a specific role)
-        db.execute_unprepared("CREATE INDEX IF NOT EXISTS idx_group_roles_tenant_role ON flexi.group_roles (tenant_id, role_id)").await?;
 
         Ok(())
     }

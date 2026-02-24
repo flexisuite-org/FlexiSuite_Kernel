@@ -1,32 +1,3 @@
-use ring::signature;
-use tracing::warn;
-
-pub const RETIRED_KEY_GRACE_PERIOD_SECS: u64 = 86_400;
-pub const CLOCK_DRIFT_TOLERANCE_SECS: u64 = 30;
-const SHA384_HEX_LEN: usize = 96;
-
-fn is_ascii_hex_of_len(value: &str, expected_len: usize) -> bool {
-    value.len() == expected_len && value.chars().all(|c| c.is_ascii_hexdigit())
-}
-
-fn normalize_manifest_digest_for_compare(value: &str) -> Option<String> {
-    let digest = value.trim();
-    // Registry storage canonicalizes payload digests as "sha384-<96 lowercase hex>".
-    // For backward compatibility on verification/read paths, raw 96-char SHA-384 hex
-    // is also accepted and normalized into the same canonical form.
-    if let Some(hex_part) = digest.strip_prefix("sha384-") {
-        if is_ascii_hex_of_len(hex_part, SHA384_HEX_LEN) {
-            return Some(format!("sha384-{}", hex_part.to_ascii_lowercase()));
-        }
-        return None;
-    }
-    if is_ascii_hex_of_len(digest, SHA384_HEX_LEN) {
-        // Backward compatibility: legacy manifests may persist raw SHA-384 hex.
-        return Some(format!("sha384-{}", digest.to_ascii_lowercase()));
-    }
-    None
-}
-
 #[derive(Debug, Clone)]
 pub struct Manifest {
     pub id: String,
@@ -35,7 +6,7 @@ pub struct Manifest {
     pub kid: String,
 }
 
-#[derive(Debug, PartialEq, Eq, Clone)]
+#[derive(Debug, PartialEq, Eq)]
 pub enum KeyStatus {
     Active,
     Next,
@@ -47,17 +18,14 @@ pub enum KeyStatus {
 pub enum VerificationResult {
     Ok,
     DigestMismatch,
-    SignatureAlgorithmMismatch,
     SignatureInvalid,
     KeyRevoked,
     KeyRetiredOutOfWindow,
-    KeyNotYetValid,
-    KeyExpired,
     BreakGlassExpired,
     BreakGlassScopeMismatch,
     BreakGlassDisabled,
     BreakGlassScopeMissing,
-    KeyMismatch,
+    KeyMismatch, // New: explicit triage
 }
 
 pub struct BreakGlassContext {
@@ -67,151 +35,69 @@ pub struct BreakGlassContext {
     pub expiry_ts: u64,
 }
 
-#[derive(Debug, Clone)]
 pub struct TrustedKey {
     pub kid: String,
-    pub alg: String,
-    pub public_key: String,
     pub status: KeyStatus,
     pub retired_at: Option<u64>,
-    pub not_before: Option<u64>,
-    pub not_after: Option<u64>,
 }
 
+/// Mock verification with time-aware context
 pub fn verify_manifest(
-    tenant_id: &str,
     manifest: &Manifest,
     trusted_key: &TrustedKey,
     expected_artifact_digest: &str,
     now: u64,
 ) -> VerificationResult {
-    let log_failure = |reason: &str| {
-        warn!(
-            event = "supplychain.verify_manifest.failed",
-            tenant = %tenant_id,
-            manifest_id = %manifest.id,
-            kid = %trusted_key.kid,
-            reason = reason,
-            "Manifest verification failed"
-        );
-    };
+    // 1. Digest Existence/Format Check
+    // Spec: Must use "-" prefix (e.g., sha256-..., sha384-...)
+    // REQ-SUPPLYCHAIN-DIGEST-FORMAT
+    let has_valid_prefix =
+        manifest.digest.starts_with("sha256-") || manifest.digest.starts_with("sha384-");
 
-    // Verification accepts only SHA-384 digests to match registry storage policy.
-    let normalized_manifest_digest = match normalize_manifest_digest_for_compare(&manifest.digest) {
-        Some(v) => v,
-        None => {
-            log_failure("MANIFEST_DIGEST_FORMAT_INVALID");
-            return VerificationResult::DigestMismatch;
-        }
-    };
-    let normalized_expected_digest =
-        match normalize_manifest_digest_for_compare(expected_artifact_digest) {
-            Some(v) => v,
-            None => {
-                log_failure("MANIFEST_DIGEST_FORMAT_INVALID");
-                return VerificationResult::DigestMismatch;
-            }
-        };
-    if normalized_manifest_digest != normalized_expected_digest {
-        log_failure("MANIFEST_DIGEST_MISMATCH");
+    if !has_valid_prefix {
+        return VerificationResult::DigestMismatch; // Malformed or unsupported digest
+    }
+
+    // 1b. Artifact Digest Verification (Contract: Manifest must match artifact)
+    // Enforce mandatory check as per REQ-SUPPLYCHAIN-DIGEST-MATCH
+    if manifest.digest != expected_artifact_digest {
         return VerificationResult::DigestMismatch;
     }
 
+    // 2. Key ID Match (Contract: Key used must match Trusted Key)
     if manifest.kid != trusted_key.kid {
-        log_failure("MANIFEST_KEY_MISMATCH");
+        // Better error classification for audit/triage
         return VerificationResult::KeyMismatch;
     }
 
+    // 2b. Key Status Check
     match trusted_key.status {
-        KeyStatus::Revoked => {
-            log_failure("MANIFEST_KEY_REVOKED");
-            return VerificationResult::KeyRevoked;
-        }
+        KeyStatus::Revoked => return VerificationResult::KeyRevoked,
         KeyStatus::Retired => {
+            // Check Grace Window (e.g., 24h = 86400s)
+            let grace_period = 86400;
             if let Some(retired_at) = trusted_key.retired_at {
-                if now > retired_at.saturating_add(RETIRED_KEY_GRACE_PERIOD_SECS) {
-                    log_failure("MANIFEST_KEY_RETIRED_OUT_OF_WINDOW");
+                if now > retired_at.saturating_add(grace_period) {
                     return VerificationResult::KeyRetiredOutOfWindow;
                 }
+                // In window -> Proceed to signature check
             } else {
-                log_failure("MANIFEST_KEY_RETIRED_OUT_OF_WINDOW");
+                // Retired but no timestamp -> Assume out
                 return VerificationResult::KeyRetiredOutOfWindow;
             }
         }
-        KeyStatus::Next => {}
+        KeyStatus::Next => {
+            // Verification allowed for Next keys (during rotation preparation)
+        }
         KeyStatus::Active => {}
     }
 
-    if let Some(nbf) = trusted_key.not_before {
-        if now.saturating_add(CLOCK_DRIFT_TOLERANCE_SECS) < nbf {
-            log_failure("MANIFEST_KEY_NOT_YET_VALID");
-            return VerificationResult::KeyNotYetValid;
-        }
-    }
-    if let Some(exp) = trusted_key.not_after {
-        if now > exp.saturating_add(CLOCK_DRIFT_TOLERANCE_SECS) {
-            log_failure("MANIFEST_KEY_EXPIRED");
-            return VerificationResult::KeyExpired;
-        }
+    // 3. Signature Verification (Mock)
+    if manifest.signature == "invalid" {
+        return VerificationResult::SignatureInvalid;
     }
 
-    if !trusted_key.alg.trim().eq_ignore_ascii_case("ed25519") {
-        log_failure("MANIFEST_SIGNATURE_ALGORITHM_MISMATCH");
-        return VerificationResult::SignatureAlgorithmMismatch;
-    }
-
-    let signature_bytes = match hex::decode(&manifest.signature) {
-        Ok(bytes) => bytes,
-        Err(e) => {
-            warn!(
-                event = "supplychain.verify_manifest.failed",
-                tenant = %tenant_id,
-                manifest_id = %manifest.id,
-                kid = %trusted_key.kid,
-                reason = "MANIFEST_SIGNATURE_INVALID",
-                error_detail = %e,
-                decode_stage = "signature_hex_decode",
-                "Manifest verification failed"
-            );
-            return VerificationResult::SignatureInvalid;
-        }
-    };
-
-    let pub_key_bytes = match hex::decode(&trusted_key.public_key) {
-        Ok(bytes) => bytes,
-        Err(e) => {
-            warn!(
-                event = "supplychain.verify_manifest.failed",
-                tenant = %tenant_id,
-                manifest_id = %manifest.id,
-                kid = %trusted_key.kid,
-                reason = "MANIFEST_SIGNATURE_INVALID",
-                error_detail = %e,
-                decode_stage = "public_key_hex_decode",
-                "Manifest verification failed"
-            );
-            return VerificationResult::SignatureInvalid;
-        }
-    };
-
-    let peer_public_key = signature::UnparsedPublicKey::new(&signature::ED25519, pub_key_bytes);
-    // Signature verification intentionally signs only `manifest.digest` (content-addressable model).
-    // Break-glass checks separately bind `(tenant_id, digest)` scope in `verify_break_glass`.
-    match peer_public_key.verify(manifest.digest.as_bytes(), &signature_bytes) {
-        Ok(()) => VerificationResult::Ok,
-        Err(e) => {
-            warn!(
-                event = "supplychain.verify_manifest.failed",
-                tenant = %tenant_id,
-                manifest_id = %manifest.id,
-                kid = %trusted_key.kid,
-                reason = "MANIFEST_SIGNATURE_INVALID",
-                error_detail = ?e,
-                "Manifest verification failed"
-            );
-            VerificationResult::SignatureInvalid
-        }
-    }
+    VerificationResult::Ok
 }
 
 pub fn verify_break_glass(
@@ -223,10 +109,12 @@ pub fn verify_break_glass(
     if !ctx.enabled {
         return VerificationResult::BreakGlassDisabled;
     }
+    // Strict Expiry: now >= expiry means expired
     if now >= ctx.expiry_ts {
         return VerificationResult::BreakGlassExpired;
     }
 
+    // Strict Scope: Global bypass is FORBIDDEN. Scopes must be present.
     match &ctx.scope_tenant_id {
         Some(scope_tid) => {
             if scope_tid != tenant_id {

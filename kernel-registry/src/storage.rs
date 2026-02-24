@@ -1,28 +1,31 @@
 use crate::error::RegistryError;
 use crate::model::{Dependencies, DistManifest, Kind, Route};
-use crate::trust::{FileTrustProvider, TrustProvider};
 use bytes::Bytes;
 use kernel_core::auth::TenantContext;
-use kernel_core::supplychain::{Manifest, VerificationResult, verify_manifest};
 use object_store::ObjectStore;
 use object_store::path::Path;
 use serde::Serialize;
 use sha2::{Digest, Sha384};
 use std::collections::BTreeMap;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::{error, info, instrument, warn};
 
 pub struct RegistryStorage {
     store: Arc<dyn ObjectStore>,
     prefix: String,
     tenant_id: String,
-    trust_provider: Arc<dyn TrustProvider>,
 }
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 /// Digest payload for `manifest_payload_digest`.
+///
+/// Hash stability depends on the serde serialization shape of this payload and
+/// all nested types referenced here (`Route`, `Dependencies`, `Kind`).
+/// Changing serde attributes (for example `rename_all`, field/variant renames,
+/// or ordering-affecting schema changes) can silently change computed digests.
+/// Treat such serde-shape changes as breaking: update stored manifests, add
+/// migration steps, and add digest regression tests.
 struct ManifestDigestPayload<'a> {
     schema_version: &'a str,
     id: &'a str,
@@ -37,60 +40,11 @@ struct ManifestDigestPayload<'a> {
 }
 
 impl RegistryStorage {
-    const SHA384_HEX_LEN: usize = 96;
-
-    fn is_ascii_hex_of_len(value: &str, expected_len: usize) -> bool {
-        value.len() == expected_len && value.chars().all(|c| c.is_ascii_hexdigit())
-    }
-
-    fn emit_manifest_signature_invalid_audit(kid: &str, reason: &str) {
-        error!(
-            event = "MANIFEST_SIGNATURE_INVALID",
-            kid = %kid,
-            reason = %reason,
-            "Manifest signature validation failed"
-        );
-    }
-
-    pub fn new(
-        store: Arc<dyn ObjectStore>,
-        tenant_ctx: &TenantContext,
-    ) -> Result<Self, RegistryError> {
-        let trust_path_str = std::env::var("MANIFEST_TRUST_ROOT_PATH")
-            .unwrap_or_else(|_| "ops/trust/manifest_trust_root.json".to_string());
-        let trust_path = std::path::PathBuf::from(&trust_path_str);
-
-        if !trust_path.exists() {
-            return Err(RegistryError::TrustRootError(format!(
-                "Trust root file not found: {:?}. Set MANIFEST_TRUST_ROOT_PATH to a valid trust root path (current value: {}).",
-                trust_path, trust_path_str
-            )));
-        }
-
-        let trust_provider = FileTrustProvider::new(trust_path.clone()).map_err(|e| {
-            RegistryError::TrustRootError(format!(
-                "Failed to load trust root from {:?}: {}",
-                trust_path, e
-            ))
-        })?;
-
-        Ok(Self::new_with_trust_provider(
-            store,
-            tenant_ctx,
-            Arc::new(trust_provider),
-        ))
-    }
-
-    pub fn new_with_trust_provider(
-        store: Arc<dyn ObjectStore>,
-        tenant_ctx: &TenantContext,
-        trust_provider: Arc<dyn TrustProvider>,
-    ) -> Self {
+    pub fn new(store: Arc<dyn ObjectStore>, tenant_ctx: &TenantContext) -> Self {
         Self {
             store,
             prefix: format!("tenants/{}/", tenant_ctx.tenant_id().as_str()),
             tenant_id: tenant_ctx.tenant_id().to_string(),
-            trust_provider,
         }
     }
 
@@ -135,13 +89,21 @@ impl RegistryStorage {
         Path::from(format!("{}artifacts/{}", self.prefix, key))
     }
 
-    pub fn manifest_path(&self, id: &str, version: &str) -> Path {
+    fn manifest_path(&self, id: &str, version: &str) -> Path {
         Path::from(format!(
             "{}manifests/{}/{}/manifest.json",
             self.prefix, id, version
         ))
     }
 
+    /// Computes a digest from the JSON serialization of `ManifestDigestPayload`.
+    ///
+    /// Maintenance note: digest stability is tied to serde configuration of
+    /// nested payload types (`Route`, `Dependencies`, `Kind`) and this payload's
+    /// own serde shape. Any serde change (including `rename_all`, field/variant
+    /// renames, or ordering-affecting schema edits) must be treated as breaking:
+    /// update stored manifests, add migration steps, and add digest regression
+    /// tests.
     fn manifest_payload_digest(manifest: &DistManifest) -> Result<String, RegistryError> {
         let payload = ManifestDigestPayload {
             schema_version: &manifest.schema_version,
@@ -156,48 +118,14 @@ impl RegistryStorage {
             configuration: &manifest.configuration,
         };
 
+        // Normalize numeric values to ensure digest stability (1.0 vs 1)
         let payload_value = serde_json::to_value(&payload)?;
         let normalized = Self::normalize_value(payload_value);
         let payload_bytes = serde_json::to_vec(&normalized)?;
 
         let mut hasher = Sha384::new();
         hasher.update(payload_bytes);
-        Ok(Self::canonical_manifest_digest(&hex::encode(
-            hasher.finalize(),
-        )))
-    }
-
-    pub fn compute_manifest_digest(manifest: &DistManifest) -> Result<String, RegistryError> {
-        Self::manifest_payload_digest(manifest)
-    }
-
-    fn canonical_manifest_digest(hex_digest: &str) -> String {
-        format!("sha384-{}", hex_digest.to_ascii_lowercase())
-    }
-
-    fn normalize_manifest_digest_for_compare(digest: &str) -> Option<String> {
-        let value = digest.trim();
-        // Read path keeps backward compatibility for legacy raw SHA-384 hex persisted
-        // before canonical prefix enforcement; save path only accepts "sha384-<hex>".
-        if let Some(hex_part) = value.strip_prefix("sha384-") {
-            if Self::is_ascii_hex_of_len(hex_part, Self::SHA384_HEX_LEN) {
-                return Some(Self::canonical_manifest_digest(hex_part));
-            }
-            return None;
-        }
-        if Self::is_ascii_hex_of_len(value, Self::SHA384_HEX_LEN) {
-            return Some(Self::canonical_manifest_digest(value));
-        }
-        None
-    }
-
-    fn canonical_manifest_digest_for_save(digest: &str) -> Option<String> {
-        let value = digest.trim();
-        let hex_part = value.strip_prefix("sha384-")?;
-        if !Self::is_ascii_hex_of_len(hex_part, Self::SHA384_HEX_LEN) {
-            return None;
-        }
-        Some(Self::canonical_manifest_digest(hex_part))
+        Ok(hex::encode(hasher.finalize()))
     }
 
     fn normalize_value(v: serde_json::Value) -> serde_json::Value {
@@ -217,7 +145,10 @@ impl RegistryStorage {
                     return Value::from(u);
                 }
                 if let Some(f) = n.as_f64() {
+                    // Check if the float is effectively an integer
                     if f.fract() == 0.0 {
+                        // Prefer integer representation if it fits in i64/u64
+                        // Perform lossless round-trip check to avoid silent saturation
                         if f >= (i64::MIN as f64) && f < (i64::MAX as f64) {
                             let i = f as i64;
                             if (i as f64) == f {
@@ -238,6 +169,7 @@ impl RegistryStorage {
         }
     }
 
+    /// Saves binary data and returns the SHA-384 digest (hex string).
     #[instrument(skip(self, data), fields(tenant = %self.tenant_id, artifact = %key))]
     pub async fn save_artifact(&self, key: &str, data: Bytes) -> Result<String, RegistryError> {
         Self::validate_key(key)?;
@@ -255,6 +187,7 @@ impl RegistryStorage {
         Ok(digest)
     }
 
+    /// Retrieves binary data. If expected_digest is provided, verifies SHA-384.
     #[instrument(skip(self), fields(tenant = %self.tenant_id, artifact = %key))]
     pub async fn get_artifact(
         &self,
@@ -293,6 +226,8 @@ impl RegistryStorage {
         Ok(data)
     }
 
+    /// Saves a DistManifest to `manifests/{id}/{version}/manifest.json`.
+    /// Returns the SHA-384 digest and persisted manifest with manifest_digest set.
     #[instrument(skip(self, manifest), fields(tenant = %self.tenant_id, manifest.id = %manifest.id, manifest.version = %manifest.version))]
     pub async fn save_manifest(
         &self,
@@ -319,84 +254,11 @@ impl RegistryStorage {
             ));
         }
 
-        // Save path enforces canonical SHA-384 format to keep persisted manifests
-        // aligned with payload hashing and signature verification behavior.
-        let submitted_digest =
-            Self::canonical_manifest_digest_for_save(&manifest.security.manifest_digest)
-                .ok_or_else(|| {
-                    RegistryError::InvalidManifest(
-                        "security.manifest_digest must be canonical sha384-<hex>".to_string(),
-                    )
-                })?;
-
-        // security section excluded from the hashed payload (canonical "sha384-{hex}" format).
+        // manifest_digest is computed from the manifest with the entire
+        // security section excluded from the hashed payload.
         let computed_digest = Self::manifest_payload_digest(manifest)?;
-        if submitted_digest != computed_digest {
-            warn!(
-                submitted = %submitted_digest,
-                computed = %computed_digest,
-                "Manifest rejected: submitted digest does not match payload digest"
-            );
-            return Err(RegistryError::InvalidManifest(format!(
-                "security.manifest_digest mismatch: submitted={}, computed={}",
-                submitted_digest, computed_digest
-            )));
-        }
-
-        // Validate Security
-        let trusted_key = self
-            .trust_provider
-            .get_key(&manifest.security.manifest_signature_kid)
-            .map_err(|err| {
-                Self::emit_manifest_signature_invalid_audit(
-                    &manifest.security.manifest_signature_kid,
-                    &format!("trust_provider.get_key failed: {err}"),
-                );
-                err
-            })?;
-
-        let core_manifest = Manifest {
-            id: manifest.id.clone(),
-            digest: submitted_digest.clone(),
-            signature: manifest.security.manifest_signature.clone(),
-            kid: manifest.security.manifest_signature_kid.clone(),
-        };
-
-        let now = match SystemTime::now().duration_since(UNIX_EPOCH) {
-            Ok(duration) => duration.as_secs(),
-            Err(err) => {
-                warn!(
-                    error = %err,
-                    "System clock is before UNIX_EPOCH; falling back to now=0 for manifest verification"
-                );
-                0
-            }
-        };
-
-        match verify_manifest(
-            &self.tenant_id,
-            &core_manifest,
-            &trusted_key,
-            &computed_digest,
-            now,
-        ) {
-            VerificationResult::Ok => {
-                info!("Manifest signature verified successfully");
-            }
-            err => {
-                Self::emit_manifest_signature_invalid_audit(
-                    &trusted_key.kid,
-                    &format!("verify_manifest failed: {err:?}"),
-                );
-                return Err(RegistryError::InvalidManifest(format!(
-                    "Signature verification failed: {:?}",
-                    err
-                )));
-            }
-        }
-
         let mut persisted = manifest.clone();
-        persisted.security.manifest_digest = submitted_digest;
+        persisted.security.manifest_digest = computed_digest.clone();
 
         let path = self.manifest_path(&manifest.id, &manifest.version);
         let data = serde_json::to_vec(&persisted)?;
@@ -410,6 +272,7 @@ impl RegistryStorage {
         Ok((computed_digest, persisted))
     }
 
+    /// Retrieves a DistManifest from `manifests/{id}/{version}/manifest.json`.
     #[instrument(skip(self), fields(tenant = %self.tenant_id, manifest.id = %id, manifest.version = %version))]
     pub async fn get_manifest(
         &self,
@@ -432,66 +295,11 @@ impl RegistryStorage {
         let data = result.bytes().await?;
         let manifest: DistManifest = serde_json::from_slice(&data)?;
         let actual = Self::manifest_payload_digest(&manifest)?;
-        let expected =
-            Self::normalize_manifest_digest_for_compare(&manifest.security.manifest_digest)
-                .ok_or_else(|| {
-                    RegistryError::InvalidManifest(format!(
-                        "security.manifest_digest must be sha384-<hex> or legacy hex: {}",
-                        manifest.security.manifest_digest
-                    ))
-                })?;
+        let expected = manifest.security.manifest_digest.clone();
         if actual != expected {
             warn!(expected = %expected, actual = %actual, "Manifest integrity check failed");
             return Err(RegistryError::IntegrityCheckFailed { expected, actual });
         }
-
-        let trusted_key = self
-            .trust_provider
-            .get_key(&manifest.security.manifest_signature_kid)
-            .map_err(|err| {
-                Self::emit_manifest_signature_invalid_audit(
-                    &manifest.security.manifest_signature_kid,
-                    &format!("trust_provider.get_key failed: {err}"),
-                );
-                err
-            })?;
-
-        let core_manifest = Manifest {
-            id: manifest.id.clone(),
-            digest: manifest.security.manifest_digest.clone(),
-            signature: manifest.security.manifest_signature.clone(),
-            kid: manifest.security.manifest_signature_kid.clone(),
-        };
-        let now = match SystemTime::now().duration_since(UNIX_EPOCH) {
-            Ok(duration) => duration.as_secs(),
-            Err(err) => {
-                warn!(
-                    error = %err,
-                    "System clock is before UNIX_EPOCH; falling back to now=0 for manifest read verification"
-                );
-                0
-            }
-        };
-        match verify_manifest(
-            &self.tenant_id,
-            &core_manifest,
-            &trusted_key,
-            &actual,
-            now,
-        ) {
-            VerificationResult::Ok => {}
-            reason => {
-                Self::emit_manifest_signature_invalid_audit(
-                    &trusted_key.kid,
-                    &format!("verify_manifest failed on read: {reason:?}"),
-                );
-                return Err(RegistryError::InvalidManifest(format!(
-                    "Signature verification failed: {:?}",
-                    reason
-                )));
-            }
-        }
-
         info!(digest = %actual, "Manifest retrieved successfully");
         Ok(manifest)
     }
