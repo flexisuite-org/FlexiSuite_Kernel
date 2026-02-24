@@ -234,10 +234,20 @@ async fn get_health(Extension(ctx): Extension<TenantContext>) -> impl IntoRespon
         }
     };
 
-    match db.ping().await {
-        Ok(_) => (StatusCode::OK, Json(serde_json::json!({"status": "ok"}))).into_response(),
-        Err(e) => {
+    match tokio::time::timeout(std::time::Duration::from_secs(1), db.ping()).await {
+        Ok(Ok(_)) => (StatusCode::OK, Json(serde_json::json!({"status": "ok"}))).into_response(),
+        Ok(Err(e)) => {
             tracing::error!("Health check failed (DB): {}", e);
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({
+                    "status": "error",
+                    "details": "Database connectivity failed"
+                })),
+            ).into_response()
+        }
+        Err(_) => {
+            tracing::error!("Health check timed out (DB)");
             (
                 StatusCode::SERVICE_UNAVAILABLE,
                 Json(serde_json::json!({
