@@ -256,6 +256,13 @@ fn parse_tenant_from_token(token: &str) -> Option<String> {
         return None;
     }
 
+    #[cfg(not(feature = "test-utils"))]
+    if token.starts_with("dev-token:") {
+        warn!(
+            "dev-token encountered in non-test build; parsing via v2 parser (tenant_id extraction bypassed)"
+        );
+    }
+
     let mut parts = token.split(':');
     let ver = parts.next()?;
     let _kid = parts.next()?;
