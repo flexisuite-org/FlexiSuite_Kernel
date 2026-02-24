@@ -37,6 +37,12 @@ struct ManifestDigestPayload<'a> {
 }
 
 impl RegistryStorage {
+    const SHA384_HEX_LEN: usize = 96;
+
+    fn is_ascii_hex_of_len(value: &str, expected_len: usize) -> bool {
+        value.len() == expected_len && value.chars().all(|c| c.is_ascii_hexdigit())
+    }
+
     fn emit_manifest_signature_invalid_audit(kid: &str, reason: &str) {
         error!(
             event = "MANIFEST_SIGNATURE_INVALID",
@@ -171,13 +177,15 @@ impl RegistryStorage {
 
     fn normalize_manifest_digest_for_compare(digest: &str) -> Option<String> {
         let value = digest.trim();
+        // Read path keeps backward compatibility for legacy raw SHA-384 hex persisted
+        // before canonical prefix enforcement; save path only accepts "sha384-<hex>".
         if let Some(hex_part) = value.strip_prefix("sha384-") {
-            if !hex_part.is_empty() && hex_part.chars().all(|c| c.is_ascii_hexdigit()) {
+            if Self::is_ascii_hex_of_len(hex_part, Self::SHA384_HEX_LEN) {
                 return Some(Self::canonical_manifest_digest(hex_part));
             }
             return None;
         }
-        if !value.is_empty() && value.chars().all(|c| c.is_ascii_hexdigit()) {
+        if Self::is_ascii_hex_of_len(value, Self::SHA384_HEX_LEN) {
             return Some(Self::canonical_manifest_digest(value));
         }
         None
@@ -186,7 +194,7 @@ impl RegistryStorage {
     fn canonical_manifest_digest_for_save(digest: &str) -> Option<String> {
         let value = digest.trim();
         let hex_part = value.strip_prefix("sha384-")?;
-        if hex_part.is_empty() || !hex_part.chars().all(|c| c.is_ascii_hexdigit()) {
+        if !Self::is_ascii_hex_of_len(hex_part, Self::SHA384_HEX_LEN) {
             return None;
         }
         Some(Self::canonical_manifest_digest(hex_part))
@@ -311,6 +319,8 @@ impl RegistryStorage {
             ));
         }
 
+        // Save path enforces canonical SHA-384 format to keep persisted manifests
+        // aligned with payload hashing and signature verification behavior.
         let submitted_digest =
             Self::canonical_manifest_digest_for_save(&manifest.security.manifest_digest)
                 .ok_or_else(|| {
@@ -462,12 +472,11 @@ impl RegistryStorage {
                 0
             }
         };
-        let verification_digest = manifest.security.manifest_digest.clone();
         match verify_manifest(
             &self.tenant_id,
             &core_manifest,
             &trusted_key,
-            &verification_digest,
+            &actual,
             now,
         ) {
             VerificationResult::Ok => {}

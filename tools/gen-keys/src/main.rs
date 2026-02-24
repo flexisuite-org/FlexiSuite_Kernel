@@ -4,8 +4,8 @@ use ed25519_dalek::{SigningKey, VerifyingKey};
 use rand::RngCore;
 use rand::rngs::OsRng;
 use serde::Serialize;
-use std::io;
 use std::fs;
+use std::io::{self, Write};
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -28,6 +28,11 @@ struct Args {
     /// Key validity window in days (default: 365).
     #[arg(long, env = "GEN_KEYS_VALIDITY_DAYS", default_value_t = 365)]
     validity_days: u64,
+
+    /// Optional output path for the generated 32-byte Ed25519 private key.
+    /// Use "-" to write raw bytes to stdout.
+    #[arg(long, env = "GEN_KEYS_PRIVATE_KEY_OUTPUT")]
+    private_key_output: Option<PathBuf>,
 }
 
 #[derive(Serialize)]
@@ -51,6 +56,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
     let mut csprng = OsRng;
     let signing_key: SigningKey = SigningKey::generate(&mut csprng);
+    let private_key_bytes = signing_key.to_bytes();
     let verifying_key: VerifyingKey = signing_key.verifying_key();
 
     let pub_hex = hex::encode(verifying_key.to_bytes());
@@ -62,7 +68,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .single()
         .ok_or_else(|| {
             io::Error::other(format!(
-                "failed to convert SystemTime to UTC timestamp: now_secs={now_secs}, subsec_nanos={subsec_nanos}"
+                "SystemTime::now() and UNIX_EPOCH must produce a valid UTC timestamp (now_secs={now_secs}, subsec_nanos={subsec_nanos})"
             ))
         })?;
     let generated_at = now_dt.to_rfc3339();
@@ -102,9 +108,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     if let Some(parent) = output_path.parent() {
-        if !parent.exists() {
-            fs::create_dir_all(parent)?;
-        }
+        fs::create_dir_all(parent)?;
     }
 
     fs::write(&output_path, json)?;
@@ -112,10 +116,52 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "Wrote manifest_trust_root.json to {}",
         output_path.display()
     );
+
+    if let Some(path) = args.private_key_output.as_ref() {
+        write_private_key(path, private_key_bytes.as_slice())?;
+    }
     Ok(())
 }
 
 fn default_output_path() -> Result<PathBuf, std::io::Error> {
     let cwd = std::env::current_dir()?;
     Ok(cwd.join("ops/trust/manifest_trust_root.json"))
+}
+
+fn write_private_key(path: &PathBuf, private_key_bytes: &[u8]) -> Result<(), io::Error> {
+    if path.as_os_str() == "-" {
+        let mut stdout = io::stdout();
+        stdout.write_all(private_key_bytes)?;
+        stdout.write_all(b"\n")?;
+        stdout.flush()?;
+        return Ok(());
+    }
+
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+
+    #[cfg(unix)]
+    {
+        use std::fs::OpenOptions;
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+
+        let mut file = OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .mode(0o600)
+            .open(path)?;
+        file.write_all(private_key_bytes)?;
+        file.flush()?;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
+    }
+
+    #[cfg(not(unix))]
+    {
+        fs::write(path, private_key_bytes)?;
+    }
+
+    println!("Wrote private key bytes to {}", path.display());
+    Ok(())
 }
