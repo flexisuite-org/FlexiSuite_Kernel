@@ -172,7 +172,7 @@ fn parse_tenant_from_token(token: &str) -> Option<String> {
         let payload_and_sig_bytes = match URL_SAFE_NO_PAD.decode(payload_b64) {
             Ok(b) => b,
             Err(e) => {
-                error!("Base64 decode failed for {}: {}", payload_b64, e);
+                error!("Base64 decode failed for payload (len={}): {}", payload_b64.len(), e);
                 return None;
             }
         };
@@ -192,10 +192,10 @@ fn parse_tenant_from_token(token: &str) -> Option<String> {
                 return None;
             }
         };
-        let json: serde_json::Value = match serde_json::from_str(&payload_str) {
+        let json: serde_json::Value = match serde_json::from_str(payload_str) {
             Ok(j) => j,
             Err(e) => {
-                error!("JSON parse failed for {}: {}", payload_str, e);
+                error!("JSON parse failed (len={}): {}", payload_str.len(), e);
                 return None;
             }
         };
@@ -204,7 +204,7 @@ fn parse_tenant_from_token(token: &str) -> Option<String> {
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
         if tid.is_none() {
-             error!("tenant_id missing in json: {:?}", json);
+             error!("tenant_id missing in token payload");
         }
         return tid;
     } else if let Some(tenant_id) = token.strip_prefix("dev-token:") {

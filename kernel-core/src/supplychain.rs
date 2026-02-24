@@ -39,6 +39,7 @@ pub struct TrustedKey {
     pub kid: String,
     pub status: KeyStatus,
     pub retired_at: Option<u64>,
+    pub public_key: Vec<u8>,
 }
 
 /// Mock verification with time-aware context
@@ -92,14 +93,34 @@ pub fn verify_manifest(
         KeyStatus::Active => {}
     }
 
-    // 3. Signature Verification (Mock)
-    // TODO: Implement real cryptographic verification (verify_signature) using trusted_key.
-    // Tracking Issue: https://github.com/flexisuite-org/FlexiSuite_Kernel/issues/52 (Supply Chain Hardening)
-    if manifest.signature == "invalid" {
-        return VerificationResult::SignatureInvalid;
+    // 3. Signature Verification
+    #[cfg(feature = "test-utils")]
+    {
+        if manifest.signature == "invalid" {
+            return VerificationResult::SignatureInvalid;
+        }
+        VerificationResult::Ok
     }
 
-    VerificationResult::Ok
+    #[cfg(not(feature = "test-utils"))]
+    {
+        use ring::signature;
+        let peer_public_key = signature::UnparsedPublicKey::new(
+            &signature::ED25519,
+            &trusted_key.public_key,
+        );
+
+        let sig_bytes = match hex::decode(&manifest.signature) {
+             Ok(b) => b,
+             Err(_) => return VerificationResult::SignatureInvalid,
+        };
+
+        if peer_public_key.verify(manifest.digest.as_bytes(), &sig_bytes).is_err() {
+             return VerificationResult::SignatureInvalid;
+        }
+
+        VerificationResult::Ok
+    }
 }
 
 pub fn verify_break_glass(
