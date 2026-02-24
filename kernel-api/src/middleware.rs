@@ -6,7 +6,6 @@ use axum::{
     },
     middleware::Next,
     response::{IntoResponse, Response},
-    Json,
 };
 use base64::prelude::*;
 use http_body_util::BodyExt;
@@ -23,7 +22,6 @@ use tokio::sync::{Mutex, Notify};
 use tracing::{error, info, instrument, warn};
 
 use crate::auth::TenantContext;
-use crate::build_json_error_response;
 
 #[derive(Clone)]
 pub struct MiddlewareConfig {
@@ -213,13 +211,6 @@ pub enum IdempotencyStoreError {
     BackendUnavailable,
 }
 
-#[derive(Clone, Copy, Debug, Serialize, PartialEq)]
-#[serde(rename_all = "lowercase")]
-pub enum PingStatus {
-    Ok,
-    Degraded,
-}
-
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub struct IdempotencyScopeKey {
     pub tenant_id: kernel_core::auth::TenantId,
@@ -253,7 +244,6 @@ pub trait IdempotencyStore: Send + Sync {
         lease: &IdempotencyLease,
     ) -> Result<(), IdempotencyStoreError>;
     async fn cleanup(&self);
-    async fn ping(&self) -> Result<PingStatus, IdempotencyStoreError>;
 }
 
 pub struct InMemoryIdempotencyStore {
@@ -411,10 +401,6 @@ impl IdempotencyStore for InMemoryIdempotencyStore {
         for notify in expired_inflight_notifies {
             notify.notify_waiters();
         }
-    }
-
-    async fn ping(&self) -> Result<PingStatus, IdempotencyStoreError> {
-        Ok(PingStatus::Degraded)
     }
 }
 
@@ -878,23 +864,6 @@ impl IdempotencyStore for RedisIdempotencyStore {
     }
 
     async fn cleanup(&self) {}
-
-    /// Checks the health of the Redis backend.
-    ///
-    /// The manager (`ConnectionManager`) is a multiplexed asynchronous connection with
-    /// automatic reconnection. Cloning it returns a handle to the same multiplexed connection.
-    /// We use `redis::cmd("PING").query_async` to exercise that multiplexed connection
-    /// and check backend availability.
-    async fn ping(&self) -> Result<PingStatus, IdempotencyStoreError> {
-        let mut conn = self.manager.clone();
-        match redis::cmd("PING").query_async::<String>(&mut conn).await {
-            Ok(_) => Ok(PingStatus::Ok),
-            Err(e) => {
-                error!("Redis ping error: {}", e);
-                Err(IdempotencyStoreError::BackendUnavailable)
-            }
-        }
-    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
@@ -1561,14 +1530,9 @@ pub async fn get_action(
 pub async fn idempotency_middleware(
     req: Request<Body>,
     next: Next,
-) -> Result<Response, Response> {
+) -> Result<Response, StatusCode> {
     let (parts, body) = req.into_parts();
     let method = parts.method.clone();
-    let request_id = parts
-        .headers
-        .get("x-request-id")
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_string());
 
     let idempotency_key = match parts.headers.get("Idempotency-Key") {
         Some(val) => {
@@ -1576,20 +1540,12 @@ pub async fn idempotency_middleware(
                 Ok(k) => k,
                 Err(_) => {
                     warn!("Invalid Idempotency-Key encoding");
-                    return Err(build_json_error_response(
-                        "Invalid Idempotency-Key encoding",
-                        StatusCode::BAD_REQUEST,
-                        request_id,
-                    ));
+                    return Err(StatusCode::BAD_REQUEST);
                 }
             };
             if validate_idempotency_key(key).is_err() {
                 warn!(key = %key, "Invalid Idempotency-Key format");
-                return Err(build_json_error_response(
-                    "Invalid Idempotency-Key format",
-                    StatusCode::BAD_REQUEST,
-                    request_id,
-                ));
+                return Err(StatusCode::BAD_REQUEST);
             }
             key.to_string()
         }
@@ -1600,19 +1556,16 @@ pub async fn idempotency_middleware(
                 || method == Method::PATCH
             {
                 warn!(method = %method, "Missing Idempotency-Key for write operation");
-                return Err(build_json_error_response(
-                    "Missing Idempotency-Key for write operation",
-                    StatusCode::BAD_REQUEST,
-                    request_id,
-                ));
+                return Err(StatusCode::BAD_REQUEST);
             }
             return Ok(next.run(Request::from_parts(parts, body)).await);
         }
     };
 
-    let tenant_ctx = parts.extensions.get::<TenantContext>().ok_or_else(|| {
-        build_json_error_response("Unauthorized", StatusCode::UNAUTHORIZED, request_id.clone())
-    })?;
+    let tenant_ctx = parts
+        .extensions
+        .get::<TenantContext>()
+        .ok_or(StatusCode::UNAUTHORIZED)?;
 
     tracing::Span::current().record("tenant_id", &tenant_ctx.tenant_id().to_string());
     tracing::Span::current().record("method", method.as_str());
@@ -1638,13 +1591,7 @@ pub async fn idempotency_middleware(
         .extensions
         .get::<MiddlewareState>()
         .cloned()
-        .ok_or_else(|| {
-            build_json_error_response(
-                "Internal Server Error",
-                StatusCode::INTERNAL_SERVER_ERROR,
-                request_id.clone(),
-            )
-        })?;
+        .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
 
     let body_bytes = match to_bytes(body, state.config.max_body_size).await {
         Ok(b) => b,
@@ -1653,11 +1600,7 @@ pub async fn idempotency_middleware(
                 "Request body exceeded max_body_size ({})",
                 state.config.max_body_size
             );
-            return Err(build_json_error_response(
-                "Request body exceeded max_body_size",
-                StatusCode::BAD_REQUEST,
-                request_id.clone(),
-            ));
+            return Err(StatusCode::BAD_REQUEST);
         }
     };
 
@@ -1675,11 +1618,7 @@ pub async fn idempotency_middleware(
                 attempts = attempts,
                 "Exceeded max attempts waiting for in-flight idempotent request"
             );
-            let mut res = build_json_error_response(
-                "Service Unavailable",
-                StatusCode::SERVICE_UNAVAILABLE,
-                request_id.clone(),
-            );
+            let mut res = StatusCode::SERVICE_UNAVAILABLE.into_response();
             let retry_after = state
                 .config
                 .inflight_wait_timeout
@@ -1710,11 +1649,7 @@ pub async fn idempotency_middleware(
                             key = %idempotency_key,
                             "Idempotency conflict detected (Completed)"
                         );
-                        return Err(build_json_error_response(
-                            "Idempotency conflict",
-                            StatusCode::CONFLICT,
-                            request_id.clone(),
-                        ));
+                        return Err(StatusCode::CONFLICT);
                     }
                     info!(key = %idempotency_key, "Replaying idempotent response");
                     return Ok(build_replay_response(&record));
@@ -1729,11 +1664,7 @@ pub async fn idempotency_middleware(
                             key = %idempotency_key,
                             "Idempotency conflict detected (InFlight)"
                         );
-                        return Err(build_json_error_response(
-                            "Idempotency conflict",
-                            StatusCode::CONFLICT,
-                            request_id.clone(),
-                        ));
+                        return Err(StatusCode::CONFLICT);
                     }
 
                     let notified = notify.notified();
@@ -1749,11 +1680,7 @@ pub async fn idempotency_middleware(
                             timeout_ms = state.config.inflight_wait_timeout.as_millis() as u64,
                             "Timed out waiting for in-flight idempotent request"
                         );
-                        let mut res = build_json_error_response(
-                            "Service Unavailable",
-                            StatusCode::SERVICE_UNAVAILABLE,
-                            request_id.clone(),
-                        );
+                        let mut res = StatusCode::SERVICE_UNAVAILABLE.into_response();
                         let retry_after = state
                             .config
                             .inflight_wait_timeout
@@ -1770,11 +1697,7 @@ pub async fn idempotency_middleware(
             },
             Err(IdempotencyStoreError::BackendUnavailable) => {
                 error!("Idempotency store unavailable during acquire");
-                return Err(build_json_error_response(
-                    "Service Unavailable",
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    request_id.clone(),
-                ));
+                return Err(StatusCode::SERVICE_UNAVAILABLE);
             }
         }
     };
@@ -1917,21 +1840,12 @@ fn build_replay_response(record: &IdempotencyRecord) -> Response {
 
 pub async fn quota_middleware(req: Request<Body>, next: Next) -> Result<Response, Response> {
     let (parts, body) = req.into_parts();
-    let request_id = parts
-        .headers
-        .get("x-request-id")
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_string());
 
     let tenant_ctx = match parts.extensions.get::<TenantContext>() {
         Some(ctx) => ctx,
         None => {
             warn!("Quota middleware missing TenantContext");
-            return Err(build_json_error_response(
-                "Unauthorized",
-                StatusCode::UNAUTHORIZED,
-                request_id,
-            ));
+            return Ok(StatusCode::UNAUTHORIZED.into_response());
         }
     };
 
@@ -1939,11 +1853,7 @@ pub async fn quota_middleware(req: Request<Body>, next: Next) -> Result<Response
         Some(s) => s,
         None => {
             error!("MiddlewareState missing");
-            return Err(build_json_error_response(
-                "Internal Server Error",
-                StatusCode::INTERNAL_SERVER_ERROR,
-                request_id,
-            ));
+            return Ok(StatusCode::INTERNAL_SERVER_ERROR.into_response());
         }
     };
 
@@ -1955,7 +1865,7 @@ pub async fn quota_middleware(req: Request<Body>, next: Next) -> Result<Response
                 retry_after_s: 100,
             };
             warn!("System Hard Limit exceeded (Mock)");
-            return Err(violation_to_response(&violation, request_id));
+            return Err(violation_to_response(&violation));
         }
 
         if parts.headers.contains_key("X-Mock-Quota-Tenant") {
@@ -1964,7 +1874,7 @@ pub async fn quota_middleware(req: Request<Body>, next: Next) -> Result<Response
                 retry_after_s: 5,
             };
             warn!("Tenant Budget exceeded (Mock)");
-            return Err(violation_to_response(&violation, request_id));
+            return Err(violation_to_response(&violation));
         }
 
         if parts.headers.contains_key("X-Mock-Quota-Api") {
@@ -1973,7 +1883,7 @@ pub async fn quota_middleware(req: Request<Body>, next: Next) -> Result<Response
                 retry_after_s: 60,
             };
             warn!("API Rate Limit exceeded (Mock)");
-            return Err(violation_to_response(&violation, request_id));
+            return Err(violation_to_response(&violation));
         }
     }
 
@@ -1989,7 +1899,7 @@ pub async fn quota_middleware(req: Request<Body>, next: Next) -> Result<Response
         )
         .await
     {
-        return Err(violation_to_response(&v, request_id));
+        return Err(violation_to_response(&v));
     }
 
     Ok(next.run(Request::from_parts(parts, body)).await)
@@ -2011,29 +1921,17 @@ pub fn violation_to_status(v: &QuotaViolation) -> StatusCode {
     }
 }
 
-pub fn violation_to_response(v: &QuotaViolation, request_id: Option<String>) -> Response {
+pub fn violation_to_response(v: &QuotaViolation) -> Response {
     let status = violation_to_status(v);
     let message = match status {
         StatusCode::TOO_MANY_REQUESTS => "Rate limit exceeded",
         _ => "Quota limit exceeded",
     };
-    let quota_headers = v.headers();
-    let retry_after = quota_headers
-        .iter()
-        .find(|(name, _)| name.eq_ignore_ascii_case("Retry-After"))
-        .and_then(|(_, value)| value.parse::<u64>().ok())
-        .unwrap_or(v.retry_after_s);
-
-    let mut body = serde_json::Map::new();
-    body.insert("status".to_string(), serde_json::json!(status.as_u16()));
-    body.insert("error".to_string(), serde_json::json!(message));
-    body.insert("retry_after".to_string(), serde_json::json!(retry_after));
-    body.insert("request_id".to_string(), serde_json::json!(request_id));
-    let mut res = (status, Json(serde_json::Value::Object(body))).into_response();
+    let mut res = (status, message).into_response();
 
     // Inject headers from violation
     let headers = res.headers_mut();
-    for (name, value) in quota_headers {
+    for (name, value) in v.headers() {
         if let Ok(hname) = HeaderName::from_bytes(name.as_bytes()) {
             if let Ok(hval) = HeaderValue::from_str(&value) {
                 headers.insert(hname, hval);
@@ -2043,13 +1941,13 @@ pub fn violation_to_response(v: &QuotaViolation, request_id: Option<String>) -> 
 
     #[cfg(any(test, feature = "test-utils"))]
     {
+        // For tests, we might want to inspect specific violation details via headers
         let violation_type = match v.layer {
             QuotaLayer::SystemHardLimit => "system_hard_limit",
             QuotaLayer::CircuitBreaker => "circuit_breaker",
             QuotaLayer::TenantBudget => "tenant_budget",
             QuotaLayer::ApiRateLimit => "api_rate_limit",
         };
-        // For tests, we might want to inspect specific violation details via headers
         headers.insert(
             "X-Violation-Type",
             HeaderValue::from_str(violation_type).unwrap_or(HeaderValue::from_static("unknown")),
@@ -2057,30 +1955,4 @@ pub fn violation_to_response(v: &QuotaViolation, request_id: Option<String>) -> 
     }
 
     res
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_sha256_hex() {
-        let input = b"hello world";
-        // echo -n "hello world" | sha256sum
-        // b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9
-        let expected = "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9";
-        assert_eq!(sha256_hex(input), expected);
-
-        let input_empty = b"";
-        // echo -n "" | sha256sum
-        // e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
-        let expected_empty = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
-        assert_eq!(sha256_hex(input_empty), expected_empty);
-
-        // FIPS 180-4 / NIST SHA-256 test vector "abc"
-        // https://csrc.nist.gov/projects/cryptographic-algorithm-validation-program/secure-hashing
-        let input_nist = b"abc";
-        let expected_nist = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
-        assert_eq!(sha256_hex(input_nist), expected_nist);
-    }
 }

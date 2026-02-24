@@ -162,31 +162,18 @@ pub async fn op_fetch(
     for (k, v) in response.headers() {
         let key = k.to_string();
         let val = v.to_str().unwrap_or("").to_string();
-        if key.eq_ignore_ascii_case("set-cookie") {
-            // NOTE: This naive impl overwrites separate Set-Cookie headers because HashMap keys are unique.
-            // Deno's `Headers` polyfill would need to handle this, but passing multiple values is complex with this simplistic interface.
-            // For now, we follow the RFC 7230 §3.2.2 rule for other headers (joining with comma)
-            // but since reqwest headers iter iterates multiple entries, we need to manually join.
-            // Wait, reqwest's `iter()` yields all values.
-            // We need to collect them.
-            // Let's assume non-set-cookie headers can be joined.
-            // But HashMap prevents multiple entries.
-            // Correct approach: check if exists, append.
-            use std::fmt::Write;
-            if let Some(existing) = headers.get_mut(&key) {
-                if !key.eq_ignore_ascii_case("set-cookie") {
-                    write!(existing, ", {}", val).ok();
-                }
-            } else {
-                headers.insert(key, val);
-            }
+
+        use std::fmt::Write;
+        if let Some(existing) = headers.get_mut(&key) {
+            // Special handling for Set-Cookie: use newline separator (or just append?)
+            // Deno/Browsers often expose Set-Cookie differently, but for a simple fetch polyfill returning Headers object,
+            // we should probably try to preserve them. But HashMap<String, String> is limiting.
+            // We'll use a comma for standard headers (RFC 7230) and a newline for Set-Cookie as a heuristic
+            // so consumers might parse it if they really need to.
+            let sep = if key.eq_ignore_ascii_case("set-cookie") { "\n" } else { ", " };
+            write!(existing, "{}{}", sep, val).ok();
         } else {
-            use std::fmt::Write;
-            if let Some(existing) = headers.get_mut(&key) {
-                write!(existing, ", {}", val).ok();
-            } else {
-                headers.insert(key, val);
-            }
+            headers.insert(key, val);
         }
     }
 
@@ -279,12 +266,6 @@ fn thread_cpu_time(clock_id: libc::clockid_t) -> Result<Duration, SandboxError> 
         return Err(SandboxError::RuntimeError(
             "thread CPU clock returned negative timestamp".to_string(),
         ));
-    }
-    if ts.tv_nsec >= 1_000_000_000 {
-        return Err(SandboxError::RuntimeError(format!(
-            "thread CPU clock returned out-of-range nanoseconds: {}",
-            ts.tv_nsec
-        )));
     }
     Ok(Duration::from_secs(ts.tv_sec as u64)
         .saturating_add(Duration::from_nanos(ts.tv_nsec as u64)))
@@ -483,6 +464,10 @@ impl SandboxRuntime for DenoSandbox {
                         has(name) {{ return this.map.has(name.toLowerCase()); }}
                         set(name, value) {{ this.map.set(name.toLowerCase(), String(value)); }}
                         forEach(callback) {{ this.map.forEach((v, k) => callback(v, k, this)); }}
+                        keys() {{ return this.map.keys(); }}
+                        values() {{ return this.map.values(); }}
+                        entries() {{ return this.map.entries(); }}
+                        [Symbol.iterator]() {{ return this.map.entries(); }}
                     }};
                     globalThis.fetch = async function(url, options) {{
                         // Convert Headers instance to plain object

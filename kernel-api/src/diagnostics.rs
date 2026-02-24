@@ -223,9 +223,17 @@ async fn query_diagnostic(
     }
 }
 
-/// Health probe entry-point. For availability decisions, use /health/liveness or /health/readiness.
+/// Stub health check endpoint. Does not perform real service checks.
 async fn get_health() -> impl IntoResponse {
-    (StatusCode::OK, Json(serde_json::json!({ "status": "ok" }))).into_response()
+    (
+        StatusCode::NOT_IMPLEMENTED,
+        Json(serde_json::json!({
+            "status": "not_implemented",
+            "message": "Health dependency checks are not implemented yet. Implement real probes before using this endpoint for availability decisions.",
+            "stub": true
+        })),
+    )
+        .into_response()
 }
 
 async fn get_policy(Extension(ctx): Extension<TenantContext>) -> impl IntoResponse {

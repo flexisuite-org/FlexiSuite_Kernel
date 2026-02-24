@@ -32,6 +32,7 @@ const ERR_INVALID_LEN: i32 = -10;
 const ERR_PARSE_METHOD: i32 = -11;
 const ERR_PARSE_HEADERS: i32 = -12;
 const ERR_RESPONSE_TOO_LARGE: i32 = -13;
+const ERR_RESPONSE_UTF8: i32 = -14;
 
 impl Drop for WasmSandbox {
     fn drop(&mut self) {
@@ -154,6 +155,12 @@ impl SandboxRuntime for WasmSandbox {
                             if len < 0 {
                                 return Err(ERR_INVALID_LEN);
                             }
+                            // Check memory bounds before allocation
+                            let end = (ptr as usize).checked_add(len as usize).ok_or(ERR_INVALID_LEN)?;
+                            if end > mem.data_size(&caller) {
+                                return Err(ERR_READ_MEM);
+                            }
+
                             let mut buf = vec![0u8; len as usize];
                             if mem.read(&caller, ptr as usize, &mut buf).is_err() {
                                 return Err(ERR_READ_MEM);
@@ -240,7 +247,7 @@ impl SandboxRuntime for WasmSandbox {
 
                         let body = match String::from_utf8(body_bytes) {
                             Ok(s) => s,
-                            Err(_) => return Ok(ERR_UTF8),
+                            Err(_) => return Ok(ERR_RESPONSE_UTF8),
                         };
 
                         let json_resp = serde_json::json!({
@@ -250,6 +257,10 @@ impl SandboxRuntime for WasmSandbox {
                         let json_str = json_resp.to_string();
                         let json_bytes = json_str.as_bytes();
 
+                        // Check non-negative length for out buffer
+                        if out_max_len < 0 {
+                            return Ok(ERR_RESPONSE_TOO_LARGE);
+                        }
                         if json_bytes.len() > out_max_len as usize {
                             return Ok(ERR_RESPONSE_TOO_LARGE);
                         }
