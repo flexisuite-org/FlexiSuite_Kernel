@@ -55,7 +55,7 @@ pub async fn auth_middleware(
             return Err(StatusCode::UNAUTHORIZED);
         };
 
-        match verify_paseto_v4_public_from_env(value) {
+        match verify_paseto_v4_public_from_env_token(&token_part) {
             Ok(ctx) => (ctx, token_part),
             Err(AuthError::Unauthorized) => {
                 tracing::warn!("PASETO token verification failed: Unauthorized");
@@ -297,27 +297,23 @@ impl PasetoKeyset {
 }
 
 pub fn init_auth_config() -> Result<(), String> {
-    // 1. Determine active KID first to decide if generic key is required
+    // When a generic public key (FLEXI_PASETO_V4_PUBLIC_KEY_B64URL) is provided,
+    // it becomes the default public key used for initialization.
+    // Otherwise, the active key from PasetoKeyset::from_env
+    // (keyset.active_kid / keyset.public_key_for_kid) is chosen and passed to
+    // init_auth_config_with_decoded_public_key_and_keyset.
     let active_kid = std::env::var("FLEXI_PASETO_V4_ACTIVE_KID").unwrap_or_else(|_| "active".to_string());
 
     let default_key = if active_kid == "active" {
-        // If using default KID, generic key is REQUIRED
         let key_b64 = std::env::var("FLEXI_PASETO_V4_PUBLIC_KEY_B64URL")
             .map_err(|_| "FLEXI_PASETO_V4_PUBLIC_KEY_B64URL is not set (required for default active kid)".to_string())?;
         let decoded = decode_public_key_b64url(&key_b64, "FLEXI_PASETO_V4_PUBLIC_KEY_B64URL")?;
         Some(decoded)
     } else {
-        // If custom KID, generic key is optional (and ignored by from_env anyway)
         None
     };
 
     let keyset = PasetoKeyset::from_env(default_key.as_deref())?;
-
-    // For initialization, we need *some* default key to verify initial health or set PASETO_PUBLIC_KEY?
-    // Actually PASETO_PUBLIC_KEY global is "default_public_key".
-    // If we have custom active key, THAT should be the default?
-    // Current logic: PASETO_PUBLIC_KEY gets 'decoded' (from generic).
-    // If generic is None, we need to pick the active key from keyset.
 
     let active_key_bytes = keyset.public_key_for_kid(&keyset.active_kid)
         .ok_or_else(|| format!("Active key for kid '{}' failed to load", keyset.active_kid))?
@@ -375,9 +371,7 @@ fn init_auth_config_with_decoded_public_key_and_keyset(
         .map_err(|_| "Auth keyset already initialized".to_string())
 }
 
-/// Verifies a PASETO v4.public token from the auth header after extracting and validating footer.kid.
-fn verify_paseto_v4_public_from_env(auth_header: &str) -> Result<TenantContext, AuthError> {
-    let token = extract_bearer_token(auth_header).ok_or(AuthError::Unauthorized)?;
+fn verify_paseto_v4_public_from_env_token(token: &str) -> Result<TenantContext, AuthError> {
     let default_public_key = PASETO_PUBLIC_KEY.get().ok_or(AuthError::Unauthorized)?;
     let keyset = PASETO_KEYSET.get().ok_or(AuthError::Unauthorized)?;
 

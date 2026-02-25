@@ -46,6 +46,13 @@ impl TenantScoped<RawConnection> {
         &self.inner.txn
     }
 
+    /// # Safety
+    ///
+    /// This method exposes the raw database transaction, bypassing strict tenant scoping.
+    /// Callers MUST ensure that any operations performed using this transaction
+    /// are authorized via `flexi.authorize_tenant` or otherwise maintain tenant isolation invariants.
+    ///
+    /// This is exposed primarily for test seeding and special integration scenarios.
     #[cfg(feature = "test-utils")]
     pub fn txn(&self) -> &DatabaseTransaction {
         &self.inner.txn
@@ -195,7 +202,9 @@ fn parse_tenant_from_token(token: &str) -> Option<String> {
     #[cfg(feature = "test-utils")]
     if let Some(tenant_id) = token.strip_prefix("dev-token:") {
         // Special dev token for tests/debug with tenant ID
-        return Some(tenant_id.to_string());
+        if !tenant_id.is_empty() {
+            return Some(tenant_id.to_string());
+        }
     }
 
     #[cfg(not(feature = "test-utils"))]
@@ -249,6 +258,64 @@ mod tests {
     fn test_parse_empty_tenant_returns_none() {
         let token = "v2:kid:ts:nonce::sig";
         assert_eq!(parse_tenant_from_token(token), None);
+    }
+
+    #[cfg(feature = "test-utils")]
+    mod test_utils_parsing {
+        use super::*;
+        use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+
+        #[test]
+        fn test_dev_token_parsing() {
+            // Valid
+            assert_eq!(parse_tenant_from_token("dev-token:t1"), Some("t1".to_string()));
+
+            // Empty tenant (should be rejected per hardening)
+            assert_eq!(parse_tenant_from_token("dev-token:"), None);
+        }
+
+        #[test]
+        fn test_v4_public_parsing() {
+            let payload_json = r#"{"tenant_id":"t1","extra":"stuff"}"#;
+            let payload_bytes = payload_json.as_bytes();
+            let mut full_payload = payload_bytes.to_vec();
+            full_payload.extend_from_slice(&[0u8; 64]); // Mock signature
+            let b64 = URL_SAFE_NO_PAD.encode(&full_payload);
+            let token = format!("v4.public.header.{}.footer", b64);
+
+            assert_eq!(parse_tenant_from_token(&token), Some("t1".to_string()));
+        }
+
+        #[test]
+        fn test_v4_public_empty_tenant_parsing() {
+            let payload_json = r#"{"tenant_id":""}"#;
+            let payload_bytes = payload_json.as_bytes();
+            let mut full_payload = payload_bytes.to_vec();
+            full_payload.extend_from_slice(&[0u8; 64]); // Mock signature
+            let b64 = URL_SAFE_NO_PAD.encode(&full_payload);
+            let token = format!("v4.public.header.{}.footer", b64);
+
+            assert_eq!(parse_tenant_from_token(&token), None);
+        }
+    }
+
+    #[cfg(not(feature = "test-utils"))]
+    mod production_parsing {
+        use super::*;
+
+        #[test]
+        fn test_dev_token_rejected() {
+            assert_eq!(parse_tenant_from_token("dev-token:t1"), None);
+        }
+
+        #[test]
+        fn test_v4_public_ignored() {
+            // In prod, v4 public token parsing logic is compiled out or falls through
+            // The function only parses v2 format if feature is disabled.
+            // "v4.public..." does not match "v2:..." structure.
+            let token = "v4.public.header.payload.footer";
+            assert_eq!(parse_tenant_from_token(token), None);
+        }
     }
 }
 
