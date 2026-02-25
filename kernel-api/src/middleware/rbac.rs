@@ -56,7 +56,7 @@ pub async fn load_permissions_middleware(
     if ctx.user_id().is_none() {
         // Fail closed if user_id is missing (unauthenticated or service account not allowed here)
         warn!("User ID missing in context for RBAC protected route");
-        return Err(StatusCode::UNAUTHORIZED);
+        return Err(StatusCode::FORBIDDEN);
     }
 
     // The incoming token might be V4 (PASETO) which is verified by auth_middleware.
