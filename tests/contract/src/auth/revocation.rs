@@ -13,12 +13,10 @@ async fn test_key_revocation_slo() {
     // Mock DB that expects one successful authorization (for Case 1)
     // Case 2 and 3 should be rejected by Auth middleware (stateless/cached) and not hit DB.
     let db = MockDatabase::new(sea_orm::DatabaseBackend::Postgres)
-        .append_exec_results(vec![
-            MockExecResult {
-                last_insert_id: 0,
-                rows_affected: 1,
-            },
-        ])
+        .append_exec_results(vec![MockExecResult {
+            last_insert_id: 0,
+            rows_affected: 1,
+        }])
         .append_query_results(vec![vec![] as Vec<MockRow>])
         .into_connection();
 

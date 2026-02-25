@@ -105,18 +105,19 @@ pub fn verify_manifest(
     #[cfg(not(feature = "test-utils"))]
     {
         use ring::signature;
-        let peer_public_key = signature::UnparsedPublicKey::new(
-            &signature::ED25519,
-            &trusted_key.public_key,
-        );
+        let peer_public_key =
+            signature::UnparsedPublicKey::new(&signature::ED25519, &trusted_key.public_key);
 
         let sig_bytes = match hex::decode(&manifest.signature) {
-             Ok(b) => b,
-             Err(_) => return VerificationResult::SignatureInvalid,
+            Ok(b) => b,
+            Err(_) => return VerificationResult::SignatureInvalid,
         };
 
-        if peer_public_key.verify(manifest.digest.as_bytes(), &sig_bytes).is_err() {
-             return VerificationResult::SignatureInvalid;
+        if peer_public_key
+            .verify(manifest.digest.as_bytes(), &sig_bytes)
+            .is_err()
+        {
+            return VerificationResult::SignatureInvalid;
         }
 
         VerificationResult::Ok

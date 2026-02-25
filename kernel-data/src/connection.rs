@@ -161,44 +161,37 @@ where
 }
 
 fn parse_tenant_from_token(token: &str) -> Option<String> {
-    #[cfg(feature = "test-utils")]
+    #[cfg(any(debug_assertions, feature = "test-utils"))]
     if token.starts_with("v4.public.") {
         let parts: Vec<&str> = token.split('.').collect();
         if parts.len() >= 3 {
             if let Ok(payload_bytes) = URL_SAFE_NO_PAD.decode(parts[2]) {
-                // v4.public payload is m || sig (64 bytes). We need 'm'.
-                // But simplified parsing for tests: just try to decode as JSON from the start?
-                // Or handle the signature suffix.
-                // The tests generate valid PASETOs which have signature.
-                // If we blindly parse JSON, the trailing garbage (sig) might fail it if not separated?
-                // PASETO v4 public: payload is message || signature.
-                // So we need to strip last 64 bytes.
+                // Decode payload as base64url, strip trailing 64-byte Ed25519 signature, then parse JSON message to read tenant_id.
                 if payload_bytes.len() > 64 {
-                     let payload_len = payload_bytes.len() - 64;
-                     let json_bytes = &payload_bytes[..payload_len];
-                     if let Ok(s) = String::from_utf8(json_bytes.to_vec()) {
-                         if let Ok(json) = serde_json::from_str::<serde_json::Value>(&s) {
-                             if let Some(tid) = json.get("tenant_id").and_then(|v| v.as_str()) {
-                                 return Some(tid.to_string());
-                             }
-                         }
-                     }
+                    let payload_len = payload_bytes.len() - 64;
+                    let json_bytes = &payload_bytes[..payload_len];
+                    if let Ok(s) = String::from_utf8(json_bytes.to_vec()) {
+                        if let Ok(json) = serde_json::from_str::<serde_json::Value>(&s) {
+                            if let Some(tid) = json.get("tenant_id").and_then(|v| v.as_str()) {
+                                return Some(tid.to_string());
+                            }
+                        }
+                    }
                 }
             }
         }
     }
 
-    #[cfg(feature = "test-utils")]
+    #[cfg(any(debug_assertions, feature = "test-utils"))]
     if let Some(tenant_id) = token.strip_prefix("dev-token:") {
         // Special dev token for tests/debug with tenant ID
         return Some(tenant_id.to_string());
     }
 
-    #[cfg(not(feature = "test-utils"))]
+    #[cfg(not(any(debug_assertions, feature = "test-utils")))]
     if token.starts_with("dev-token:") {
-        warn!(
-            "dev-token encountered in non-test build; parsing via v2 parser (tenant_id extraction bypassed)"
-        );
+        warn!(token = %token, "dev-token is unsupported in this build; returning None");
+        return None;
     }
 
     let mut parts = token.split(':');
@@ -209,6 +202,9 @@ fn parse_tenant_from_token(token: &str) -> Option<String> {
     let tenant_id = parts.next()?;
     let _sig = parts.next()?;
     if ver != "v2" || parts.next().is_some() {
+        return None;
+    }
+    if tenant_id.is_empty() {
         return None;
     }
     Some(tenant_id.to_string())
@@ -232,19 +228,24 @@ mod tests {
 
     #[test]
     fn test_parse_extra_fields_returns_none() {
-        assert_eq!(parse_tenant_from_token("v2:kid:ts:nonce:tenant-1:sig:extra"), None);
+        assert_eq!(
+            parse_tenant_from_token("v2:kid:ts:nonce:tenant-1:sig:extra"),
+            None
+        );
     }
 
     #[test]
     fn test_parse_wrong_version_returns_none() {
-        assert_eq!(parse_tenant_from_token("v3:kid:ts:nonce:tenant-1:sig"), None);
+        assert_eq!(
+            parse_tenant_from_token("v3:kid:ts:nonce:tenant-1:sig"),
+            None
+        );
     }
 
     #[test]
-    fn test_parse_empty_tenant_returns_some_empty() {
-        // Technically the parser allows empty tenant_id if it's in the right position
+    fn test_parse_empty_tenant_returns_none() {
         let token = "v2:kid:ts:nonce::sig";
-        assert_eq!(parse_tenant_from_token(token), Some("".to_string()));
+        assert_eq!(parse_tenant_from_token(token), None);
     }
 }
 

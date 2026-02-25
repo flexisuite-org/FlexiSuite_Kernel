@@ -10,12 +10,10 @@ use tower::ServiceExt; // for oneshot
 async fn test_tenant_token_v2_accepts_valid_token_with_kid() {
     setup();
     let db = MockDatabase::new(sea_orm::DatabaseBackend::Postgres)
-        .append_exec_results(vec![
-            MockExecResult {
-                last_insert_id: 0,
-                rows_affected: 1,
-            },
-        ])
+        .append_exec_results(vec![MockExecResult {
+            last_insert_id: 0,
+            rows_affected: 1,
+        }])
         .append_query_results(vec![vec![] as Vec<MockRow>])
         .into_connection();
     let app = setup_app_with_db(db).await;
