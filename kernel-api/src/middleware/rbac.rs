@@ -5,6 +5,7 @@ use axum::{
     middleware::Next,
     response::Response,
 };
+use kernel_core::auth::KeyManager;
 use kernel_data::{RBACRepository, TenantContext, with_tenant_tx};
 use std::collections::HashSet;
 use tracing::{error, warn};
@@ -19,7 +20,7 @@ impl UserPermissions {
 }
 
 pub async fn load_permissions_middleware(
-    Extension(token_ext): Extension<BearerToken>,
+    Extension(_token_ext): Extension<BearerToken>,
     mut req: Request,
     next: Next,
 ) -> Result<Response, StatusCode> {
@@ -38,21 +39,23 @@ pub async fn load_permissions_middleware(
         }
     };
 
-    // Note: user_id existence is checked inside RBACRepository::get_user_permissions
-    // via TenantContext, but we can fast-fail here if needed.
     if ctx.user_id().is_none() {
-        // If no user_id (e.g. service account or incomplete auth),
-        // we assume no permissions.
-        req.extensions_mut().insert(UserPermissions(HashSet::new()));
-        return Ok(next.run(req).await);
+        warn!("Missing user_id in TenantContext");
+        return Err(StatusCode::UNAUTHORIZED);
     }
 
-    let token = &token_ext.0;
+    let tenant_token = match KeyManager::generate_tenant_token(&ctx, ctx.tenant_id()).await {
+        Ok(token) => token,
+        Err(e) => {
+            error!(error = %e, "Failed to generate tenant token for RBAC query");
+            return Err(StatusCode::INTERNAL_SERVER_ERROR);
+        }
+    };
 
     // Execute within a tenant-scoped transaction to ensure RLS is active.
     // RBACRepository now demands a TenantScoped connection.
     let ctx_clone = ctx.clone();
-    let permissions_result = with_tenant_tx(db, &ctx, token, move |scoped| {
+    let permissions_result = with_tenant_tx(db, &ctx, &tenant_token, move |scoped| {
         Box::pin(async move { RBACRepository::get_user_permissions(scoped, &ctx_clone).await })
     })
     .await;

@@ -3,7 +3,7 @@ use axum::{
     http::{Request, StatusCode},
 };
 use kernel_api::auth::{TenantContext, TenantId, UserId};
-use kernel_api::entities::permission;
+use kernel_api::entities::{key_record, permission};
 use kernel_api::middleware::{BearerToken, load_permissions_middleware, require_permission};
 use sea_orm::{DatabaseBackend, MockDatabase};
 use std::sync::Arc;
@@ -42,12 +42,26 @@ async fn test_rbac_middleware_allow() {
         created_at: now.into(),
         updated_at: now.into(),
     };
+    let active_hmac_key = key_record::Model {
+        kid: "hmac-test-active".to_string(),
+        key_type: key_record::KeyType::Hmac,
+        algorithm: "HS256".to_string(),
+        secret_bytes: Some(vec![7_u8; 32]),
+        public_bytes: None,
+        state: key_record::KeyState::Active,
+        created_at: now.into(),
+        activated_at: Some(now.into()),
+        retired_at: None,
+        revoked_at: None,
+        expires_at: None,
+    };
 
     let db = MockDatabase::new(DatabaseBackend::Postgres)
         .append_exec_results(vec![sea_orm::MockExecResult {
             last_insert_id: 0,
             rows_affected: 1,
         }]) // authorize_tenant (execute)
+        .append_query_results(vec![vec![active_hmac_key]]) // active key query for server-minted tenant token
         .append_query_results(vec![vec![mock_permission]]) // permissions query (select)
         .into_connection();
 
@@ -59,7 +73,7 @@ async fn test_rbac_middleware_allow() {
             )),
         )
         .layer(axum::middleware::from_fn(load_permissions_middleware))
-        .layer(axum::Extension(BearerToken(token.to_string())))
+        .layer(axum::Extension(BearerToken::new(token.to_string())))
         .layer(axum::Extension(
             TenantContext::new(
                 TenantId::new(tenant_id).unwrap(),
@@ -83,6 +97,20 @@ async fn test_rbac_middleware_deny() {
     let tenant_id = "tenant-1";
     let user_id = "user-1";
     let token = "v2:kid:ts:nonce:tenant-1:sig";
+    let now = chrono::Utc::now();
+    let active_hmac_key = key_record::Model {
+        kid: "hmac-test-active".to_string(),
+        key_type: key_record::KeyType::Hmac,
+        algorithm: "HS256".to_string(),
+        secret_bytes: Some(vec![9_u8; 32]),
+        public_bytes: None,
+        state: key_record::KeyState::Active,
+        created_at: now.into(),
+        activated_at: Some(now.into()),
+        retired_at: None,
+        revoked_at: None,
+        expires_at: None,
+    };
 
     // User has other:write, but needs test:read
     let db = MockDatabase::new(DatabaseBackend::Postgres)
@@ -90,6 +118,7 @@ async fn test_rbac_middleware_deny() {
             last_insert_id: 0,
             rows_affected: 1,
         }]) // authorize_tenant (execute)
+        .append_query_results(vec![vec![active_hmac_key]]) // active key query for server-minted tenant token
         .append_query_results(vec![vec![permission::Model {
             id: Uuid::new_v4(),
             tenant_id: tenant_id.to_string(),
@@ -109,7 +138,7 @@ async fn test_rbac_middleware_deny() {
             )),
         )
         .layer(axum::middleware::from_fn(load_permissions_middleware))
-        .layer(axum::Extension(BearerToken(token.to_string())))
+        .layer(axum::Extension(BearerToken::new(token.to_string())))
         .layer(axum::Extension(
             TenantContext::new(
                 TenantId::new(tenant_id).unwrap(),

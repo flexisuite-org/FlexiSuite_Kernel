@@ -219,8 +219,24 @@ pub struct IdempotencyScopeKey {
     pub idempotency_key: String,
 }
 
-#[derive(Clone, Debug)]
-pub struct BearerToken(pub String);
+#[derive(Clone)]
+pub struct BearerToken(String);
+
+impl BearerToken {
+    pub fn new(token: String) -> Self {
+        Self(token)
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Debug for BearerToken {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("BearerToken").field(&"<redacted>").finish()
+    }
+}
 
 /// Abstract Store Trait to allow switching to Redis (REQ: Production Readiness)
 #[async_trait]
@@ -1627,6 +1643,7 @@ pub async fn idempotency_middleware(
                 res.headers_mut()
                     .insert(axum::http::header::RETRY_AFTER, val);
             }
+            // Intentionally return Ok(res): this branch must carry Retry-After, while Err(StatusCode) cannot attach headers.
             return Ok(res);
         }
 
@@ -1689,6 +1706,7 @@ pub async fn idempotency_middleware(
                             res.headers_mut()
                                 .insert(axum::http::header::RETRY_AFTER, val);
                         }
+                        // Intentionally return Ok(res): this branch must carry Retry-After, while Err(StatusCode) cannot attach headers.
                         return Ok(res);
                     }
                 }
@@ -1770,7 +1788,7 @@ pub async fn quota_middleware(req: Request<Body>, next: Next) -> Result<Response
         Some(ctx) => ctx,
         None => {
             warn!("Quota middleware missing TenantContext");
-            return Ok(StatusCode::UNAUTHORIZED.into_response());
+            return Err(StatusCode::UNAUTHORIZED.into_response());
         }
     };
 
@@ -1778,7 +1796,7 @@ pub async fn quota_middleware(req: Request<Body>, next: Next) -> Result<Response
         Some(s) => s,
         None => {
             error!("MiddlewareState missing");
-            return Ok(StatusCode::INTERNAL_SERVER_ERROR.into_response());
+            return Err(StatusCode::INTERNAL_SERVER_ERROR.into_response());
         }
     };
 
@@ -1935,7 +1953,7 @@ pub fn violation_to_response(v: &QuotaViolation) -> Response {
         }
     }
 
-    #[cfg(any(test, feature = "test-utils"))]
+    #[cfg(test)]
     {
         // For tests, we might want to inspect specific violation details via headers
         let violation_type = match v.layer {

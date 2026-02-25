@@ -161,7 +161,6 @@ where
 }
 
 fn parse_tenant_from_token(token: &str) -> Option<String> {
-    #[cfg(any(debug_assertions, feature = "test-utils"))]
     if token.starts_with("v4.public.") {
         let parts: Vec<&str> = token.split('.').collect();
         if parts.len() >= 3 {
@@ -173,7 +172,9 @@ fn parse_tenant_from_token(token: &str) -> Option<String> {
                     if let Ok(s) = String::from_utf8(json_bytes.to_vec()) {
                         if let Ok(json) = serde_json::from_str::<serde_json::Value>(&s) {
                             if let Some(tid) = json.get("tenant_id").and_then(|v| v.as_str()) {
-                                return Some(tid.to_string());
+                                if !tid.is_empty() {
+                                    return Some(tid.to_string());
+                                }
                             }
                         }
                     }
@@ -182,15 +183,15 @@ fn parse_tenant_from_token(token: &str) -> Option<String> {
         }
     }
 
-    #[cfg(any(debug_assertions, feature = "test-utils"))]
+    #[cfg(feature = "test-utils")]
     if let Some(tenant_id) = token.strip_prefix("dev-token:") {
         // Special dev token for tests/debug with tenant ID
         return Some(tenant_id.to_string());
     }
 
-    #[cfg(not(any(debug_assertions, feature = "test-utils")))]
+    #[cfg(not(feature = "test-utils"))]
     if token.starts_with("dev-token:") {
-        warn!(token = %token, "dev-token is unsupported in this build; returning None");
+        warn!("dev-token is unsupported in this build; returning None");
         return None;
     }
 
