@@ -41,7 +41,13 @@ impl<C> TenantScoped<C> {
 }
 
 impl TenantScoped<RawConnection> {
+    #[cfg(not(feature = "test-utils"))]
     pub(crate) fn txn(&self) -> &DatabaseTransaction {
+        &self.inner.txn
+    }
+
+    #[cfg(feature = "test-utils")]
+    pub fn txn(&self) -> &DatabaseTransaction {
         &self.inner.txn
     }
 
