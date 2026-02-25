@@ -115,7 +115,7 @@ pub async fn auth_middleware(
     };
 
     req.extensions_mut().insert(context.with_db(db));
-    req.extensions_mut().insert(BearerToken(token_str));
+    req.extensions_mut().insert(BearerToken::new(token_str));
     Ok(next.run(req).await)
 }
 
@@ -123,6 +123,10 @@ use std::sync::OnceLock;
 
 static PASETO_PUBLIC_KEY: OnceLock<Vec<u8>> = OnceLock::new();
 static PASETO_KEYSET: OnceLock<PasetoKeyset> = OnceLock::new();
+
+pub fn is_auth_config_ready() -> bool {
+    PASETO_PUBLIC_KEY.get().is_some() && PASETO_KEYSET.get().is_some()
+}
 
 #[derive(Debug)]
 struct PasetoKeyset {
