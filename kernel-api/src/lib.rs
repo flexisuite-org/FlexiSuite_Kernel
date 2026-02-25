@@ -94,7 +94,6 @@ pub fn build_app_with_state(
         Router::new()
             .merge(public_router)
             .merge(protected_router)
-            .layer(Extension(db))
             .layer(Extension(state)),
         cleanup_handle,
     )
@@ -106,26 +105,11 @@ struct ReadinessResponse {
     checks: Vec<(&'static str, &'static str)>,
 }
 
-async fn readiness_handler(Extension(db): Extension<Arc<DatabaseConnection>>) -> impl IntoResponse {
-    const DB_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
+async fn readiness_handler() -> impl IntoResponse {
     const AUTH_PROBE_TIMEOUT: Duration = Duration::from_secs(1);
 
     let mut checks: Vec<(&'static str, &'static str)> = Vec::new();
     let mut all_ok = true;
-
-    match timeout(DB_PROBE_TIMEOUT, db.ping()).await {
-        Ok(Ok(())) => checks.push(("database", "ok")),
-        Ok(Err(e)) => {
-            tracing::error!(error = %e, "readiness database probe failed");
-            checks.push(("database", "failed"));
-            all_ok = false;
-        }
-        Err(_) => {
-            tracing::error!("readiness database probe timed out");
-            checks.push(("database", "timeout"));
-            all_ok = false;
-        }
-    }
 
     match timeout(AUTH_PROBE_TIMEOUT, async {
         crate::auth::is_auth_config_ready()
