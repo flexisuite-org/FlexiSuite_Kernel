@@ -24,6 +24,46 @@ use tracing::{error, info, instrument, warn};
 
 use crate::auth::TenantContext;
 
+/// BearerToken encapsulates an authentication bearer token with proper encapsulation.
+/// The token value is stored as a private field and redacted in Debug output.
+#[derive(Clone)]
+pub struct BearerToken(String);
+
+impl BearerToken {
+    pub fn new(token: impl Into<String>) -> Self {
+        Self(token.into())
+    }
+
+    /// Returns the token value
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Debug for BearerToken {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // Redact the token in debug output for security
+        if self.0.len() > 8 {
+            write!(
+                f,
+                "BearerToken(\"{}...{}\")",
+                &self.0[..4],
+                &self.0[self.0.len() - 4..]
+            )
+        } else {
+            write!(f, "BearerToken(<redacted>)")
+        }
+    }
+}
+
+impl std::ops::Deref for BearerToken {
+    type Target = str;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
 #[derive(Clone)]
 pub struct MiddlewareConfig {
     pub idempotency_ttl: Duration,
@@ -1943,7 +1983,7 @@ pub async fn quota_middleware(req: Request<Body>, next: Next) -> Result<Response
         Some(ctx) => ctx,
         None => {
             warn!("Quota middleware missing TenantContext");
-            return Ok(StatusCode::UNAUTHORIZED.into_response());
+            return Err(StatusCode::UNAUTHORIZED.into_response());
         }
     };
 
@@ -1951,7 +1991,7 @@ pub async fn quota_middleware(req: Request<Body>, next: Next) -> Result<Response
         Some(s) => s,
         None => {
             error!("MiddlewareState missing");
-            return Ok(StatusCode::INTERNAL_SERVER_ERROR.into_response());
+            return Err(StatusCode::INTERNAL_SERVER_ERROR.into_response());
         }
     };
 

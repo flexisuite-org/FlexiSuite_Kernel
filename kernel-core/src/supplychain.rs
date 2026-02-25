@@ -1,5 +1,44 @@
 use ring::signature::{ED25519, UnparsedPublicKey};
 
+// Build guard: test-utils feature should not be enabled in release builds
+#[cfg(all(not(debug_assertions), feature = "test-utils"))]
+compile_error!("The 'test-utils' feature is not allowed in release builds");
+
+#[cfg(feature = "test-utils")]
+pub mod test_utils {
+    use super::*;
+    
+    /// Test helper to create a manifest with dummy data
+    pub fn create_test_manifest() -> Manifest {
+        Manifest {
+            id: "test-manifest-001".to_string(),
+            digest: "sha256-0000000000000000000000000000000000000000000000000000000000000000".to_string(),
+            signature: "0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000".to_string(),
+            kid: "test-key-001".to_string(),
+        }
+    }
+    
+    /// Test helper to create a trusted key
+    pub fn create_test_trusted_key() -> TrustedKey {
+        TrustedKey {
+            kid: "test-key-001".to_string(),
+            public_key: vec![0u8; 32],
+            status: KeyStatus::Active,
+            retired_at: None,
+        }
+    }
+    
+    /// Test helper to create a break glass context
+    pub fn create_test_break_glass_context() -> BreakGlassContext {
+        BreakGlassContext {
+            enabled: true,
+            scope_tenant_id: Some("test-tenant".to_string()),
+            scope_digest: Some("sha256-0000000000000000000000000000000000000000000000000000000000000000".to_string()),
+            expiry_ts: 9999999999u64,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Manifest {
     pub id: String,

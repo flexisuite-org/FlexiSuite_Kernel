@@ -11,3 +11,6 @@ members = [
     "ops/linters",
     "kernel-archiver",
 ]
+
+[workspace.dependencies]
+ed25519-dalek = { version = "2.0", features = ["rand_core"] }
