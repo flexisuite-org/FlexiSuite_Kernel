@@ -64,7 +64,7 @@ pub async fn load_permissions_middleware(
     if ctx.user_id().is_none() {
         // Fail closed if user_id is missing (unauthenticated or service account not allowed here)
         warn!("User ID missing in context for RBAC protected route");
-        return Err(StatusCode::UNAUTHORIZED);
+        return Err(StatusCode::FORBIDDEN);
     }
 
     // Branching logic for tokens (Requirement 3)
