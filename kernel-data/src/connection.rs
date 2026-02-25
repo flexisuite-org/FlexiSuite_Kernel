@@ -172,20 +172,18 @@ fn parse_tenant_from_token(token: &str) -> Option<String> {
         let parts: Vec<&str> = token.split('.').collect();
         if parts.len() >= 3 {
             if let Ok(payload_bytes) = URL_SAFE_NO_PAD.decode(parts[2]) {
-                // v4.public payload is m || sig (64 bytes). We need 'm'.
-                // But simplified parsing for tests: just try to decode as JSON from the start?
-                // Or handle the signature suffix.
-                // The tests generate valid PASETOs which have signature.
-                // If we blindly parse JSON, the trailing garbage (sig) might fail it if not separated?
-                // PASETO v4 public: payload is message || signature.
-                // So we need to strip last 64 bytes.
+                // PASETO v4.public payload format is "message || 64-byte Ed25519 signature".
+                // The parser must strip the last 64 bytes from the payload and then decode
+                // the remaining bytes as JSON (the "message").
                 if payload_bytes.len() > 64 {
                      let payload_len = payload_bytes.len() - 64;
                      let json_bytes = &payload_bytes[..payload_len];
                      if let Ok(s) = String::from_utf8(json_bytes.to_vec()) {
                          if let Ok(json) = serde_json::from_str::<serde_json::Value>(&s) {
                              if let Some(tid) = json.get("tenant_id").and_then(|v| v.as_str()) {
-                                 return Some(tid.to_string());
+                                 if !tid.is_empty() {
+                                     return Some(tid.to_string());
+                                 }
                              }
                          }
                      }
@@ -203,8 +201,9 @@ fn parse_tenant_from_token(token: &str) -> Option<String> {
     #[cfg(not(feature = "test-utils"))]
     if token.starts_with("dev-token:") {
         warn!(
-            "dev-token encountered in non-test build; parsing via v2 parser (tenant_id extraction bypassed)"
+            "dev-token encountered in non-test build; parsing rejected"
         );
+        return None;
     }
 
     let mut parts = token.split(':');

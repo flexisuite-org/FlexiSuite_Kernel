@@ -11,15 +11,17 @@ use tracing::{error, warn};
 use crate::middleware::BearerToken;
 
 #[derive(Clone, Debug)]
-pub struct UserPermissions(HashSet<String>);
+pub struct UserPermissions {
+    inner: HashSet<String>,
+}
 
 impl UserPermissions {
     pub fn new(permissions: HashSet<String>) -> Self {
-        Self(permissions)
+        Self { inner: permissions }
     }
 
     pub fn has(&self, permission: &str) -> bool {
-        self.0.contains(permission)
+        self.inner.contains(permission)
     }
 }
 

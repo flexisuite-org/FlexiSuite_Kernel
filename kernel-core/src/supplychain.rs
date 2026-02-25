@@ -42,7 +42,12 @@ pub struct TrustedKey {
     pub public_key: Vec<u8>,
 }
 
-/// Mock verification with time-aware context
+const RETIRED_KEY_GRACE_PERIOD_SECONDS: u64 = 86400;
+
+/// Verifies a manifest against a trusted key.
+///
+/// In `test-utils` builds, this performs a mock verification (time-aware but signature bypass).
+/// In release/non-test builds, this performs real Ed25519 signature verification using `ring`.
 pub fn verify_manifest(
     manifest: &Manifest,
     trusted_key: &TrustedKey,
@@ -75,10 +80,9 @@ pub fn verify_manifest(
     match trusted_key.status {
         KeyStatus::Revoked => return VerificationResult::KeyRevoked,
         KeyStatus::Retired => {
-            // Check Grace Window (e.g., 24h = 86400s)
-            let grace_period = 86400;
+            // Check Grace Window
             if let Some(retired_at) = trusted_key.retired_at {
-                if now >= retired_at.saturating_add(grace_period) {
+                if now >= retired_at.saturating_add(RETIRED_KEY_GRACE_PERIOD_SECONDS) {
                     return VerificationResult::KeyRetiredOutOfWindow;
                 }
                 // In window -> Proceed to signature check
