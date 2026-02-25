@@ -1964,4 +1964,4 @@ pub fn violation_to_response(v: &QuotaViolation) -> Response {
 }
 
 pub mod rbac;
-pub use rbac::{load_permissions_middleware, require_permission, UserPermissions};
+pub use rbac::{UserPermissions, load_permissions_middleware, require_permission};
