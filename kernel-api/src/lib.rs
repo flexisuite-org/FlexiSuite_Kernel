@@ -62,12 +62,15 @@ pub fn build_app_with_state(
     // 3. Idempotency (Handle replays early to avoid DB work)
     // 4. Permissions (RBAC, requires DB access via load_permissions_middleware)
 
+    let require_perm = |p: &'static str| from_fn(move |req, next| require_permission(p, req, next));
+
+    #[allow(unused_mut)]
     let mut protected_router = Router::new()
-        .route("/test", post(write_test).put(write_test).layer(from_fn(|req, next| require_permission("test:write", req, next))))
-        .route("/actions/:action_id", get(get_action_status).layer(from_fn(|req, next| require_permission("action:read", req, next))))
+        .route("/test", post(write_test).put(write_test).layer(require_perm("test:write")))
+        .route("/actions/:action_id", get(get_action_status).layer(require_perm("action:read")))
         // Diagnostics routes under /api/v1/diagnostics
         // Note: diagnostics routes implement their own policy checks, but we add a base permission check here as requested.
-        .nest("/api/v1/diagnostics", diagnostics::routes().layer(from_fn(|req, next| require_permission("diagnostics:read", req, next))))
+        .nest("/api/v1/diagnostics", diagnostics::routes().layer(require_perm("diagnostics:read")))
         // Outermost applied last
         .layer(from_fn(load_permissions_middleware))
         .layer(from_fn(idempotency_middleware))
@@ -76,7 +79,7 @@ pub fn build_app_with_state(
 
     #[cfg(feature = "test-utils")]
     {
-        protected_router = protected_router.route("/test/protected", get(|| async { "Access Granted" }).layer(from_fn(|req, next| require_permission("test:read", req, next))));
+        protected_router = protected_router.route("/test/protected", get(|| async { "Access Granted" }).layer(require_perm("test:read")));
     }
 
     (
