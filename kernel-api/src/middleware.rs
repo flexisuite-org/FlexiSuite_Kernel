@@ -219,24 +219,8 @@ pub struct IdempotencyScopeKey {
     pub idempotency_key: String,
 }
 
-#[derive(Clone)]
-pub struct BearerToken(String);
-
-impl BearerToken {
-    pub fn new(token: String) -> Self {
-        Self(token)
-    }
-
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-impl fmt::Debug for BearerToken {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_tuple("BearerToken").field(&"<redacted>").finish()
-    }
-}
+#[derive(Clone, Debug)]
+pub struct BearerToken(pub String);
 
 /// Abstract Store Trait to allow switching to Redis (REQ: Production Readiness)
 #[async_trait]
@@ -1643,7 +1627,6 @@ pub async fn idempotency_middleware(
                 res.headers_mut()
                     .insert(axum::http::header::RETRY_AFTER, val);
             }
-            // Intentionally return Ok(res): this branch must carry Retry-After, while Err(StatusCode) cannot attach headers.
             return Ok(res);
         }
 
@@ -1706,7 +1689,6 @@ pub async fn idempotency_middleware(
                             res.headers_mut()
                                 .insert(axum::http::header::RETRY_AFTER, val);
                         }
-                        // Intentionally return Ok(res): this branch must carry Retry-After, while Err(StatusCode) cannot attach headers.
                         return Ok(res);
                     }
                 }
@@ -1788,7 +1770,7 @@ pub async fn quota_middleware(req: Request<Body>, next: Next) -> Result<Response
         Some(ctx) => ctx,
         None => {
             warn!("Quota middleware missing TenantContext");
-            return Err(StatusCode::UNAUTHORIZED.into_response());
+            return Ok(StatusCode::UNAUTHORIZED.into_response());
         }
     };
 
@@ -1796,7 +1778,7 @@ pub async fn quota_middleware(req: Request<Body>, next: Next) -> Result<Response
         Some(s) => s,
         None => {
             error!("MiddlewareState missing");
-            return Err(StatusCode::INTERNAL_SERVER_ERROR.into_response());
+            return Ok(StatusCode::INTERNAL_SERVER_ERROR.into_response());
         }
     };
 
@@ -1953,7 +1935,7 @@ pub fn violation_to_response(v: &QuotaViolation) -> Response {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-utils"))]
     {
         // For tests, we might want to inspect specific violation details via headers
         let violation_type = match v.layer {
@@ -1972,4 +1954,4 @@ pub fn violation_to_response(v: &QuotaViolation) -> Response {
 }
 
 pub mod rbac;
-pub use rbac::{UserPermissions, load_permissions_middleware, require_permission};
+pub use rbac::{load_permissions_middleware, require_permission, UserPermissions};
