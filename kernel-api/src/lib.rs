@@ -3,12 +3,15 @@ use axum::{
     extract::{Extension, Path},
     http::{HeaderName, HeaderValue, StatusCode},
     middleware::{from_fn, from_fn_with_state},
+    response::IntoResponse,
     routing::{get, post},
 };
 use sea_orm::DatabaseConnection;
 use serde::Serialize;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::task::JoinHandle;
+use tokio::time::timeout;
 use uuid::Uuid;
 
 use crate::auth::{TenantContext, auth_middleware};
@@ -56,7 +59,9 @@ pub fn build_app_with_state(
 ) -> (Router, JoinHandle<()>) {
     let cleanup_handle = state.start_cleanup_task();
 
-    let public_router = Router::new().route("/health", get(|| async { "OK" }));
+    let public_router = Router::new()
+        .route("/health", get(|| async { "OK" }))
+        .route("/readiness", get(readiness_handler));
 
     // Reordered Middleware Stack:
     // 1. Auth (Outermost, establishes identity)
@@ -89,9 +94,74 @@ pub fn build_app_with_state(
         Router::new()
             .merge(public_router)
             .merge(protected_router)
+            .layer(Extension(db))
             .layer(Extension(state)),
         cleanup_handle,
     )
+}
+
+#[derive(Serialize)]
+struct ReadinessResponse {
+    status: &'static str,
+    checks: Vec<(&'static str, &'static str)>,
+}
+
+async fn readiness_handler(Extension(db): Extension<Arc<DatabaseConnection>>) -> impl IntoResponse {
+    const DB_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
+    const AUTH_PROBE_TIMEOUT: Duration = Duration::from_secs(1);
+
+    let mut checks: Vec<(&'static str, &'static str)> = Vec::new();
+    let mut all_ok = true;
+
+    match timeout(DB_PROBE_TIMEOUT, db.ping()).await {
+        Ok(Ok(())) => checks.push(("database", "ok")),
+        Ok(Err(e)) => {
+            tracing::error!(error = %e, "readiness database probe failed");
+            checks.push(("database", "failed"));
+            all_ok = false;
+        }
+        Err(_) => {
+            tracing::error!("readiness database probe timed out");
+            checks.push(("database", "timeout"));
+            all_ok = false;
+        }
+    }
+
+    match timeout(AUTH_PROBE_TIMEOUT, async {
+        crate::auth::is_auth_config_ready()
+    })
+    .await
+    {
+        Ok(true) => checks.push(("auth_config", "ok")),
+        Ok(false) => {
+            tracing::error!("readiness auth config probe failed: auth config not initialized");
+            checks.push(("auth_config", "failed"));
+            all_ok = false;
+        }
+        Err(_) => {
+            tracing::error!("readiness auth config probe timed out");
+            checks.push(("auth_config", "timeout"));
+            all_ok = false;
+        }
+    }
+
+    if all_ok {
+        (
+            StatusCode::OK,
+            Json(ReadinessResponse {
+                status: "ready",
+                checks,
+            }),
+        )
+    } else {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(ReadinessResponse {
+                status: "not_ready",
+                checks,
+            }),
+        )
+    }
 }
 
 pub async fn write_test(

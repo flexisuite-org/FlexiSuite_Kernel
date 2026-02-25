@@ -7,6 +7,7 @@ use axum::{
     body::Body,
     http::{Request, StatusCode},
 };
+use kernel_api::entities::{key_record, permission};
 use kernel_api::middleware::{
     IdempotencyAcquireResult, IdempotencyEntry, IdempotencyLease, IdempotencyRecord,
     IdempotencyScopeKey, IdempotencyStore, IdempotencyStoreError, InMemoryActionStore,
@@ -21,29 +22,40 @@ use sea_orm::{DatabaseBackend, MockDatabase};
 use serde_json::Value;
 use tower::ServiceExt;
 
-use sea_orm::{MockExecResult, MockRow};
+use sea_orm::MockExecResult;
 
 fn default_mock_db() -> sea_orm::DatabaseConnection {
     // Default mock that allows up to 20 successful authorizations and permission checks.
     // This covers most integration tests that expect success.
     // Tests expecting failure or specific DB behavior should use setup_app_with_db.
-    let mut exec_results = Vec::new();
-    let mut query_results: Vec<Vec<MockRow>> = Vec::new();
+    let mut db = MockDatabase::new(DatabaseBackend::Postgres);
 
-    for _ in 0..20 {
-        // authorize_tenant
-        exec_results.push(MockExecResult {
-            last_insert_id: 0,
-            rows_affected: 1,
-        });
-        // get_user_permissions (empty list of permissions)
-        query_results.push(vec![]);
+    for i in 0..20 {
+        let now = chrono::Utc::now();
+        let active_hmac_key = key_record::Model {
+            kid: format!("hmac-test-active-{i}"),
+            key_type: key_record::KeyType::Hmac,
+            algorithm: "HS256".to_string(),
+            secret_bytes: Some(vec![1_u8; 32]),
+            public_bytes: None,
+            state: key_record::KeyState::Active,
+            created_at: now.into(),
+            activated_at: Some(now.into()),
+            retired_at: None,
+            revoked_at: None,
+            expires_at: None,
+        };
+
+        db = db
+            .append_exec_results(vec![MockExecResult {
+                last_insert_id: 0,
+                rows_affected: 1,
+            }]) // authorize_tenant
+            .append_query_results(vec![vec![active_hmac_key]]) // active key query for server-minted tenant token
+            .append_query_results(vec![Vec::<permission::Model>::new()]); // get_user_permissions (empty list)
     }
 
-    MockDatabase::new(DatabaseBackend::Postgres)
-        .append_exec_results(exec_results)
-        .append_query_results(query_results)
-        .into_connection()
+    db.into_connection()
 }
 
 pub async fn setup_app() -> axum::Router {
@@ -136,7 +148,9 @@ fn build_idempotent_post(key: &str, body: &str) -> Request<Body> {
 
     #[cfg(debug_assertions)]
     {
-        builder = builder.header("X-Tenant-Id", "tenant-1");
+        builder = builder
+            .header("X-Tenant-Id", "tenant-1")
+            .header("X-User-Id", "user-1");
     }
 
     #[cfg(not(debug_assertions))]
@@ -205,6 +219,7 @@ async fn test_auth_logic_401_403() {
             .uri("/test")
             .method("POST")
             .header("X-Tenant-Id", "tenant-dev")
+            .header("X-User-Id", "user-dev")
             .header("Idempotency-Key", "auth-test-key")
             .body(Body::empty())
             .unwrap();
@@ -257,7 +272,9 @@ async fn test_idempotency_conflict_scope_and_action_lookup() {
         .method("GET");
     #[cfg(debug_assertions)]
     {
-        builder = builder.header("X-Tenant-Id", "tenant-1");
+        builder = builder
+            .header("X-Tenant-Id", "tenant-1")
+            .header("X-User-Id", "user-1");
     }
     let req = builder.body(Body::empty()).unwrap();
     let res = app.clone().oneshot(req).await.unwrap();
@@ -304,7 +321,9 @@ async fn test_quota_evaluation_priority_and_clipping() {
     let mut builder = Request::builder().uri("/test").method("POST");
     #[cfg(debug_assertions)]
     {
-        builder = builder.header("X-Tenant-Id", "tenant-1");
+        builder = builder
+            .header("X-Tenant-Id", "tenant-1")
+            .header("X-User-Id", "user-1");
     }
     #[cfg(not(debug_assertions))]
     {
