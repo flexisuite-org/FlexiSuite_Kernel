@@ -14,7 +14,7 @@ use kernel_data::{
     entities::{diagnostic_policy, diagnostic_report},
     with_tenant_tx,
 };
-use sea_orm::{ActiveValue, ConnectionTrait, Statement, DbBackend};
+use sea_orm::{ActiveValue, ConnectionTrait, DbBackend, Statement};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -244,7 +244,8 @@ async fn get_health(Extension(ctx): Extension<TenantContext>) -> impl IntoRespon
                     "status": "error",
                     "details": "Database connectivity failed"
                 })),
-            ).into_response()
+            )
+                .into_response()
         }
         Err(_) => {
             tracing::error!("Health check timed out (DB)");
@@ -254,7 +255,8 @@ async fn get_health(Extension(ctx): Extension<TenantContext>) -> impl IntoRespon
                     "status": "error",
                     "details": "Database connectivity failed"
                 })),
-            ).into_response()
+            )
+                .into_response()
         }
     }
 }

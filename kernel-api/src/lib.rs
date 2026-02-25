@@ -14,7 +14,7 @@ use uuid::Uuid;
 use crate::auth::{TenantContext, auth_middleware};
 use crate::middleware::{
     ActionStatus, MiddlewareConfig, MiddlewareState, get_action, idempotency_middleware,
-    quota_middleware, record_action, load_permissions_middleware,
+    load_permissions_middleware, quota_middleware, record_action,
 };
 
 #[cfg(feature = "test-utils")]
@@ -77,7 +77,12 @@ pub fn build_app_with_state(
 
     #[cfg(feature = "test-utils")]
     {
-        protected_router = protected_router.route("/test/protected", get(|| async { "Access Granted" }).layer(from_fn(|req, next| require_permission("test:read", req, next))));
+        protected_router = protected_router.route(
+            "/test/protected",
+            get(|| async { "Access Granted" }).layer(from_fn(|req, next| {
+                require_permission("test:read", req, next)
+            })),
+        );
     }
 
     (

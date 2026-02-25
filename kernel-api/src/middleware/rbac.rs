@@ -1,3 +1,4 @@
+use crate::middleware::BearerToken;
 use axum::{
     extract::{Extension, Request},
     http::StatusCode,
@@ -7,7 +8,6 @@ use axum::{
 use kernel_data::{RBACRepository, TenantContext, with_tenant_tx};
 use std::collections::HashSet;
 use tracing::{error, warn};
-use crate::middleware::BearerToken;
 
 #[derive(Clone, Debug)]
 pub struct UserPermissions(pub HashSet<String>);
@@ -43,8 +43,7 @@ pub async fn load_permissions_middleware(
     if ctx.user_id().is_none() {
         // If no user_id (e.g. service account or incomplete auth),
         // we assume no permissions.
-        req.extensions_mut()
-            .insert(UserPermissions(HashSet::new()));
+        req.extensions_mut().insert(UserPermissions(HashSet::new()));
         return Ok(next.run(req).await);
     }
 
@@ -54,10 +53,9 @@ pub async fn load_permissions_middleware(
     // RBACRepository now demands a TenantScoped connection.
     let ctx_clone = ctx.clone();
     let permissions_result = with_tenant_tx(db, &ctx, token, move |scoped| {
-        Box::pin(async move {
-            RBACRepository::get_user_permissions(scoped, &ctx_clone).await
-        })
-    }).await;
+        Box::pin(async move { RBACRepository::get_user_permissions(scoped, &ctx_clone).await })
+    })
+    .await;
 
     let permissions_list = match permissions_result {
         Ok(perms) => perms,

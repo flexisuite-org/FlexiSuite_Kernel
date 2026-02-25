@@ -1,5 +1,7 @@
-use kernel_core::supplychain::{Manifest, TrustedKey, KeyStatus, verify_manifest, VerificationResult};
 use ed25519_dalek::{Signer, SigningKey, VerifyingKey};
+use kernel_core::supplychain::{
+    KeyStatus, Manifest, TrustedKey, VerificationResult, verify_manifest,
+};
 use rand::rngs::OsRng;
 
 #[test]

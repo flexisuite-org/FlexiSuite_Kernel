@@ -1,12 +1,13 @@
-use axum::{body::Body, http::{Request, StatusCode}};
-use kernel_api::auth::{TenantId, UserId, TenantContext};
-use kernel_api::middleware::{load_permissions_middleware, require_permission, BearerToken};
-use kernel_api::entities::{permission};
-use sea_orm::{
-    DatabaseBackend, MockDatabase,
+use axum::{
+    body::Body,
+    http::{Request, StatusCode},
 };
-use tower::ServiceExt;
+use kernel_api::auth::{TenantContext, TenantId, UserId};
+use kernel_api::entities::permission;
+use kernel_api::middleware::{BearerToken, load_permissions_middleware, require_permission};
+use sea_orm::{DatabaseBackend, MockDatabase};
 use std::sync::Arc;
+use tower::ServiceExt;
 use uuid::Uuid;
 
 // TODO: Implement a full integration test with Testcontainers (real Postgres)
@@ -43,23 +44,29 @@ async fn test_rbac_middleware_allow() {
     };
 
     let db = MockDatabase::new(DatabaseBackend::Postgres)
-        .append_exec_results(vec![
-            sea_orm::MockExecResult {
-                last_insert_id: 0,
-                rows_affected: 1,
-            },
-        ]) // authorize_tenant (execute)
+        .append_exec_results(vec![sea_orm::MockExecResult {
+            last_insert_id: 0,
+            rows_affected: 1,
+        }]) // authorize_tenant (execute)
         .append_query_results(vec![vec![mock_permission]]) // permissions query (select)
         .into_connection();
 
     let app = axum::Router::new()
-        .route("/protected", axum::routing::get(|| async { "Allowed" }).layer(axum::middleware::from_fn(|req, next| require_permission("test:read", req, next))))
+        .route(
+            "/protected",
+            axum::routing::get(|| async { "Allowed" }).layer(axum::middleware::from_fn(
+                |req, next| require_permission("test:read", req, next),
+            )),
+        )
         .layer(axum::middleware::from_fn(load_permissions_middleware))
         .layer(axum::Extension(BearerToken(token.to_string())))
-        .layer(axum::Extension(TenantContext::new(
-            TenantId::new(tenant_id).unwrap(),
-            Some(UserId::new(user_id).unwrap()),
-        ).with_db(Arc::new(db))));
+        .layer(axum::Extension(
+            TenantContext::new(
+                TenantId::new(tenant_id).unwrap(),
+                Some(UserId::new(user_id).unwrap()),
+            )
+            .with_db(Arc::new(db)),
+        ));
 
     let req = Request::builder()
         .uri("/protected")
@@ -79,31 +86,37 @@ async fn test_rbac_middleware_deny() {
 
     // User has other:write, but needs test:read
     let db = MockDatabase::new(DatabaseBackend::Postgres)
-        .append_exec_results(vec![
-            sea_orm::MockExecResult {
-                last_insert_id: 0,
-                rows_affected: 1,
-            },
-        ]) // authorize_tenant (execute)
+        .append_exec_results(vec![sea_orm::MockExecResult {
+            last_insert_id: 0,
+            rows_affected: 1,
+        }]) // authorize_tenant (execute)
         .append_query_results(vec![vec![permission::Model {
-             id: Uuid::new_v4(),
-             tenant_id: tenant_id.to_string(),
-             role_id: Uuid::new_v4(),
-             resource: "other".to_string(),
-             action: "write".to_string(),
-             created_at: chrono::Utc::now().into(),
-             updated_at: chrono::Utc::now().into(),
+            id: Uuid::new_v4(),
+            tenant_id: tenant_id.to_string(),
+            role_id: Uuid::new_v4(),
+            resource: "other".to_string(),
+            action: "write".to_string(),
+            created_at: chrono::Utc::now().into(),
+            updated_at: chrono::Utc::now().into(),
         }]])
         .into_connection();
 
     let app = axum::Router::new()
-        .route("/protected", axum::routing::get(|| async { "Allowed" }).layer(axum::middleware::from_fn(|req, next| require_permission("test:read", req, next))))
+        .route(
+            "/protected",
+            axum::routing::get(|| async { "Allowed" }).layer(axum::middleware::from_fn(
+                |req, next| require_permission("test:read", req, next),
+            )),
+        )
         .layer(axum::middleware::from_fn(load_permissions_middleware))
         .layer(axum::Extension(BearerToken(token.to_string())))
-        .layer(axum::Extension(TenantContext::new(
-            TenantId::new(tenant_id).unwrap(),
-            Some(UserId::new(user_id).unwrap()),
-        ).with_db(Arc::new(db))));
+        .layer(axum::Extension(
+            TenantContext::new(
+                TenantId::new(tenant_id).unwrap(),
+                Some(UserId::new(user_id).unwrap()),
+            )
+            .with_db(Arc::new(db)),
+        ));
 
     let req = Request::builder()
         .uri("/protected")
