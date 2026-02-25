@@ -80,7 +80,8 @@ pub async fn auth_middleware(
                         StatusCode::FORBIDDEN
                     })?;
                     Some(UserId::new(id_str).map_err(|_| {
-                        tracing::warn!(user_id = %id_str, "Invalid user_id in X-User-Id");
+                        // REQ-SEC-LOG: Do not log sensitive user identifiers
+                        tracing::warn!("Invalid user_id in X-User-Id (format invalid)");
                         StatusCode::FORBIDDEN
                     })?)
                 } else {
@@ -135,7 +136,7 @@ impl PasetoKeyset {
         }
     }
 
-    fn from_env(default_public_key: &[u8]) -> Result<Self, String> {
+    fn from_env(default_public_key: Option<&[u8]>) -> Result<Self, String> {
         let active_kid =
             std::env::var("FLEXI_PASETO_V4_ACTIVE_KID").unwrap_or_else(|_| "active".to_string());
         let next_kids = parse_kid_csv_env("FLEXI_PASETO_V4_NEXT_KIDS");
@@ -150,9 +151,14 @@ impl PasetoKeyset {
             public_keys: HashMap::new(),
             allow_legacy_no_kid,
         };
-        keyset
-            .public_keys
-            .insert(keyset.active_kid.clone(), default_public_key.to_vec());
+
+        // Only insert generic key if active_kid is default ("active") AND key is provided
+        if let Some(key) = default_public_key {
+            if keyset.active_kid == "active" {
+                 keyset.public_keys.insert(keyset.active_kid.clone(), key.to_vec());
+            }
+        }
+
         keyset.load_per_kid_public_keys_from_env()?;
         Ok(keyset)
     }
@@ -173,8 +179,11 @@ impl PasetoKeyset {
             }
         };
 
+        // If active_kid != "active", it is REQUIRED to be loaded from explicit env var.
         let require_explicit_active_key = self.active_kid != "active";
         load_key_for_kid(&self.active_kid, require_explicit_active_key)?;
+
+        // Next/Retired always required
         for kid in self.next_kids.iter().chain(self.retired_kids.iter()) {
             load_key_for_kid(kid, true)?;
         }
@@ -284,11 +293,33 @@ impl PasetoKeyset {
 }
 
 pub fn init_auth_config() -> Result<(), String> {
-    let key_b64 = std::env::var("FLEXI_PASETO_V4_PUBLIC_KEY_B64URL")
-        .map_err(|_| "FLEXI_PASETO_V4_PUBLIC_KEY_B64URL is not set".to_string())?;
-    let decoded = decode_public_key_b64url(&key_b64, "FLEXI_PASETO_V4_PUBLIC_KEY_B64URL")?;
-    let keyset = PasetoKeyset::from_env(&decoded)?;
-    init_auth_config_with_decoded_public_key_and_keyset(decoded, keyset)
+    // 1. Determine active KID first to decide if generic key is required
+    let active_kid = std::env::var("FLEXI_PASETO_V4_ACTIVE_KID").unwrap_or_else(|_| "active".to_string());
+
+    let default_key = if active_kid == "active" {
+        // If using default KID, generic key is REQUIRED
+        let key_b64 = std::env::var("FLEXI_PASETO_V4_PUBLIC_KEY_B64URL")
+            .map_err(|_| "FLEXI_PASETO_V4_PUBLIC_KEY_B64URL is not set (required for default active kid)".to_string())?;
+        let decoded = decode_public_key_b64url(&key_b64, "FLEXI_PASETO_V4_PUBLIC_KEY_B64URL")?;
+        Some(decoded)
+    } else {
+        // If custom KID, generic key is optional (and ignored by from_env anyway)
+        None
+    };
+
+    let keyset = PasetoKeyset::from_env(default_key.as_deref())?;
+
+    // For initialization, we need *some* default key to verify initial health or set PASETO_PUBLIC_KEY?
+    // Actually PASETO_PUBLIC_KEY global is "default_public_key".
+    // If we have custom active key, THAT should be the default?
+    // Current logic: PASETO_PUBLIC_KEY gets 'decoded' (from generic).
+    // If generic is None, we need to pick the active key from keyset.
+
+    let active_key_bytes = keyset.public_key_for_kid(&keyset.active_kid)
+        .ok_or_else(|| format!("Active key for kid '{}' failed to load", keyset.active_kid))?
+        .to_vec();
+
+    init_auth_config_with_decoded_public_key_and_keyset(active_key_bytes, keyset)
 }
 
 pub fn init_auth_config_with_public_key_b64url(key: &str) -> Result<(), String> {
@@ -713,7 +744,7 @@ mod tests {
                 ],
                 || {
                     let default_key = [1_u8; 32];
-                    let keyset = PasetoKeyset::from_env(&default_key).unwrap();
+                    let keyset = PasetoKeyset::from_env(Some(&default_key)).unwrap();
                     assert_eq!(keyset.active_kid, "env-active");
                     assert!(keyset.revoked_kids.contains("r1"));
                     assert!(keyset.revoked_kids.contains("r2"));
@@ -729,7 +760,7 @@ mod tests {
     fn test_paseto_keyset_initialization_requires_kid_key_for_next() {
         with_env_test_lock(|| {
             temp_env::with_vars([("FLEXI_PASETO_V4_NEXT_KIDS", Some("next-a"))], || {
-                let keyset = PasetoKeyset::from_env(&[1_u8; 32]);
+                let keyset = PasetoKeyset::from_env(Some(&[1_u8; 32]));
                 assert!(keyset.is_err());
             });
         });
@@ -741,7 +772,9 @@ mod tests {
             temp_env::with_vars(
                 [("FLEXI_PASETO_V4_ACTIVE_KID", Some("custom-active"))],
                 || {
-                    let keyset = PasetoKeyset::from_env(&[1_u8; 32]);
+                    // Even if generic key is provided, it should be ignored for custom active kid,
+                    // and then it should fail because custom-active key env var is missing.
+                    let keyset = PasetoKeyset::from_env(Some(&[1_u8; 32]));
                     assert!(keyset.is_err());
                 },
             );
