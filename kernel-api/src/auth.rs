@@ -63,7 +63,7 @@ pub async fn auth_middleware(
             }
         }
     } else {
-        #[cfg(any(debug_assertions, feature = "test-utils"))]
+        #[cfg(feature = "test-utils")]
         {
             if let Some(tenant_id_header) = req.headers().get("X-Tenant-Id") {
                 let tenant_id_str = tenant_id_header.to_str().map_err(|_| {
@@ -100,7 +100,7 @@ pub async fn auth_middleware(
             }
         }
 
-        #[cfg(not(any(debug_assertions, feature = "test-utils")))]
+        #[cfg(not(feature = "test-utils"))]
         {
             tracing::warn!("Missing Authorization header");
             return Err(StatusCode::UNAUTHORIZED);

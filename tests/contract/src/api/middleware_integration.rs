@@ -13,7 +13,12 @@ use kernel_api::middleware::{
     IdempotencyScopeKey, IdempotencyStore, IdempotencyStoreError, InMemoryActionStore,
     InMemoryQuotaStore, MiddlewareConfig, MiddlewareState,
 };
+use migration::MigratorTrait;
+use sea_orm::{ActiveModelTrait, ConnectionTrait, Database, DatabaseConnection, Set, Statement};
 use std::sync::Arc;
+use std::sync::OnceLock;
+use testcontainers::{RunnableImage, clients};
+use testcontainers_modules::postgres::Postgres;
 use tokio::sync::Notify;
 
 use sea_orm::{DatabaseBackend, MockDatabase};
@@ -58,6 +63,74 @@ fn default_mock_db() -> sea_orm::DatabaseConnection {
     db.into_connection()
 }
 
+type PostgresNode = testcontainers::Container<'static, Postgres>;
+
+fn get_docker_client() -> &'static clients::Cli {
+    static DOCKER: OnceLock<&'static clients::Cli> = OnceLock::new();
+    DOCKER.get_or_init(|| Box::leak(Box::new(clients::Cli::default())))
+}
+
+pub async fn setup_real_postgres_db() -> (DatabaseConnection, PostgresNode) {
+    const TEST_INTERNAL_SECRET: &str = "contract_test_internal_secret_123";
+
+    let docker = get_docker_client();
+    let image = RunnableImage::from(Postgres::default()).with_tag("15-alpine");
+    let node = docker.run(image);
+    let port = node.get_host_port_ipv4(5432);
+    let connection_string = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
+
+    let db = Database::connect(&connection_string)
+        .await
+        .expect("Failed to connect to Postgres container");
+
+    db.execute(Statement::from_string(
+        sea_orm::DbBackend::Postgres,
+        "DO $$ BEGIN CREATE ROLE flexi NOLOGIN; EXCEPTION WHEN duplicate_object THEN NULL; END $$;"
+            .to_string(),
+    ))
+    .await
+    .expect("Failed to ensure flexi role");
+
+    migration::Migrator::up(&db, None)
+        .await
+        .expect("Failed to run migrations");
+
+    db.execute(Statement::from_string(
+        sea_orm::DbBackend::Postgres,
+        format!(
+            "ALTER ROLE postgres SET flexi.hmac_secret = '{}'",
+            TEST_INTERNAL_SECRET
+        ),
+    ))
+    .await
+    .expect("Failed to set flexi.hmac_secret");
+
+    drop(db);
+    let db = Database::connect(&connection_string)
+        .await
+        .expect("Failed to reconnect to Postgres container");
+
+    let now = chrono::Utc::now();
+    key_record::ActiveModel {
+        kid: Set("hmac-contract-active".to_string()),
+        key_type: Set(key_record::KeyType::Hmac),
+        algorithm: Set("HS256".to_string()),
+        secret_bytes: Set(Some(vec![42_u8; 32])),
+        public_bytes: Set(None),
+        state: Set(key_record::KeyState::Active),
+        created_at: Set(now.into()),
+        activated_at: Set(Some(now.into())),
+        retired_at: Set(None),
+        revoked_at: Set(None),
+        expires_at: Set(None),
+    }
+    .insert(&db)
+    .await
+    .expect("Failed to seed active HMAC key");
+
+    (db, node)
+}
+
 pub async fn setup_app() -> axum::Router {
     setup_app_with_db(default_mock_db()).await
 }
@@ -94,6 +167,113 @@ pub async fn setup_app_with_config_and_db(
 
     let (app, _cleanup) = kernel_api::build_app_with_state(state, db.into());
     app
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires Docker (Testcontainers)"]
+async fn test_rbac_rls_real_postgres_contract() {
+    use kernel_api::entities::{group, group_member, group_role, role};
+    use uuid::Uuid;
+
+    let (db, _node) = setup_real_postgres_db().await;
+
+    let tenant_a = "tenant-a";
+    let tenant_b = "tenant-b";
+    let user_a = "user-a";
+    let now = chrono::Utc::now();
+    let role_id = Uuid::now_v7();
+    let group_id = Uuid::now_v7();
+
+    role::ActiveModel {
+        id: Set(role_id),
+        tenant_id: Set(tenant_a.to_string()),
+        name: Set("reader".to_string()),
+        description: Set("reader role".to_string()),
+        created_at: Set(now.into()),
+        updated_at: Set(now.into()),
+    }
+    .insert(&db)
+    .await
+    .expect("Failed to insert role");
+
+    group::ActiveModel {
+        id: Set(group_id),
+        tenant_id: Set(tenant_a.to_string()),
+        name: Set("group-a".to_string()),
+        description: Set("group a".to_string()),
+        created_at: Set(now.into()),
+        updated_at: Set(now.into()),
+    }
+    .insert(&db)
+    .await
+    .expect("Failed to insert group");
+
+    group_role::ActiveModel {
+        id: Set(Uuid::now_v7()),
+        tenant_id: Set(tenant_a.to_string()),
+        group_id: Set(group_id),
+        role_id: Set(role_id),
+        created_at: Set(now.into()),
+        updated_at: Set(now.into()),
+    }
+    .insert(&db)
+    .await
+    .expect("Failed to insert group_role");
+
+    group_member::ActiveModel {
+        id: Set(Uuid::now_v7()),
+        tenant_id: Set(tenant_a.to_string()),
+        group_id: Set(group_id),
+        user_id: Set(user_a.to_string()),
+        created_at: Set(now.into()),
+        updated_at: Set(now.into()),
+    }
+    .insert(&db)
+    .await
+    .expect("Failed to insert group_member");
+
+    permission::ActiveModel {
+        id: Set(Uuid::now_v7()),
+        tenant_id: Set(tenant_a.to_string()),
+        role_id: Set(role_id),
+        resource: Set("test".to_string()),
+        action: Set("read".to_string()),
+        created_at: Set(now.into()),
+        updated_at: Set(now.into()),
+    }
+    .insert(&db)
+    .await
+    .expect("Failed to insert permission");
+
+    let app = setup_app_with_db(db).await;
+
+    let allow_req = Request::builder()
+        .uri("/test/protected")
+        .method("GET")
+        .header("X-Tenant-Id", tenant_a)
+        .header("X-User-Id", user_a)
+        .body(Body::empty())
+        .unwrap();
+    let allow_res = app.clone().oneshot(allow_req).await.unwrap();
+    assert_eq!(
+        allow_res.status(),
+        StatusCode::OK,
+        "tenant A user must be authorized via real RBAC join + RLS path"
+    );
+
+    let deny_req = Request::builder()
+        .uri("/test/protected")
+        .method("GET")
+        .header("X-Tenant-Id", tenant_b)
+        .header("X-User-Id", user_a)
+        .body(Body::empty())
+        .unwrap();
+    let deny_res = app.clone().oneshot(deny_req).await.unwrap();
+    assert_eq!(
+        deny_res.status(),
+        StatusCode::FORBIDDEN,
+        "tenant B must not see tenant A permissions via RLS-scoped RBAC query"
+    );
 }
 
 #[cfg(debug_assertions)]
