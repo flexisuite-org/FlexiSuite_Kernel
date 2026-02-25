@@ -49,7 +49,12 @@ pub async fn auth_middleware(
             tracing::warn!("Invalid Authorization header encoding");
             StatusCode::UNAUTHORIZED
         })?;
-        let token_part = extract_bearer_token(value).unwrap_or("").to_string();
+        let token_part = if let Some(token) = extract_bearer_token(value) {
+            token.to_string()
+        } else {
+            return Err(StatusCode::UNAUTHORIZED);
+        };
+
         match verify_paseto_v4_public_from_env(value) {
             Ok(ctx) => (ctx, token_part),
             Err(AuthError::Unauthorized) => {
@@ -62,7 +67,7 @@ pub async fn auth_middleware(
             }
         }
     } else {
-        #[cfg(debug_assertions)]
+        #[cfg(feature = "test-utils")]
         {
             if let Some(tenant_id_header) = req.headers().get("X-Tenant-Id") {
                 let tenant_id_str = tenant_id_header.to_str().map_err(|_| {
@@ -80,7 +85,6 @@ pub async fn auth_middleware(
                         StatusCode::FORBIDDEN
                     })?;
                     Some(UserId::new(id_str).map_err(|_| {
-                        // REQ-SEC-LOG: Do not log sensitive user identifiers
                         tracing::warn!("Invalid user_id in X-User-Id (format invalid)");
                         StatusCode::FORBIDDEN
                     })?)
@@ -97,7 +101,7 @@ pub async fn auth_middleware(
             }
         }
 
-        #[cfg(not(debug_assertions))]
+        #[cfg(not(feature = "test-utils"))]
         {
             tracing::warn!("Missing Authorization header");
             return Err(StatusCode::UNAUTHORIZED);

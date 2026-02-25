@@ -1,5 +1,5 @@
 fn main() {
-    // REQ-SEC-BUILD: Fail if test-utils feature is enabled in release profile
+    // Fail if test-utils feature is enabled in release profile
     if std::env::var("PROFILE").unwrap_or_default() == "release"
         && std::env::var("CARGO_FEATURE_TEST_UTILS").is_ok()
     {
