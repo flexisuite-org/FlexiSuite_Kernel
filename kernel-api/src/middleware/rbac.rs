@@ -1,5 +1,5 @@
 use axum::{
-    extract::{Extension, Request},
+    extract::Request,
     http::StatusCode,
     middleware::Next,
     response::Response,
@@ -9,6 +9,7 @@ use kernel_data::{RBACRepository, TenantContext, with_tenant_tx};
 use std::collections::HashSet;
 use tracing::{error, warn};
 use crate::middleware::BearerToken;
+use std::sync::Arc;
 
 #[derive(Clone, Debug)]
 pub struct UserPermissions {
@@ -26,7 +27,6 @@ impl UserPermissions {
 }
 
 pub async fn load_permissions_middleware(
-    Extension(_token_ext): Extension<BearerToken>,
     mut req: Request,
     next: Next,
 ) -> Result<Response, StatusCode> {
@@ -34,6 +34,12 @@ pub async fn load_permissions_middleware(
         .extensions()
         .get::<TenantContext>()
         .cloned()
+        .ok_or(StatusCode::UNAUTHORIZED)?;
+
+    // Manually extract BearerToken to avoid 500 on missing extension
+    let _token_ext = req
+        .extensions()
+        .get::<BearerToken>()
         .ok_or(StatusCode::UNAUTHORIZED)?;
 
     // We need a DB connection to fetch permissions
@@ -57,7 +63,7 @@ pub async fn load_permissions_middleware(
     // However, the DB function `authorize_tenant` currently only accepts V2 (HMAC) tokens.
     // We bridge this gap by generating a short-lived V2 token for the DB session using a System Context.
     // In production, we assume kernel-api has access to the system keys (via DB connection).
-    let sys_ctx = TenantContext::from(SystemTenantContext).with_db(db.clone().into());
+    let sys_ctx = TenantContext::from(SystemTenantContext).with_db(Arc::new(db.clone()));
     let db_token = match KeyManager::generate_tenant_token(&sys_ctx, ctx.tenant_id()).await {
         Ok(t) => t,
         Err(e) => {
