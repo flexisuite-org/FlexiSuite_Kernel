@@ -46,7 +46,8 @@ const RETIRED_KEY_GRACE_PERIOD_SECONDS: u64 = 86400;
 
 /// Verifies a manifest against a trusted key.
 ///
-/// In `test-utils` builds, this performs a mock verification (time-aware but signature bypass).
+/// In `test-utils` builds, this performs a simplified verification (accepts any signature
+/// except the literal "invalid" string) for testing purposes.
 /// In release/non-test builds, this performs real Ed25519 signature verification using `ring`.
 pub fn verify_manifest(
     manifest: &Manifest,

@@ -34,4 +34,4 @@ rand = "0.8"
 
 [features]
 default = []
-test-utils = ["kernel-data/test-utils"]
+test-utils = []
