@@ -17,9 +17,11 @@ use std::time::{SystemTime, UNIX_EPOCH};
 pub use kernel_core::auth::{TenantContext, TenantId, UserId};
 use crate::middleware::BearerToken;
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 enum AuthError {
+    #[error("Unauthorized")]
     Unauthorized,
+    #[error("Forbidden")]
     Forbidden,
 }
 

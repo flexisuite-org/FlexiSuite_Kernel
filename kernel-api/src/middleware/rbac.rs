@@ -10,9 +10,13 @@ use tracing::{error, warn};
 use crate::middleware::BearerToken;
 
 #[derive(Clone, Debug)]
-pub struct UserPermissions(pub HashSet<String>);
+pub struct UserPermissions(HashSet<String>);
 
 impl UserPermissions {
+    pub fn new(permissions: HashSet<String>) -> Self {
+        Self(permissions)
+    }
+
     pub fn has(&self, permission: &str) -> bool {
         self.0.contains(permission)
     }
@@ -41,11 +45,9 @@ pub async fn load_permissions_middleware(
     // Note: user_id existence is checked inside RBACRepository::get_user_permissions
     // via TenantContext, but we can fast-fail here if needed.
     if ctx.user_id().is_none() {
-        // If no user_id (e.g. service account or incomplete auth),
-        // we assume no permissions.
-        req.extensions_mut()
-            .insert(UserPermissions(HashSet::new()));
-        return Ok(next.run(req).await);
+        // Fail closed if user_id is missing (unauthenticated or service account not allowed here)
+        warn!("User ID missing in context for RBAC protected route");
+        return Err(StatusCode::UNAUTHORIZED);
     }
 
     let token = &token_ext.0;
@@ -75,7 +77,7 @@ pub async fn load_permissions_middleware(
     }
 
     req.extensions_mut()
-        .insert(UserPermissions(permissions_set));
+        .insert(UserPermissions::new(permissions_set));
 
     Ok(next.run(req).await)
 }

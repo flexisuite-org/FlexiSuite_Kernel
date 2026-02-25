@@ -78,7 +78,7 @@ pub fn verify_manifest(
             // Check Grace Window (e.g., 24h = 86400s)
             let grace_period = 86400;
             if let Some(retired_at) = trusted_key.retired_at {
-                if now > retired_at.saturating_add(grace_period) {
+                if now >= retired_at.saturating_add(grace_period) {
                     return VerificationResult::KeyRetiredOutOfWindow;
                 }
                 // In window -> Proceed to signature check

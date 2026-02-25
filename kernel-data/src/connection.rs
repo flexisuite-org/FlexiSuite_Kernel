@@ -208,7 +208,7 @@ fn parse_tenant_from_token(token: &str) -> Option<String> {
     let _nonce = parts.next()?;
     let tenant_id = parts.next()?;
     let _sig = parts.next()?;
-    if ver != "v2" || parts.next().is_some() {
+    if ver != "v2" || parts.next().is_some() || tenant_id.is_empty() {
         return None;
     }
     Some(tenant_id.to_string())
@@ -241,10 +241,9 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_empty_tenant_returns_some_empty() {
-        // Technically the parser allows empty tenant_id if it's in the right position
+    fn test_parse_empty_tenant_returns_none() {
         let token = "v2:kid:ts:nonce::sig";
-        assert_eq!(parse_tenant_from_token(token), Some("".to_string()));
+        assert_eq!(parse_tenant_from_token(token), None);
     }
 }
 

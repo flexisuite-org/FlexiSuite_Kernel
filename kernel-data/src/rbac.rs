@@ -24,7 +24,10 @@ impl RBACRepository {
 
         // Sanity check: Ensure scoped context matches passed context
         if scoped.tenant_id != *tenant_id {
-             return Err(DataError::TenantAuthorizationFailed("Context mismatch in RBAC repository".to_string()));
+             return Err(DataError::TenantAuthorizationFailed("Context mismatch in RBAC repository (tenant_id)".to_string()));
+        }
+        if scoped.user_id.as_ref() != Some(user_id) {
+             return Err(DataError::TenantAuthorizationFailed("Context mismatch in RBAC repository (user_id)".to_string()));
         }
 
         let db = scoped.txn();
