@@ -42,9 +42,7 @@ pub struct TrustedKey {
     pub public_key: Vec<u8>,
 }
 
-/// Verifies manifest digest/signature with time-aware key status checks.
-/// In non-`test-utils` builds this performs real Ed25519 verification via `ring::signature::UnparsedPublicKey::verify`;
-/// only `test-utils` builds use the lightweight mock signature path.
+/// Mock verification with time-aware context
 pub fn verify_manifest(
     manifest: &Manifest,
     trusted_key: &TrustedKey,
@@ -80,7 +78,7 @@ pub fn verify_manifest(
             // Check Grace Window (e.g., 24h = 86400s)
             let grace_period = 86400;
             if let Some(retired_at) = trusted_key.retired_at {
-                if now >= retired_at.saturating_add(grace_period) {
+                if now > retired_at.saturating_add(grace_period) {
                     return VerificationResult::KeyRetiredOutOfWindow;
                 }
                 // In window -> Proceed to signature check
@@ -107,19 +105,18 @@ pub fn verify_manifest(
     #[cfg(not(feature = "test-utils"))]
     {
         use ring::signature;
-        let peer_public_key =
-            signature::UnparsedPublicKey::new(&signature::ED25519, &trusted_key.public_key);
+        let peer_public_key = signature::UnparsedPublicKey::new(
+            &signature::ED25519,
+            &trusted_key.public_key,
+        );
 
         let sig_bytes = match hex::decode(&manifest.signature) {
-            Ok(b) => b,
-            Err(_) => return VerificationResult::SignatureInvalid,
+             Ok(b) => b,
+             Err(_) => return VerificationResult::SignatureInvalid,
         };
 
-        if peer_public_key
-            .verify(manifest.digest.as_bytes(), &sig_bytes)
-            .is_err()
-        {
-            return VerificationResult::SignatureInvalid;
+        if peer_public_key.verify(manifest.digest.as_bytes(), &sig_bytes).is_err() {
+             return VerificationResult::SignatureInvalid;
         }
 
         VerificationResult::Ok

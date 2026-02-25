@@ -1,27 +1,22 @@
 use axum::{
     Json, Router,
-    extract::{Extension, Path},
+    extract::{Extension, Path, State},
     http::{HeaderName, HeaderValue, StatusCode},
     middleware::{from_fn, from_fn_with_state},
-    response::IntoResponse,
     routing::{get, post},
+    response::IntoResponse,
 };
-use sea_orm::DatabaseConnection;
+use sea_orm::{DatabaseConnection, ConnectionTrait};
 use serde::Serialize;
 use std::sync::Arc;
-use std::time::Duration;
 use tokio::task::JoinHandle;
-use tokio::time::timeout;
 use uuid::Uuid;
 
 use crate::auth::{TenantContext, auth_middleware};
 use crate::middleware::{
     ActionStatus, MiddlewareConfig, MiddlewareState, get_action, idempotency_middleware,
-    load_permissions_middleware, quota_middleware, record_action,
+    quota_middleware, record_action, load_permissions_middleware, require_permission,
 };
-
-#[cfg(feature = "test-utils")]
-use crate::middleware::require_permission;
 
 pub mod auth;
 pub mod diagnostics;
@@ -59,9 +54,7 @@ pub fn build_app_with_state(
 ) -> (Router, JoinHandle<()>) {
     let cleanup_handle = state.start_cleanup_task();
 
-    let public_router = Router::new()
-        .route("/health", get(|| async { "OK" }))
-        .route("/readiness", get(readiness_handler));
+    let public_router = Router::new().route("/health", get(readiness_check)).with_state(db.clone());
 
     // Reordered Middleware Stack:
     // 1. Auth (Outermost, establishes identity)
@@ -70,10 +63,11 @@ pub fn build_app_with_state(
     // 4. Permissions (RBAC, requires DB access via load_permissions_middleware)
 
     let mut protected_router = Router::new()
-        .route("/test", post(write_test).put(write_test))
-        .route("/actions/:action_id", get(get_action_status))
+        .route("/test", post(write_test).put(write_test).layer(from_fn(|req, next| require_permission("test:write", req, next))))
+        .route("/actions/:action_id", get(get_action_status).layer(from_fn(|req, next| require_permission("action:read", req, next))))
         // Diagnostics routes under /api/v1/diagnostics
-        .nest("/api/v1/diagnostics", diagnostics::routes())
+        // Note: diagnostics routes implement their own policy checks, but we add a base permission check here as requested.
+        .nest("/api/v1/diagnostics", diagnostics::routes().layer(from_fn(|req, next| require_permission("diagnostics:read", req, next))))
         // Outermost applied last
         .layer(from_fn(load_permissions_middleware))
         .layer(from_fn(idempotency_middleware))
@@ -82,12 +76,7 @@ pub fn build_app_with_state(
 
     #[cfg(feature = "test-utils")]
     {
-        protected_router = protected_router.route(
-            "/test/protected",
-            get(|| async { "Access Granted" }).layer(from_fn(|req, next| {
-                require_permission("test:read", req, next)
-            })),
-        );
+        protected_router = protected_router.route("/test/protected", get(|| async { "Access Granted" }).layer(from_fn(|req, next| require_permission("test:read", req, next))));
     }
 
     (
@@ -99,53 +88,17 @@ pub fn build_app_with_state(
     )
 }
 
-#[derive(Serialize)]
-struct ReadinessResponse {
-    status: &'static str,
-    checks: Vec<(&'static str, &'static str)>,
-}
-
-async fn readiness_handler() -> impl IntoResponse {
-    const AUTH_PROBE_TIMEOUT: Duration = Duration::from_secs(1);
-
-    let mut checks: Vec<(&'static str, &'static str)> = Vec::new();
-    let mut all_ok = true;
-
-    match timeout(AUTH_PROBE_TIMEOUT, async {
-        crate::auth::is_auth_config_ready()
-    })
-    .await
-    {
-        Ok(true) => checks.push(("auth_config", "ok")),
-        Ok(false) => {
-            tracing::error!("readiness auth config probe failed: auth config not initialized");
-            checks.push(("auth_config", "failed"));
-            all_ok = false;
-        }
-        Err(_) => {
-            tracing::error!("readiness auth config probe timed out");
-            checks.push(("auth_config", "timeout"));
-            all_ok = false;
-        }
+async fn readiness_check(State(db): State<Arc<DatabaseConnection>>) -> impl IntoResponse {
+    // Check DB connectivity
+    if let Err(e) = db.ping().await {
+        tracing::error!("Readiness check failed (DB): {}", e);
+        return (StatusCode::SERVICE_UNAVAILABLE, "Unhealthy (DB)").into_response();
     }
 
-    if all_ok {
-        (
-            StatusCode::OK,
-            Json(ReadinessResponse {
-                status: "ready",
-                checks,
-            }),
-        )
-    } else {
-        (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(ReadinessResponse {
-                status: "not_ready",
-                checks,
-            }),
-        )
-    }
+    // RBAC store is the DB, so if DB is up, RBAC storage is effectively up.
+    // Real RBAC verification happens per-request with TenantContext.
+
+    (StatusCode::OK, "OK").into_response()
 }
 
 pub async fn write_test(

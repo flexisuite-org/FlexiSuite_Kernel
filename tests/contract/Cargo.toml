@@ -18,9 +18,9 @@ anyhow = "1.0"
 thiserror = "1.0"
 url = "2.4"
 async-trait = "0.1"
-kernel-core = { path = "../../kernel-core", features = ["test-utils"] }
+kernel-core = { path = "../../kernel-core" }
 kernel-data = { path = "../../kernel-data" }
-kernel-api = { path = "../../kernel-api", features = ["test-utils"] }
+kernel-api = { path = "../../kernel-api" }
 # TODO(security): Pinned to =0.1.43 to avoid upstream regression in 0.1.44 (10MB bloat due to included test-macros).
 # Tracking: https://github.com/tokio-rs/tracing/issues/3455
 # Internal Tracking: https://github.com/flexisuite-org/FlexiSuite_Kernel/issues/25
@@ -37,10 +37,7 @@ hex = "0.4"
 ed25519-dalek = { workspace = true }
 rand = "0.8"
 uuid = { version = "1", features = ["v7", "serde"] }
-sea-orm = { version = "1.1.19", features = ["mock", "sqlx-postgres", "runtime-tokio-rustls"] }
-migration = { path = "../../kernel-data/migration" }
-testcontainers = "0.15"
-testcontainers-modules = { version = "0.3", features = ["postgres"] }
+sea-orm = { version = "1.1.19", features = ["mock", "runtime-tokio-rustls"] }
 
 [features]
-test-utils = []
+test-utils = ["kernel-core/test-utils", "kernel-api/test-utils"]

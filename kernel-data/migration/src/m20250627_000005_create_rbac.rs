@@ -22,8 +22,7 @@ impl MigrationTrait for Migration {
                 UNIQUE (tenant_id, name)
             );
             "#,
-        )
-        .await?;
+        ).await?;
 
         // 2. Permissions table
         db.execute_unprepared(
@@ -57,8 +56,7 @@ impl MigrationTrait for Migration {
                 UNIQUE (tenant_id, name)
             );
             "#,
-        )
-        .await?;
+        ).await?;
 
         // 4. Group Members table (User <-> Group)
         db.execute_unprepared(
@@ -96,13 +94,7 @@ impl MigrationTrait for Migration {
         ).await?;
 
         // Enable RLS for all tables
-        let tables = [
-            "roles",
-            "permissions",
-            "groups",
-            "group_members",
-            "group_roles",
-        ];
+        let tables = ["roles", "permissions", "groups", "group_members", "group_roles"];
         for table in tables {
             db.execute_unprepared(&format!(
                 r#"
@@ -115,8 +107,7 @@ impl MigrationTrait for Migration {
                     USING (tenant_id = flexi.authorized_tenant_id())
                     WITH CHECK (tenant_id = flexi.authorized_tenant_id());
                 "#
-            ))
-            .await?;
+            )).await?;
         }
 
         // Add Indexes
@@ -141,16 +132,9 @@ impl MigrationTrait for Migration {
     async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
         let db = crate::MigrationConnection::new(manager.get_connection());
 
-        let tables = [
-            "group_roles",
-            "group_members",
-            "groups",
-            "permissions",
-            "roles",
-        ];
+        let tables = ["group_roles", "group_members", "groups", "permissions", "roles"];
         for table in tables {
-            db.execute_unprepared(&format!("DROP TABLE IF EXISTS flexi.{table} CASCADE"))
-                .await?;
+            db.execute_unprepared(&format!("DROP TABLE IF EXISTS flexi.{table} CASCADE")).await?;
         }
 
         Ok(())
