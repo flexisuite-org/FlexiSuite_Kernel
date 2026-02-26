@@ -46,8 +46,7 @@ const RETIRED_KEY_GRACE_PERIOD_SECONDS: u64 = 86400;
 
 /// Verifies a manifest against a trusted key.
 ///
-/// In `test-utils` builds, this performs a simplified verification (accepts any signature
-/// except the literal "invalid" string) for testing purposes.
+/// In `test-utils` builds, this performs a mock verification (time-aware but signature bypass).
 /// In release/non-test builds, this performs real Ed25519 signature verification using `ring`.
 pub fn verify_manifest(
     manifest: &Manifest,
@@ -120,18 +119,24 @@ pub fn verify_manifest(
     #[cfg(not(feature = "test-utils"))]
     {
         use ring::signature;
+
+        if trusted_key.public_key.len() != 32 {
+            // metrics::inc_verification_result("SignatureInvalid");
+            return VerificationResult::SignatureInvalid;
+        }
+
+        let mut sig_bytes = [0u8; 64];
+        if hex::decode_to_slice(&manifest.signature, &mut sig_bytes).is_err() {
+             // metrics::inc_verification_result("SignatureInvalid");
+             return VerificationResult::SignatureInvalid;
+        }
+
+        // Use fixed slice view for public key
+        let public_key_arr: [u8; 32] = trusted_key.public_key.clone().try_into().unwrap_or([0u8; 32]);
         let peer_public_key = signature::UnparsedPublicKey::new(
             &signature::ED25519,
-            &trusted_key.public_key,
+            &public_key_arr,
         );
-
-        let sig_bytes = match hex::decode(&manifest.signature) {
-             Ok(b) => b,
-             Err(_) => {
-                 // metrics::inc_verification_result("SignatureInvalid");
-                 return VerificationResult::SignatureInvalid
-             },
-        };
 
         if peer_public_key.verify(manifest.digest.as_bytes(), &sig_bytes).is_err() {
              // metrics::inc_verification_result("SignatureInvalid");

@@ -56,7 +56,7 @@ pub async fn load_permissions_middleware(
     if ctx.user_id().is_none() {
         // Fail closed if user_id is missing (unauthenticated or service account not allowed here)
         warn!("User ID missing in context for RBAC protected route");
-        return Err(StatusCode::FORBIDDEN);
+        return Err(StatusCode::UNAUTHORIZED);
     }
 
     // The incoming token might be V4 (PASETO) which is verified by auth_middleware.
@@ -64,10 +64,16 @@ pub async fn load_permissions_middleware(
     // We bridge this gap by generating a short-lived V2 token for the DB session using a System Context.
     // In production, we assume kernel-api has access to the system keys (via DB connection).
     let sys_ctx = TenantContext::from(SystemTenantContext).with_db(Arc::new(db.clone()));
+    // TODO: implement Redis cache — see ISSUE-1234
     let db_token = match KeyManager::generate_tenant_token(&sys_ctx, ctx.tenant_id()).await {
         Ok(t) => t,
         Err(e) => {
-             error!(error = %e, "Failed to generate DB session token");
+             // Log sanitized error
+             match e {
+                 kernel_core::auth::KeyManagerError::Unauthorized(_) => error!("Failed to generate DB session token: Unauthorized"),
+                 kernel_core::auth::KeyManagerError::DbError(_) => error!("Failed to generate DB session token: Database error"),
+                 _ => error!("Failed to generate DB session token: Internal error"),
+             }
              return Err(StatusCode::INTERNAL_SERVER_ERROR);
         }
     };
@@ -84,7 +90,12 @@ pub async fn load_permissions_middleware(
     let permissions_list = match permissions_result {
         Ok(perms) => perms,
         Err(e) => {
-            error!(error = %e, "Failed to fetch permissions");
+            // Log sanitized error
+            match e {
+                kernel_data::DataError::TenantAuthorizationFailed(_) => error!("Failed to fetch permissions: Authorization failed"),
+                kernel_data::DataError::DbError(_) => error!("Failed to fetch permissions: Database error"),
+                _ => error!("Failed to fetch permissions: Internal error"),
+            }
             return Err(StatusCode::INTERNAL_SERVER_ERROR);
         }
     };
