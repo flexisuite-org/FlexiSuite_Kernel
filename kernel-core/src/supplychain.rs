@@ -47,8 +47,7 @@ const RETIRED_KEY_GRACE_PERIOD_SECONDS: u64 = 86400;
 
 /// Verifies a manifest against a trusted key.
 ///
-/// In `test-utils` builds, this performs a simplified verification (accepts any signature
-/// except the literal "invalid" string) for testing purposes.
+/// In `test-utils` builds, this performs a mock verification (time-aware but signature bypass).
 /// In release/non-test builds, this performs real Ed25519 signature verification using `ring`.
 pub fn verify_manifest(
     manifest: &Manifest,
@@ -124,15 +123,31 @@ pub fn verify_manifest(
     {
         use ring::signature;
 
+<<<<<<< HEAD
         let mut sig_bytes = [0u8; 64];
         if hex::decode_to_slice(&manifest.signature, &mut sig_bytes).is_err() {
              metrics::counter!("verification_result", "result" => "SignatureInvalid").increment(1);
              return VerificationResult::SignatureInvalid;
         }
 
+=======
+        if trusted_key.public_key.len() != 32 {
+            // metrics::inc_verification_result("SignatureInvalid");
+            return VerificationResult::SignatureInvalid;
+        }
+
+        let mut sig_bytes = [0u8; 64];
+        if hex::decode_to_slice(&manifest.signature, &mut sig_bytes).is_err() {
+             // metrics::inc_verification_result("SignatureInvalid");
+             return VerificationResult::SignatureInvalid;
+        }
+
+        // Use fixed slice view for public key
+        let public_key_arr: [u8; 32] = trusted_key.public_key.clone().try_into().unwrap_or([0u8; 32]);
+>>>>>>> 0316419 (fix(ci): traceability linter, security hardening, and review fixes\n\n- Fixes CI traceability linter failure by removing undefined REQ IDs.\n- Hardens `auth.rs`: removes redundant parsing, sanitizes logging, and restricts `dev-token` logic.\n- Hardens `connection.rs`: `parse_tenant_from_token` strictly checks empty tenant IDs and dev-tokens; added comprehensive test coverage.\n- Hardens `supplychain.rs`: enforces key/signature lengths and uses fixed buffer decoding; verified build guard for release builds.\n- Hardens `rbac.rs`: manually extracts BearerToken to return 401 on missing, logs sanitized errors, and adds Redis caching TODO.\n- Hardens `deno_runtime.rs`: returns Error instead of clamping invalid clock values.\n- Updates `integration_tests.rs`: adds negative test case for RBAC access control.\n- Refactors `UserPermissions` for encapsulation.)
         let peer_public_key = signature::UnparsedPublicKey::new(
             &signature::ED25519,
-            &trusted_key.public_key,
+            &public_key_arr,
         );
 
         if peer_public_key.verify(manifest.digest.as_bytes(), &sig_bytes).is_err() {
