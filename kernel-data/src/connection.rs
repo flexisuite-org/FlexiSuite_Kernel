@@ -54,7 +54,7 @@ impl TenantScoped<RawConnection> {
     ///
     /// This is exposed primarily for test seeding and special integration scenarios.
     #[cfg(feature = "test-utils")]
-    pub(crate) fn txn(&self) -> &DatabaseTransaction {
+    pub fn txn(&self) -> &DatabaseTransaction {
         &self.inner.txn
     }
 
@@ -281,7 +281,7 @@ mod tests {
             let mut full_payload = payload_bytes.to_vec();
             full_payload.extend_from_slice(&[0u8; 64]); // Mock signature
             let b64 = URL_SAFE_NO_PAD.encode(&full_payload);
-            let token = format!("v4.public.header.{}.footer", b64);
+            let token = format!("v4.public.{}.footer", b64);
 
             assert_eq!(parse_tenant_from_token(&token), Some("t1".to_string()));
         }
@@ -293,7 +293,7 @@ mod tests {
             let mut full_payload = payload_bytes.to_vec();
             full_payload.extend_from_slice(&[0u8; 64]); // Mock signature
             let b64 = URL_SAFE_NO_PAD.encode(&full_payload);
-            let token = format!("v4.public.header.{}.footer", b64);
+            let token = format!("v4.public.{}.footer", b64);
 
             assert_eq!(parse_tenant_from_token(&token), None);
         }
