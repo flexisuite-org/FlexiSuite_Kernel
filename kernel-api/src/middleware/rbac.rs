@@ -131,7 +131,7 @@ pub async fn require_permission(
     let permissions = req
         .extensions()
         .get::<UserPermissions>()
-        .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+        .ok_or(StatusCode::FORBIDDEN)?;
 
     if !permissions.has(permission) {
         return Err(StatusCode::FORBIDDEN);
