@@ -39,6 +39,8 @@ thiserror = "1.0"
 
 [dev-dependencies]
 temp-env = "=0.3.6"
+# test-utils feature is primarily used for integration tests
+kernel-data = { path = "../kernel-data", features = ["test-utils"] }
 
 [features]
 test-utils = ["kernel-data/test-utils"]

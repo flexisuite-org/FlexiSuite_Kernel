@@ -155,14 +155,16 @@ async fn test_rbac_integration_real_postgres() {
             assert_eq!(perms[0].action, "act-1");
 
             // Verify fail-closed behavior for non-member
+            // Note: We use a separate context logic here, but avoid logging sensitive data in failure paths.
             let other_user = UserId::new("other-user").unwrap();
             let other_ctx = TenantContext::new(tenant_id.clone(), Some(other_user));
             let result = RBACRepository::get_user_permissions(scoped, &other_ctx).await;
 
-            assert!(
-                matches!(result, Err(DataError::TenantAuthorizationFailed(_))),
-                "Should fail with TenantAuthorizationFailed due to context mismatch"
-            );
+            // Check result without logging ctx.user_id()
+            match result {
+                Err(DataError::TenantAuthorizationFailed(_)) => {},
+                _ => panic!("Should fail with TenantAuthorizationFailed due to context mismatch"),
+            }
 
             Ok(())
         })
