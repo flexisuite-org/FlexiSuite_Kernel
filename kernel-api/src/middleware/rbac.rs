@@ -59,6 +59,17 @@ pub async fn load_permissions_middleware(
     };
 
 <<<<<<< HEAD
+<<<<<<< HEAD
+=======
+    let db_arc = match ctx.db_arc() {
+        Ok(arc) => arc,
+        Err(_) => {
+            warn!("Database connection missing in TenantContext");
+            return Err(StatusCode::INTERNAL_SERVER_ERROR);
+        }
+    };
+
+>>>>>>> c278171 (fix: Address CodeRabbit review issues - dead variables, error handling, compilation error)
     // Note: user_id existence is checked inside RBACRepository::get_user_permissions
     // via TenantContext, but we can fast-fail here if needed.
     if ctx.user_id().is_none() {
@@ -67,6 +78,7 @@ pub async fn load_permissions_middleware(
         return Err(StatusCode::FORBIDDEN);
     }
 
+<<<<<<< HEAD
     // Branching logic for tokens (Requirement 3)
     let mut use_incoming_as_db_token = false;
     if incoming_token.starts_with("v2:") {
@@ -106,6 +118,24 @@ pub async fn load_permissions_middleware(
                 error!("Failed to obtain system context for token generation: {}", e);
                 return Err(StatusCode::INTERNAL_SERVER_ERROR);
             }
+=======
+    // The incoming token might be V4 (PASETO) which is verified by auth_middleware.
+    // However, the DB function `authorize_tenant` currently only accepts V2 (HMAC) tokens.
+    // We bridge this gap by generating a short-lived V2 token for the DB session using a System Context.
+    // In production, we assume kernel-api has access to the system keys (via DB connection).
+    let sys_ctx = TenantContext::from(SystemTenantContext).with_db(db_arc);
+    // TODO: implement Redis cache — see ISSUE-1234
+    let db_token = match KeyManager::generate_tenant_token(&sys_ctx, ctx.tenant_id()).await {
+        Ok(t) => t,
+        Err(e) => {
+             // Log sanitized error
+             match e {
+                 kernel_core::auth::KeyManagerError::Unauthorized(_) => error!("Failed to generate DB session token: Unauthorized"),
+                 kernel_core::auth::KeyManagerError::DbError(_) => error!("Failed to generate DB session token: Database error"),
+                 _ => error!("Failed to generate DB session token: Internal error"),
+             }
+             return Err(StatusCode::INTERNAL_SERVER_ERROR);
+>>>>>>> c278171 (fix: Address CodeRabbit review issues - dead variables, error handling, compilation error)
         }
     };
 
