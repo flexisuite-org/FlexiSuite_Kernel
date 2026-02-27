@@ -62,43 +62,67 @@ pub fn verify_manifest(
         manifest.digest.starts_with("sha256-") || manifest.digest.starts_with("sha384-");
 
     if !has_valid_prefix {
+<<<<<<< HEAD
         metrics::counter!("verification_result", "result" => "DigestMismatch").increment(1);
+=======
+        metrics::inc_verification_result("DigestMismatch");
+>>>>>>> 4fdbcab (fix(review): address final coderabbit comments\n\n- `kernel-api`: Update `load_permissions_middleware` to return 403 for auth errors and log sanitized messages. Added `build.rs` guard for test-utils.\n- `kernel-core`: Re-enabled metrics in `verify_manifest` and optimized key handling. Added build guard.\n- `kernel-data`: Hardened `dev-token` parsing logic and tests. Restricted `txn()` visibility. Fixed `ActiveModel` initialization in integration tests.\n- `kernel-data`: Resolved CodeQL alert by removing sensitive logging in integration test failure path.\n- `kernel-runtime`: Fixed clock check logic.\n- `kernel-api`: Refactored `auth.rs` to avoid double parsing and use `DEFAULT_ACTIVE_KID`.\n- CI: Removed undefined traceability tags.)
         return VerificationResult::DigestMismatch; // Malformed or unsupported digest
     }
 
     // 1b. Artifact Digest Verification (Contract: Manifest must match artifact)
     // Enforce mandatory check as per REQ-SUPPLYCHAIN-DIGEST-MATCH
     if manifest.digest != expected_artifact_digest {
+<<<<<<< HEAD
         metrics::counter!("verification_result", "result" => "DigestMismatch").increment(1);
+=======
+        metrics::inc_verification_result("DigestMismatch");
+>>>>>>> 4fdbcab (fix(review): address final coderabbit comments\n\n- `kernel-api`: Update `load_permissions_middleware` to return 403 for auth errors and log sanitized messages. Added `build.rs` guard for test-utils.\n- `kernel-core`: Re-enabled metrics in `verify_manifest` and optimized key handling. Added build guard.\n- `kernel-data`: Hardened `dev-token` parsing logic and tests. Restricted `txn()` visibility. Fixed `ActiveModel` initialization in integration tests.\n- `kernel-data`: Resolved CodeQL alert by removing sensitive logging in integration test failure path.\n- `kernel-runtime`: Fixed clock check logic.\n- `kernel-api`: Refactored `auth.rs` to avoid double parsing and use `DEFAULT_ACTIVE_KID`.\n- CI: Removed undefined traceability tags.)
         return VerificationResult::DigestMismatch;
     }
 
     // 2. Key ID Match (Contract: Key used must match Trusted Key)
     if manifest.kid != trusted_key.kid {
         // Better error classification for audit/triage
+<<<<<<< HEAD
         metrics::counter!("verification_result", "result" => "KeyMismatch").increment(1);
+=======
+        metrics::inc_verification_result("KeyMismatch");
+>>>>>>> 4fdbcab (fix(review): address final coderabbit comments\n\n- `kernel-api`: Update `load_permissions_middleware` to return 403 for auth errors and log sanitized messages. Added `build.rs` guard for test-utils.\n- `kernel-core`: Re-enabled metrics in `verify_manifest` and optimized key handling. Added build guard.\n- `kernel-data`: Hardened `dev-token` parsing logic and tests. Restricted `txn()` visibility. Fixed `ActiveModel` initialization in integration tests.\n- `kernel-data`: Resolved CodeQL alert by removing sensitive logging in integration test failure path.\n- `kernel-runtime`: Fixed clock check logic.\n- `kernel-api`: Refactored `auth.rs` to avoid double parsing and use `DEFAULT_ACTIVE_KID`.\n- CI: Removed undefined traceability tags.)
         return VerificationResult::KeyMismatch;
     }
 
     // 2b. Key Status Check
     match trusted_key.status {
         KeyStatus::Revoked => {
+<<<<<<< HEAD
             metrics::counter!("verification_result", "result" => "KeyRevoked").increment(1);
+=======
+            metrics::inc_verification_result("KeyRevoked");
+>>>>>>> 4fdbcab (fix(review): address final coderabbit comments\n\n- `kernel-api`: Update `load_permissions_middleware` to return 403 for auth errors and log sanitized messages. Added `build.rs` guard for test-utils.\n- `kernel-core`: Re-enabled metrics in `verify_manifest` and optimized key handling. Added build guard.\n- `kernel-data`: Hardened `dev-token` parsing logic and tests. Restricted `txn()` visibility. Fixed `ActiveModel` initialization in integration tests.\n- `kernel-data`: Resolved CodeQL alert by removing sensitive logging in integration test failure path.\n- `kernel-runtime`: Fixed clock check logic.\n- `kernel-api`: Refactored `auth.rs` to avoid double parsing and use `DEFAULT_ACTIVE_KID`.\n- CI: Removed undefined traceability tags.)
             return VerificationResult::KeyRevoked
         },
         KeyStatus::Retired => {
             // Check Grace Window
             if let Some(retired_at) = trusted_key.retired_at {
                 if now >= retired_at.saturating_add(RETIRED_KEY_GRACE_PERIOD_SECONDS) {
+<<<<<<< HEAD
                     metrics::counter!("verification_result", "result" => "KeyRetiredOutOfWindow").increment(1);
+=======
+                    metrics::inc_verification_result("KeyRetiredOutOfWindow");
+>>>>>>> 4fdbcab (fix(review): address final coderabbit comments\n\n- `kernel-api`: Update `load_permissions_middleware` to return 403 for auth errors and log sanitized messages. Added `build.rs` guard for test-utils.\n- `kernel-core`: Re-enabled metrics in `verify_manifest` and optimized key handling. Added build guard.\n- `kernel-data`: Hardened `dev-token` parsing logic and tests. Restricted `txn()` visibility. Fixed `ActiveModel` initialization in integration tests.\n- `kernel-data`: Resolved CodeQL alert by removing sensitive logging in integration test failure path.\n- `kernel-runtime`: Fixed clock check logic.\n- `kernel-api`: Refactored `auth.rs` to avoid double parsing and use `DEFAULT_ACTIVE_KID`.\n- CI: Removed undefined traceability tags.)
                     return VerificationResult::KeyRetiredOutOfWindow;
                 }
                 // In window -> Proceed to signature check
                 metrics::counter!("verification_flow", "state" => "KeyRetiredInWindow").increment(1);
             } else {
                 // Retired but no timestamp -> Assume out
+<<<<<<< HEAD
                 metrics::counter!("verification_flow", "state" => "KeyRetiredNoTimestamp").increment(1);
                 metrics::counter!("verification_result", "result" => "KeyRetiredOutOfWindow").increment(1);
+=======
+                metrics::inc_verification_result("KeyRetiredOutOfWindow");
+>>>>>>> 4fdbcab (fix(review): address final coderabbit comments\n\n- `kernel-api`: Update `load_permissions_middleware` to return 403 for auth errors and log sanitized messages. Added `build.rs` guard for test-utils.\n- `kernel-core`: Re-enabled metrics in `verify_manifest` and optimized key handling. Added build guard.\n- `kernel-data`: Hardened `dev-token` parsing logic and tests. Restricted `txn()` visibility. Fixed `ActiveModel` initialization in integration tests.\n- `kernel-data`: Resolved CodeQL alert by removing sensitive logging in integration test failure path.\n- `kernel-runtime`: Fixed clock check logic.\n- `kernel-api`: Refactored `auth.rs` to avoid double parsing and use `DEFAULT_ACTIVE_KID`.\n- CI: Removed undefined traceability tags.)
                 return VerificationResult::KeyRetiredOutOfWindow;
             }
         }
@@ -112,10 +136,17 @@ pub fn verify_manifest(
     #[cfg(feature = "test-utils")]
     {
         if manifest.signature == "invalid" {
+<<<<<<< HEAD
             metrics::counter!("verification_result", "result" => "SignatureInvalid").increment(1);
             return VerificationResult::SignatureInvalid;
         }
         metrics::counter!("verification_result", "result" => "Ok").increment(1);
+=======
+            metrics::inc_verification_result("SignatureInvalid");
+            return VerificationResult::SignatureInvalid;
+        }
+        metrics::inc_verification_result("Ok");
+>>>>>>> 4fdbcab (fix(review): address final coderabbit comments\n\n- `kernel-api`: Update `load_permissions_middleware` to return 403 for auth errors and log sanitized messages. Added `build.rs` guard for test-utils.\n- `kernel-core`: Re-enabled metrics in `verify_manifest` and optimized key handling. Added build guard.\n- `kernel-data`: Hardened `dev-token` parsing logic and tests. Restricted `txn()` visibility. Fixed `ActiveModel` initialization in integration tests.\n- `kernel-data`: Resolved CodeQL alert by removing sensitive logging in integration test failure path.\n- `kernel-runtime`: Fixed clock check logic.\n- `kernel-api`: Refactored `auth.rs` to avoid double parsing and use `DEFAULT_ACTIVE_KID`.\n- CI: Removed undefined traceability tags.)
         VerificationResult::Ok
     }
 
@@ -132,30 +163,42 @@ pub fn verify_manifest(
 
 =======
         if trusted_key.public_key.len() != 32 {
-            // metrics::inc_verification_result("SignatureInvalid");
+            metrics::inc_verification_result("SignatureInvalid");
             return VerificationResult::SignatureInvalid;
         }
 
         let mut sig_bytes = [0u8; 64];
         if hex::decode_to_slice(&manifest.signature, &mut sig_bytes).is_err() {
-             // metrics::inc_verification_result("SignatureInvalid");
+             metrics::inc_verification_result("SignatureInvalid");
              return VerificationResult::SignatureInvalid;
         }
 
         // Use fixed slice view for public key
+<<<<<<< HEAD
         let public_key_arr: [u8; 32] = trusted_key.public_key.clone().try_into().unwrap_or([0u8; 32]);
 >>>>>>> 0316419 (fix(ci): traceability linter, security hardening, and review fixes\n\n- Fixes CI traceability linter failure by removing undefined REQ IDs.\n- Hardens `auth.rs`: removes redundant parsing, sanitizes logging, and restricts `dev-token` logic.\n- Hardens `connection.rs`: `parse_tenant_from_token` strictly checks empty tenant IDs and dev-tokens; added comprehensive test coverage.\n- Hardens `supplychain.rs`: enforces key/signature lengths and uses fixed buffer decoding; verified build guard for release builds.\n- Hardens `rbac.rs`: manually extracts BearerToken to return 401 on missing, logs sanitized errors, and adds Redis caching TODO.\n- Hardens `deno_runtime.rs`: returns Error instead of clamping invalid clock values.\n- Updates `integration_tests.rs`: adds negative test case for RBAC access control.\n- Refactors `UserPermissions` for encapsulation.)
+=======
+        let public_key_arr: [u8; 32] = trusted_key.public_key.as_slice().try_into().unwrap_or([0u8; 32]);
+>>>>>>> 4fdbcab (fix(review): address final coderabbit comments\n\n- `kernel-api`: Update `load_permissions_middleware` to return 403 for auth errors and log sanitized messages. Added `build.rs` guard for test-utils.\n- `kernel-core`: Re-enabled metrics in `verify_manifest` and optimized key handling. Added build guard.\n- `kernel-data`: Hardened `dev-token` parsing logic and tests. Restricted `txn()` visibility. Fixed `ActiveModel` initialization in integration tests.\n- `kernel-data`: Resolved CodeQL alert by removing sensitive logging in integration test failure path.\n- `kernel-runtime`: Fixed clock check logic.\n- `kernel-api`: Refactored `auth.rs` to avoid double parsing and use `DEFAULT_ACTIVE_KID`.\n- CI: Removed undefined traceability tags.)
         let peer_public_key = signature::UnparsedPublicKey::new(
             &signature::ED25519,
             &public_key_arr,
         );
 
         if peer_public_key.verify(manifest.digest.as_bytes(), &sig_bytes).is_err() {
+<<<<<<< HEAD
              metrics::counter!("verification_result", "result" => "SignatureInvalid").increment(1);
              return VerificationResult::SignatureInvalid;
         }
 
         metrics::counter!("verification_result", "result" => "Ok").increment(1);
+=======
+             metrics::inc_verification_result("SignatureInvalid");
+             return VerificationResult::SignatureInvalid;
+        }
+
+        metrics::inc_verification_result("Ok");
+>>>>>>> 4fdbcab (fix(review): address final coderabbit comments\n\n- `kernel-api`: Update `load_permissions_middleware` to return 403 for auth errors and log sanitized messages. Added `build.rs` guard for test-utils.\n- `kernel-core`: Re-enabled metrics in `verify_manifest` and optimized key handling. Added build guard.\n- `kernel-data`: Hardened `dev-token` parsing logic and tests. Restricted `txn()` visibility. Fixed `ActiveModel` initialization in integration tests.\n- `kernel-data`: Resolved CodeQL alert by removing sensitive logging in integration test failure path.\n- `kernel-runtime`: Fixed clock check logic.\n- `kernel-api`: Refactored `auth.rs` to avoid double parsing and use `DEFAULT_ACTIVE_KID`.\n- CI: Removed undefined traceability tags.)
         VerificationResult::Ok
     }
 }
