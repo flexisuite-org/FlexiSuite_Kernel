@@ -1,12 +1,13 @@
 use axum::{
     extract::Request,
     http::StatusCode,
-    middleware::Next,
+    middleware::{self, Next},
     response::Response,
 };
 use kernel_core::auth::{KeyManager, SystemTenantContext};
 use kernel_data::{RBACRepository, TenantContext, with_tenant_tx};
 use std::collections::HashSet;
+use std::future::Future;
 use tracing::{error, warn};
 use crate::middleware::BearerToken;
 use std::sync::Arc;
@@ -69,7 +70,8 @@ pub async fn load_permissions_middleware(
     // `KeyManager` uses system-level keys to mint a new token that satisfies the DB's `authorize_tenant` check.
     // This token is short-lived and strictly scoped to the already-authenticated `tenant_id`.
     let sys_ctx = TenantContext::from(SystemTenantContext).with_db(Arc::new(db.clone()));
-    // TODO: implement Redis cache — see ISSUE-1234
+    // TODO: optimization - cache this token in Redis to avoid signing overhead on every request.
+    // See: https://github.com/flexisuite-org/FlexiSuite_Kernel/issues/70
     let db_token = match KeyManager::generate_tenant_token(&sys_ctx, ctx.tenant_id()).await {
         Ok(t) => t,
         Err(e) => {
@@ -143,4 +145,12 @@ pub async fn require_permission(
     }
 
     Ok(next.run(req).await)
+}
+
+/// Factory for creating a permission requirement layer.
+/// Usage: `.layer(middleware::from_fn(require_permission_layer("data:read")))`
+pub fn require_permission_layer(
+    permission: &'static str,
+) -> impl Clone + Fn(Request, Next) -> impl Future<Output = Result<Response, StatusCode>> {
+    move |req, next| require_permission(permission, req, next)
 }
