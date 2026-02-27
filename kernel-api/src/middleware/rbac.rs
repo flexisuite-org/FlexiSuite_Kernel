@@ -63,6 +63,11 @@ pub async fn load_permissions_middleware(
     // However, the DB function `authorize_tenant` currently only accepts V2 (HMAC) tokens.
     // We bridge this gap by generating a short-lived V2 token for the DB session using a System Context.
     // In production, we assume kernel-api has access to the system keys (via DB connection).
+    //
+    // SECURITY: This is a deliberate privilege escalation.
+    // We trust that `auth_middleware` has already validated the user's identity/token.
+    // `KeyManager` uses system-level keys to mint a new token that satisfies the DB's `authorize_tenant` check.
+    // This token is short-lived and strictly scoped to the already-authenticated `tenant_id`.
     let sys_ctx = TenantContext::from(SystemTenantContext).with_db(Arc::new(db.clone()));
     // TODO: implement Redis cache — see ISSUE-1234
     let db_token = match KeyManager::generate_tenant_token(&sys_ctx, ctx.tenant_id()).await {
