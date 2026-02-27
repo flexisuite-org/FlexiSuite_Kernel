@@ -123,6 +123,12 @@ impl TenantContext {
             .as_deref()
             .ok_or_else(|| "Database connection not attached to context".to_string())
     }
+
+    pub fn db_arc(&self) -> Result<std::sync::Arc<sea_orm::DatabaseConnection>, String> {
+        self.db
+            .clone()
+            .ok_or_else(|| "Database connection not attached to context".to_string())
+    }
 }
 
 /// A marker type for operations that are inherently system-wide and not

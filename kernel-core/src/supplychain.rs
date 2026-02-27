@@ -132,7 +132,13 @@ pub fn verify_manifest(
         }
 
         // Use fixed slice view for public key
-        let public_key_arr: [u8; 32] = trusted_key.public_key.clone().try_into().unwrap_or([0u8; 32]);
+        let public_key_arr: [u8; 32] = match trusted_key.public_key.clone().try_into() {
+            Ok(arr) => arr,
+            Err(_) => {
+                 // metrics::inc_verification_result("SignatureInvalid");
+                 return VerificationResult::SignatureInvalid;
+            }
+        };
         let peer_public_key = signature::UnparsedPublicKey::new(
             &signature::ED25519,
             &public_key_arr,
