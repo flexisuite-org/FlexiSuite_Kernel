@@ -151,6 +151,8 @@ pub async fn require_permission(
 /// Usage: `.layer(middleware::from_fn(require_permission_layer("data:read")))`
 pub fn require_permission_layer(
     permission: &'static str,
-) -> impl Clone + Fn(Request, Next) -> impl Future<Output = Result<Response, StatusCode>> {
-    move |req, next| require_permission(permission, req, next)
+) -> impl Clone + Fn(Request, Next) -> std::pin::Pin<Box<dyn Future<Output = Result<Response, StatusCode>> + Send>> {
+    move |req, next| {
+        Box::pin(require_permission(permission, req, next))
+    }
 }
