@@ -161,8 +161,7 @@ async fn test_rbac_integration_real_postgres() {
 
             assert!(
                 matches!(result, Err(DataError::TenantAuthorizationFailed(_))),
-                "Should fail with TenantAuthorizationFailed due to context mismatch, got: {:?}",
-                result
+                "Should fail with TenantAuthorizationFailed due to context mismatch"
             );
 
             Ok(())
