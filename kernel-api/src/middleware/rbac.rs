@@ -51,6 +51,14 @@ pub async fn load_permissions_middleware(
         }
     };
 
+    let db_arc = match ctx.db_arc() {
+        Ok(arc) => arc,
+        Err(_) => {
+            warn!("Database connection missing in TenantContext");
+            return Err(StatusCode::INTERNAL_SERVER_ERROR);
+        }
+    };
+
     // Note: user_id existence is checked inside RBACRepository::get_user_permissions
     // via TenantContext, but we can fast-fail here if needed.
     if ctx.user_id().is_none() {
@@ -63,7 +71,7 @@ pub async fn load_permissions_middleware(
     // However, the DB function `authorize_tenant` currently only accepts V2 (HMAC) tokens.
     // We bridge this gap by generating a short-lived V2 token for the DB session using a System Context.
     // In production, we assume kernel-api has access to the system keys (via DB connection).
-    let sys_ctx = TenantContext::from(SystemTenantContext).with_db(Arc::new(db.clone()));
+    let sys_ctx = TenantContext::from(SystemTenantContext).with_db(db_arc);
     // TODO: implement Redis cache — see ISSUE-1234
     let db_token = match KeyManager::generate_tenant_token(&sys_ctx, ctx.tenant_id()).await {
         Ok(t) => t,
@@ -121,7 +129,7 @@ pub async fn require_permission(
     let permissions = req
         .extensions()
         .get::<UserPermissions>()
-        .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+        .ok_or(StatusCode::FORBIDDEN)?;
 
     if !permissions.has(permission) {
         return Err(StatusCode::FORBIDDEN);
