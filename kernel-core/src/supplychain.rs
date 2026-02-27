@@ -61,41 +61,35 @@ pub fn verify_manifest(
         manifest.digest.starts_with("sha256-") || manifest.digest.starts_with("sha384-");
 
     if !has_valid_prefix {
-        metrics::inc_verification_result("DigestMismatch");
         return VerificationResult::DigestMismatch; // Malformed or unsupported digest
     }
 
     // 1b. Artifact Digest Verification (Contract: Manifest must match artifact)
     // Enforce mandatory check as per REQ-SUPPLYCHAIN-DIGEST-MATCH
     if manifest.digest != expected_artifact_digest {
-        metrics::inc_verification_result("DigestMismatch");
         return VerificationResult::DigestMismatch;
     }
 
     // 2. Key ID Match (Contract: Key used must match Trusted Key)
     if manifest.kid != trusted_key.kid {
         // Better error classification for audit/triage
-        metrics::inc_verification_result("KeyMismatch");
         return VerificationResult::KeyMismatch;
     }
 
     // 2b. Key Status Check
     match trusted_key.status {
         KeyStatus::Revoked => {
-            metrics::inc_verification_result("KeyRevoked");
             return VerificationResult::KeyRevoked
         },
         KeyStatus::Retired => {
             // Check Grace Window
             if let Some(retired_at) = trusted_key.retired_at {
                 if now >= retired_at.saturating_add(RETIRED_KEY_GRACE_PERIOD_SECONDS) {
-                    metrics::inc_verification_result("KeyRetiredOutOfWindow");
                     return VerificationResult::KeyRetiredOutOfWindow;
                 }
                 // In window -> Proceed to signature check
             } else {
                 // Retired but no timestamp -> Assume out
-                metrics::inc_verification_result("KeyRetiredOutOfWindow");
                 return VerificationResult::KeyRetiredOutOfWindow;
             }
         }
@@ -109,10 +103,8 @@ pub fn verify_manifest(
     #[cfg(feature = "test-utils")]
     {
         if manifest.signature == "invalid" {
-            metrics::inc_verification_result("SignatureInvalid");
             return VerificationResult::SignatureInvalid;
         }
-        metrics::inc_verification_result("Ok");
         VerificationResult::Ok
     }
 
@@ -121,13 +113,11 @@ pub fn verify_manifest(
         use ring::signature;
 
         if trusted_key.public_key.len() != 32 {
-            metrics::inc_verification_result("SignatureInvalid");
             return VerificationResult::SignatureInvalid;
         }
 
         let mut sig_bytes = [0u8; 64];
         if hex::decode_to_slice(&manifest.signature, &mut sig_bytes).is_err() {
-             metrics::inc_verification_result("SignatureInvalid");
              return VerificationResult::SignatureInvalid;
         }
 
@@ -139,11 +129,9 @@ pub fn verify_manifest(
         );
 
         if peer_public_key.verify(manifest.digest.as_bytes(), &sig_bytes).is_err() {
-             metrics::inc_verification_result("SignatureInvalid");
              return VerificationResult::SignatureInvalid;
         }
 
-        metrics::inc_verification_result("Ok");
         VerificationResult::Ok
     }
 }
