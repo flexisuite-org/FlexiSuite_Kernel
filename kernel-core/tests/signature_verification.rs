@@ -24,7 +24,7 @@ fn test_manifest_signature_verification_real_crypto() {
         kid: "active-key".to_string(),
         status: KeyStatus::Active,
         retired_at: None,
-        public_key: public_bytes.to_vec(),
+        public_key: public_bytes,
     };
 
     let now = 100000;

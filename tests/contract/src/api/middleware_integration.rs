@@ -22,7 +22,7 @@ use serde_json::Value;
 use tower::ServiceExt;
 
 use sea_orm::MockExecResult;
-use kernel_api::entities::permission;
+use kernel_data::entities::permission;
 use uuid::Uuid;
 use chrono::Utc;
 

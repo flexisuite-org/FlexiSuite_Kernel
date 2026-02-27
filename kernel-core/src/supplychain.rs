@@ -39,7 +39,7 @@ pub struct TrustedKey {
     pub kid: String,
     pub status: KeyStatus,
     pub retired_at: Option<u64>,
-    pub public_key: Vec<u8>,
+    pub public_key: [u8; 32],
 }
 
 const RETIRED_KEY_GRACE_PERIOD_SECONDS: u64 = 86400;
@@ -97,6 +97,7 @@ pub fn verify_manifest(
             } else {
                 // Retired but no timestamp -> Assume out
                 metrics::counter!("verification_flow", "state" => "KeyRetiredNoTimestamp").increment(1);
+                metrics::counter!("verification_result", "result" => "KeyRetiredOutOfWindow").increment(1);
                 return VerificationResult::KeyRetiredOutOfWindow;
             }
         }
@@ -121,14 +122,6 @@ pub fn verify_manifest(
     {
         use ring::signature;
 
-        let key_array: [u8; 32] = match trusted_key.public_key.as_slice().try_into() {
-            Ok(k) => k,
-            Err(_) => {
-                metrics::counter!("verification_result", "result" => "SignatureInvalid").increment(1);
-                return VerificationResult::SignatureInvalid;
-            }
-        };
-
         let mut sig_bytes = [0u8; 64];
         if hex::decode_to_slice(&manifest.signature, &mut sig_bytes).is_err() {
              metrics::counter!("verification_result", "result" => "SignatureInvalid").increment(1);
@@ -137,7 +130,7 @@ pub fn verify_manifest(
 
         let peer_public_key = signature::UnparsedPublicKey::new(
             &signature::ED25519,
-            &key_array,
+            &trusted_key.public_key,
         );
 
         if peer_public_key.verify(manifest.digest.as_bytes(), &sig_bytes).is_err() {

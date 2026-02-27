@@ -5,7 +5,7 @@ use axum::http::Request;
 use axum::http::StatusCode;
 use sea_orm::{MockDatabase, MockExecResult};
 use tower::ServiceExt; // for oneshot
-use kernel_api::entities::permission;
+use kernel_data::entities::permission;
 use uuid::Uuid;
 use chrono::Utc;
 
