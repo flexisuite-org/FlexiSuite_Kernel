@@ -93,10 +93,10 @@ pub fn verify_manifest(
                     return VerificationResult::KeyRetiredOutOfWindow;
                 }
                 // In window -> Proceed to signature check
-                metrics::counter!("verification_result", "result" => "KeyRetiredInWindow").increment(1);
+                metrics::counter!("verification_flow", "state" => "KeyRetiredInWindow").increment(1);
             } else {
                 // Retired but no timestamp -> Assume out
-                metrics::counter!("verification_result", "result" => "KeyRetiredNoTimestamp").increment(1);
+                metrics::counter!("verification_flow", "state" => "KeyRetiredNoTimestamp").increment(1);
                 return VerificationResult::KeyRetiredOutOfWindow;
             }
         }
