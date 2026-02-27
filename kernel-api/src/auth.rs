@@ -299,13 +299,35 @@ impl PasetoKeyset {
 const DEFAULT_ACTIVE_KID: &str = "active";
 
 pub fn init_auth_config() -> Result<(), String> {
-    // Attempt to load a generic public key from the environment.
-    // If provided, it will be used as the default key for initialization.
-    // PasetoKeyset::from_env will then attempt to load any per-kid public keys.
+    // When a generic public key (FLEXI_PASETO_V4_PUBLIC_KEY_B64URL) is provided,
+    // it becomes the default public key used for initialization.
+    // Otherwise, the active key from PasetoKeyset::from_env
+    // (keyset.active_kid / keyset.public_key_for_kid) is chosen and passed to
+    // init_auth_config_with_decoded_public_key_and_keyset.
+    let active_kid = std::env::var("FLEXI_PASETO_V4_ACTIVE_KID").unwrap_or_else(|_| DEFAULT_ACTIVE_KID.to_string());
+
+    // Attempt to load generic key, but only require it if it's the *only* source for the active key
+    let generic_key_res = std::env::var("FLEXI_PASETO_V4_PUBLIC_KEY_B64URL")
+        .and_then(|k| decode_public_key_b64url(&k, "FLEXI_PASETO_V4_PUBLIC_KEY_B64URL").map_err(|e| std::env::VarError::NotPresent)); // Map decode error to look like missing env for flow simplicity, or handle better?
+        // Actually decode_public_key_b64url returns Result<Vec<u8>, String>. env::var returns Result<String, VarError>.
+
     let default_key = match std::env::var("FLEXI_PASETO_V4_PUBLIC_KEY_B64URL") {
         Ok(key_b64) => Some(decode_public_key_b64url(&key_b64, "FLEXI_PASETO_V4_PUBLIC_KEY_B64URL")?),
         Err(_) => None,
     };
+
+    // If active_kid is default ("active") AND per-kid var is missing, then generic key is REQUIRED.
+    // PasetoKeyset::from_env will check for per-kid keys.
+    // Here we just pass the default key if we found it.
+    // But wait, the previous logic enforced generic key existence if active_kid == "active".
+    // The review says: "update init_auth_config to attempt the generic env var first, then fall back to the per-kid env var (treat them as alias) and only error if both are missing".
+
+    // So if active_kid == "active":
+    // 1. Try generic var.
+    // 2. If missing, PasetoKeyset::from_env will try FLEXI_PASETO_V4_PUBLIC_KEY_B64URL_ACTIVE.
+    // So we shouldn't error here if generic is missing, unless we know per-kid is also missing (which from_env handles).
+
+    // So just load generic optional.
 
     let keyset = PasetoKeyset::from_env(default_key.as_deref())?;
 
