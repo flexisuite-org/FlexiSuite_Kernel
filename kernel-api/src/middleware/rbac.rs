@@ -10,7 +10,6 @@ use std::collections::HashSet;
 use std::future::Future;
 use tracing::{error, warn};
 use crate::middleware::BearerToken;
-use std::sync::Arc;
 
 #[derive(Clone, Debug)]
 pub struct UserPermissions {
@@ -69,7 +68,8 @@ pub async fn load_permissions_middleware(
     // We trust that `auth_middleware` has already validated the user's identity/token.
     // `KeyManager` uses system-level keys to mint a new token that satisfies the DB's `authorize_tenant` check.
     // This token is short-lived and strictly scoped to the already-authenticated `tenant_id`.
-    let sys_ctx = TenantContext::from(SystemTenantContext).with_db(Arc::new(db.clone()));
+    let db_arc = ctx.db_arc().cloned().ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+    let sys_ctx = TenantContext::from(SystemTenantContext).with_db(db_arc);
     // TODO: optimization - cache this token in Redis to avoid signing overhead on every request.
     // See: https://github.com/flexisuite-org/FlexiSuite_Kernel/issues/70
     let db_token = match KeyManager::generate_tenant_token(&sys_ctx, ctx.tenant_id()).await {

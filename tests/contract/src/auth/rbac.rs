@@ -1,7 +1,7 @@
 use axum::{body::Body, http::{Request, StatusCode}};
 use kernel_api::auth::{TenantId, UserId, TenantContext};
 use kernel_api::middleware::{load_permissions_middleware, require_permission, BearerToken};
-use kernel_api::entities::{permission};
+use kernel_data::entities::permission;
 use sea_orm::{
     DatabaseBackend, MockDatabase,
 };
