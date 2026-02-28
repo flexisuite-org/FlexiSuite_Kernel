@@ -4,7 +4,7 @@ use axum::{
     middleware::Next,
     response::Response,
 };
-use kernel_core::auth::{KeyManager};
+use kernel_core::auth::KeyManager;
 use kernel_data::{RBACRepository, TenantContext, with_tenant_tx};
 use std::collections::HashSet;
 use std::future::Future;
@@ -87,7 +87,8 @@ pub async fn load_permissions_middleware(
              }
              return Err(StatusCode::INTERNAL_SERVER_ERROR);
         },
-        Err(_) => {
+        Err(e) => {
+            error!("Failed to obtain system context for token generation: {}", e);
             return Err(StatusCode::INTERNAL_SERVER_ERROR);
         }
     };

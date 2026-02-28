@@ -97,7 +97,7 @@ fn main() -> Result<()> {
         let mut has_target = false;
         let mut has_hidden_dot = false;
 
-        while let Some(component) = components.next() {
+        for component in components.by_ref() {
             let current = component.as_os_str();
             if prev == Some(OsStr::new("ops")) && current == OsStr::new("linters") {
                 is_ops_linters_path = true;

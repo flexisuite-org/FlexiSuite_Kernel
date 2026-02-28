@@ -6,7 +6,7 @@ use axum::{
     routing::{get, post},
     response::IntoResponse,
 };
-use sea_orm::{DatabaseConnection, ConnectionTrait};
+use sea_orm::DatabaseConnection;
 use serde::Serialize;
 use std::sync::Arc;
 use tokio::task::JoinHandle;

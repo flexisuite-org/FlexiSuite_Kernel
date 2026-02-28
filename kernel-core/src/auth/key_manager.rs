@@ -42,7 +42,7 @@ impl KeyManager {
     /// Rotates keys for all supported types.
     pub async fn rotate_keys(ctx: &TenantContext) -> Result<(), KeyManagerError> {
         Self::ensure_system(ctx)?;
-        let db = ctx.db().map_err(|e| sea_orm::DbErr::Custom(e))?;
+        let db = ctx.db().map_err(sea_orm::DbErr::Custom)?;
         let key_types = vec![(KeyType::Hmac, "HS256"), (KeyType::PasetoPublic, "Ed25519")];
 
         for (k_type, alg) in key_types {
@@ -86,8 +86,7 @@ impl KeyManager {
             // Check if rotation is needed (e.g., > 30 days)
             let rotation_base = active
                 .activated_at
-                .clone()
-                .unwrap_or(active.created_at.clone());
+                .unwrap_or(active.created_at);
             let rotation_threshold = rotation_base + Duration::days(30);
             if now >= rotation_threshold {
                 // Rotate!
@@ -228,7 +227,7 @@ impl KeyManager {
         ctx: &TenantContext,
         key_type: KeyType,
     ) -> Result<Model, KeyManagerError> {
-        let db = ctx.db().map_err(|e| sea_orm::DbErr::Custom(e))?;
+        let db = ctx.db().map_err(sea_orm::DbErr::Custom)?;
         let key = KeyRecord::find()
             .filter(key_record::Column::KeyType.eq(key_type.clone()))
             .filter(key_record::Column::State.eq(KeyState::Active))
@@ -241,7 +240,7 @@ impl KeyManager {
     /// Gets a specific key by KID (for verification).
     pub async fn get_key(ctx: &TenantContext, kid: &str) -> Result<Model, KeyManagerError> {
         Self::ensure_system(ctx)?;
-        let db = ctx.db().map_err(|e| sea_orm::DbErr::Custom(e))?;
+        let db = ctx.db().map_err(sea_orm::DbErr::Custom)?;
         KeyRecord::find_by_id(kid)
             .one(db)
             .await?
@@ -251,7 +250,7 @@ impl KeyManager {
     /// Revokes a key immediately.
     pub async fn revoke_key(ctx: &TenantContext, kid: &str) -> Result<(), KeyManagerError> {
         Self::ensure_system(ctx)?;
-        let db = ctx.db().map_err(|e| sea_orm::DbErr::Custom(e))?;
+        let db = ctx.db().map_err(sea_orm::DbErr::Custom)?;
         let txn = db.begin().await?;
         let key = KeyRecord::find_by_id(kid)
             .lock_exclusive()
