@@ -108,26 +108,32 @@ async fn test_security_headers_present_on_404_not_found() {
 fn assert_security_headers(res: &axum::response::Response) {
     let headers = res.headers();
 
-    assert_eq!(headers.get("x-frame-options").unwrap(), "DENY");
-    assert_eq!(headers.get("x-content-type-options").unwrap(), "nosniff");
     assert_eq!(
-        headers.get("strict-transport-security").unwrap(),
+        headers.get("x-frame-options").expect("missing header: x-frame-options"),
+        "DENY"
+    );
+    assert_eq!(
+        headers.get("x-content-type-options").expect("missing header: x-content-type-options"),
+        "nosniff"
+    );
+    assert_eq!(
+        headers.get("strict-transport-security").expect("missing header: strict-transport-security"),
         "max-age=31536000; includeSubDomains; preload"
     );
     assert_eq!(
-        headers.get("content-security-policy").unwrap(),
+        headers.get("content-security-policy").expect("missing header: content-security-policy"),
         "default-src 'none'; frame-ancestors 'none';"
     );
     assert_eq!(
-        headers.get("cross-origin-opener-policy").unwrap(),
+        headers.get("cross-origin-opener-policy").expect("missing header: cross-origin-opener-policy"),
         "same-origin"
     );
     assert_eq!(
-        headers.get("cross-origin-embedder-policy").unwrap(),
+        headers.get("cross-origin-embedder-policy").expect("missing header: cross-origin-embedder-policy"),
         "require-corp"
     );
     assert_eq!(
-        headers.get("cross-origin-resource-policy").unwrap(),
+        headers.get("cross-origin-resource-policy").expect("missing header: cross-origin-resource-policy"),
         "same-origin"
     );
 }
