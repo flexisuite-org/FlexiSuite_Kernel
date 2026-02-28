@@ -1,8 +1,8 @@
 use serde::de::{self, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
 use std::fmt;
-use std::str::FromStr;
 use std::future::Future;
+use std::str::FromStr;
 
 macro_rules! define_principal_id {
     ($type_name:ident, $label:literal, $reserve_system:expr) => {
@@ -134,7 +134,10 @@ impl TenantContext {
         F: FnOnce(TenantContext) -> Fut,
         Fut: Future<Output = R>,
     {
-        let db_arc = self.db.as_ref().ok_or_else(|| "Database connection not attached to context".to_string())?;
+        let db_arc = self
+            .db
+            .as_ref()
+            .ok_or_else(|| "Database connection not attached to context".to_string())?;
         let sys_ctx = TenantContext::from(SystemTenantContext).with_db(db_arc.clone());
         Ok(f(sys_ctx).await)
     }

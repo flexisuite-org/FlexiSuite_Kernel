@@ -1,22 +1,23 @@
 use axum::{
     Json, Router,
-    extract::{Extension, Path, State},
+    extract::{Extension, Path},
     http::{HeaderName, HeaderValue, StatusCode},
     middleware::{from_fn, from_fn_with_state},
     response::{IntoResponse, Response},
     routing::{get, post},
 };
-use tower_http::set_header::SetResponseHeaderLayer;
 use sea_orm::DatabaseConnection;
 use serde::Serialize;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::task::JoinHandle;
+use tower_http::set_header::SetResponseHeaderLayer;
 use uuid::Uuid;
 
 use crate::auth::{TenantContext, auth_middleware};
 use crate::middleware::{
     ActionStatus, MiddlewareConfig, MiddlewareState, get_action, idempotency_middleware,
-    quota_middleware, record_action, load_permissions_middleware, require_permission,
+    load_permissions_middleware, quota_middleware, record_action, require_permission,
 };
 
 pub mod auth;
@@ -63,39 +64,58 @@ pub fn build_app_with_state(
 ) -> (Router, JoinHandle<()>) {
     let cleanup_handle = state.start_cleanup_task();
 
-    let public_router = Router::new().route("/health", get(readiness_check)).with_state(db.clone());
+    let public_router = Router::new()
+        .route("/health", get(liveness))
+        .route("/health/liveness", get(liveness));
 
-    // Reordered Middleware Stack:
-    // 1. Auth (Outermost, establishes identity)
-    // 2. Quota (Protect system resources)
-    // 3. Idempotency (Handle replays early to avoid DB work)
-    // 4. Permissions (RBAC, requires DB access via load_permissions_middleware)
+    let auth_only_router = Router::new()
+        .route("/health/readiness", get(readiness))
+        .layer(from_fn_with_state(db.clone(), auth_middleware));
+
+    // Middleware chain (outermost -> innermost):
+    // Auth -> Idempotency -> Quota -> Permissions
 
     let require_perm = |p: &'static str| from_fn(move |req, next| require_permission(p, req, next));
 
     #[allow(unused_mut)]
     let mut protected_router = Router::new()
-        .route("/test", post(write_test).put(write_test).layer(require_perm("test:write")))
-        .route("/actions/:action_id", get(get_action_status).layer(require_perm("action:read")))
+        .route(
+            "/test",
+            post(write_test)
+                .put(write_test)
+                .layer(require_perm("test:write")),
+        )
+        .route(
+            "/actions/:action_id",
+            get(get_action_status).layer(require_perm("action:read")),
+        )
         // Diagnostics routes under /api/v1/diagnostics
         // Note: diagnostics routes implement their own policy checks, but we add a base permission check here as requested.
-        .nest("/api/v1/diagnostics", diagnostics::routes().layer(require_perm("diagnostics:read")))
+        .nest(
+            "/api/v1/diagnostics",
+            diagnostics::routes().layer(require_perm("diagnostics:read")),
+        )
         // Outermost applied last
         .layer(from_fn(load_permissions_middleware))
-        .layer(from_fn(idempotency_middleware))
         .layer(from_fn(quota_middleware))
+        .layer(from_fn(idempotency_middleware))
         .layer(from_fn_with_state(db.clone(), auth_middleware));
 
     #[cfg(feature = "test-utils")]
     {
-        protected_router = protected_router.route("/test/protected", get(|| async { "Access Granted" }).layer(require_perm("test:read")));
+        protected_router = protected_router.route(
+            "/test/protected",
+            get(|| async { "Access Granted" }).layer(require_perm("test:read")),
+        );
     }
 
     (
         Router::new()
             .merge(public_router)
+            .merge(auth_only_router)
             .merge(protected_router)
             .layer(Extension(state))
+            .layer(Extension(db))
             .layer(SetResponseHeaderLayer::overriding(
                 HeaderName::from_static("x-frame-options"),
                 HeaderValue::from_static("DENY"),
@@ -128,17 +148,46 @@ pub fn build_app_with_state(
     )
 }
 
-async fn readiness_check(State(db): State<Arc<DatabaseConnection>>) -> impl IntoResponse {
-    // Check DB connectivity
-    if let Err(e) = db.ping().await {
-        tracing::error!("Readiness check failed (DB): {}", e);
-        return (StatusCode::SERVICE_UNAVAILABLE, "Unhealthy (DB)").into_response();
+async fn liveness() -> StatusCode {
+    StatusCode::OK
+}
+
+fn readiness_db_timeout() -> Duration {
+    std::env::var("HEALTH_READINESS_DB_TIMEOUT_MS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|v| *v > 0)
+        .map(Duration::from_millis)
+        .unwrap_or_else(|| Duration::from_secs(1))
+}
+
+async fn readiness(Extension(ctx): Extension<TenantContext>) -> impl IntoResponse {
+    let timeout = readiness_db_timeout();
+    let result = ctx
+        .with_system_context(|system_ctx| async move {
+            let db = system_ctx.db().map_err(|e| format!("context error: {e}"))?;
+            match tokio::time::timeout(timeout, db.ping()).await {
+                Ok(Ok(_)) => Ok(()),
+                Ok(Err(e)) => Err(format!("db ping failed: {e}")),
+                Err(_) => Err(format!(
+                    "db ping timed out after {}ms",
+                    timeout.as_millis()
+                )),
+            }
+        })
+        .await;
+
+    match result {
+        Ok(Ok(())) => (StatusCode::OK, "OK").into_response(),
+        Ok(Err(e)) => {
+            tracing::error!("Readiness check failed (system context): {e}");
+            (StatusCode::SERVICE_UNAVAILABLE, "Unhealthy (DB)").into_response()
+        }
+        Err(e) => {
+            tracing::error!("Readiness check failed (context): {e}");
+            (StatusCode::SERVICE_UNAVAILABLE, "Unhealthy (Context)").into_response()
+        }
     }
-
-    // RBAC store is the DB, so if DB is up, RBAC storage is effectively up.
-    // Real RBAC verification happens per-request with TenantContext.
-
-    (StatusCode::OK, "OK").into_response()
 }
 
 pub async fn write_test(

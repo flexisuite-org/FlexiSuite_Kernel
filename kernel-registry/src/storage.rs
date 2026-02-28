@@ -3,7 +3,7 @@ use crate::model::{Dependencies, DistManifest, Kind, Route};
 use crate::trust::TrustProvider;
 use bytes::Bytes;
 use kernel_core::auth::TenantContext;
-use kernel_core::supplychain::{verify_manifest, Manifest as CoreManifest, VerificationResult};
+use kernel_core::supplychain::{Manifest as CoreManifest, VerificationResult, verify_manifest};
 use object_store::ObjectStore;
 use object_store::path::Path;
 use serde::Serialize;
@@ -322,13 +322,31 @@ impl RegistryStorage {
     ) -> Result<(), RegistryError> {
         // 1. Basic field presence
         if manifest.security.manifest_signature.trim().is_empty() {
-             return Err(RegistryError::InvalidManifest("security.manifest_signature must not be empty".to_string()));
+            return Err(RegistryError::InvalidManifest(
+                "security.manifest_signature must not be empty".to_string(),
+            ));
         }
         if manifest.security.manifest_signature_kid.trim().is_empty() {
-             return Err(RegistryError::InvalidManifest("security.manifest_signature_kid must not be empty".to_string()));
+            return Err(RegistryError::InvalidManifest(
+                "security.manifest_signature_kid must not be empty".to_string(),
+            ));
         }
         if manifest.security.trust_root_version.trim().is_empty() {
-             return Err(RegistryError::InvalidManifest("security.trust_root_version must not be empty".to_string()));
+            return Err(RegistryError::InvalidManifest(
+                "security.trust_root_version must not be empty".to_string(),
+            ));
+        }
+        let expected_version = self.trust_provider.trust_root_version();
+        if manifest.security.trust_root_version != expected_version {
+            warn!(
+                expected = %expected_version,
+                actual = %manifest.security.trust_root_version,
+                "Manifest rejected: trust_root_version mismatch"
+            );
+            return Err(RegistryError::InvalidManifest(format!(
+                "trust_root_version mismatch: expected {}, got {}",
+                expected_version, manifest.security.trust_root_version
+            )));
         }
 
         // 2. Digest Integrity
@@ -337,7 +355,9 @@ impl RegistryStorage {
 
         let stored_digest = &manifest.security.manifest_digest;
         if stored_digest.trim().is_empty() {
-             return Err(RegistryError::InvalidManifest("security.manifest_digest must not be empty".to_string()));
+            return Err(RegistryError::InvalidManifest(
+                "security.manifest_digest must not be empty".to_string(),
+            ));
         }
 
         let normalized_stored = if stored_digest.starts_with("sha384-") {
@@ -355,7 +375,9 @@ impl RegistryStorage {
         }
 
         // 3. Signature Verification (Authenticity)
-        let trusted_key = self.trust_provider.get_key(&manifest.security.manifest_signature_kid)?;
+        let trusted_key = self
+            .trust_provider
+            .get_key(&manifest.security.manifest_signature_kid)?;
 
         let core_manifest = CoreManifest {
             id: manifest.id.clone(),
@@ -366,7 +388,9 @@ impl RegistryStorage {
 
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
+            .map_err(|e| {
+                RegistryError::InvalidManifest(format!("System time before UNIX EPOCH: {}", e))
+            })?
             .as_secs();
 
         match verify_manifest(&core_manifest, &trusted_key, &normalized_stored, now) {
@@ -377,7 +401,10 @@ impl RegistryStorage {
             }
             res => {
                 warn!(result = ?res, manifest.id = %manifest.id, "Manifest signature verification failed");
-                Err(RegistryError::InvalidManifest(format!("Signature verification failed: {:?}", res)))
+                Err(RegistryError::InvalidManifest(format!(
+                    "Signature verification failed: {:?}",
+                    res
+                )))
             }
         }
     }
@@ -401,32 +428,47 @@ mod tests {
         let mut provider = MockTrustProvider::new();
         provider.add_key(TrustedKey {
             kid: "key1".to_string(),
+            alg: "Ed25519".to_string(),
             status: KeyStatus::Active,
             retired_at: None,
+            not_before: None,
+            not_after: None,
             public_key: [0u8; 32],
         });
         provider.add_key(TrustedKey {
             kid: "kid_default".to_string(),
+            alg: "Ed25519".to_string(),
             status: KeyStatus::Active,
             retired_at: None,
+            not_before: None,
+            not_after: None,
             public_key: [0u8; 32],
         });
         provider.add_key(TrustedKey {
             kid: "kid_A".to_string(),
+            alg: "Ed25519".to_string(),
             status: KeyStatus::Active,
             retired_at: None,
+            not_before: None,
+            not_after: None,
             public_key: [0u8; 32],
         });
         provider.add_key(TrustedKey {
             kid: "kid_B".to_string(),
+            alg: "Ed25519".to_string(),
             status: KeyStatus::Active,
             retired_at: None,
+            not_before: None,
+            not_after: None,
             public_key: [0u8; 32],
         });
         provider.add_key(TrustedKey {
             kid: "kid".to_string(),
+            alg: "Ed25519".to_string(),
             status: KeyStatus::Active,
             retired_at: None,
+            not_before: None,
+            not_after: None,
             public_key: [0u8; 32],
         });
         Arc::new(provider)
@@ -497,7 +539,7 @@ mod tests {
         manifest.security.manifest_signature_kid = "key1".to_string();
 
         let (digest, persisted) = registry.save_manifest(&manifest).await.unwrap();
-        assert_eq!(digest.len(), 103); 
+        assert_eq!(digest.len(), 103);
         assert_eq!(persisted.security.manifest_digest, digest);
 
         let retrieved = registry.get_manifest("app_test", "1.0.0").await.unwrap();
@@ -542,7 +584,7 @@ mod tests {
         let mut manifest_b = manifest_a.clone();
         manifest_b.security.manifest_signature = "sig_B".to_string();
         manifest_b.security.manifest_signature_kid = "kid_B".to_string();
-        manifest_b.security.trust_root_version = "v2".to_string();
+        manifest_b.security.trust_root_version = "v1".to_string();
 
         let (digest_a, _) = registry_a.save_manifest(&manifest_a).await.unwrap();
         let (digest_b, _) = registry_b.save_manifest(&manifest_b).await.unwrap();
@@ -671,7 +713,10 @@ mod tests {
         assert!(digest.starts_with("sha384-"));
         assert!(persisted.security.manifest_digest.starts_with("sha384-"));
 
-        let retrieved = registry.get_manifest("app_canonical", "1.0.0").await.unwrap();
+        let retrieved = registry
+            .get_manifest("app_canonical", "1.0.0")
+            .await
+            .unwrap();
         assert!(retrieved.security.manifest_digest.starts_with("sha384-"));
     }
 
@@ -687,10 +732,10 @@ mod tests {
 
         let result = registry.save_manifest(&manifest).await;
         match result {
-             Err(RegistryError::TrustRootError(msg)) => {
-                 assert!(msg.contains("Key not found: key1"));
-             }
-             other => panic!("expected TrustRootError, got {other:?}"),
+            Err(RegistryError::TrustRootError(msg)) => {
+                assert!(msg.contains("Key not found: key1"));
+            }
+            other => panic!("expected TrustRootError, got {other:?}"),
         }
     }
 
@@ -700,22 +745,25 @@ mod tests {
         let mut provider = MockTrustProvider::new();
         provider.add_key(TrustedKey {
             kid: "key1".to_string(),
+            alg: "Ed25519".to_string(),
             status: KeyStatus::Active,
             retired_at: None,
+            not_before: None,
+            not_after: None,
             public_key: [0u8; 32],
         });
         let registry = RegistryStorage::new(store, Arc::new(provider), &test_tenant_ctx());
 
         let mut manifest = test_manifest("app_bad_sig", "1.0.0");
-        manifest.security.manifest_signature = "invalid".to_string(); 
+        manifest.security.manifest_signature = "invalid".to_string();
         manifest.security.manifest_signature_kid = "key1".to_string();
 
         let result = registry.save_manifest(&manifest).await;
         match result {
-             Err(RegistryError::InvalidManifest(msg)) => {
-                 assert!(msg.contains("Signature verification failed: SignatureInvalid"));
-             }
-             other => panic!("expected InvalidManifest(SignatureInvalid), got {other:?}"),
+            Err(RegistryError::InvalidManifest(msg)) => {
+                assert!(msg.contains("Signature verification failed: SignatureInvalid"));
+            }
+            other => panic!("expected InvalidManifest(SignatureInvalid), got {other:?}"),
         }
     }
 
@@ -827,7 +875,9 @@ mod tests {
             let result = registry.save_manifest(&manifest).await;
             match result {
                 Err(RegistryError::InvalidPath(_)) => {}
-                other => panic!("save_manifest: expected InvalidPath for {key} (id), got {other:?}"),
+                other => {
+                    panic!("save_manifest: expected InvalidPath for {key} (id), got {other:?}")
+                }
             }
         }
     }

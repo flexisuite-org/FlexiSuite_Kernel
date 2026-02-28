@@ -3,9 +3,7 @@ use crate::connection::RawConnection;
 use crate::connection::TenantScoped;
 use crate::entities::{group, group_member, group_role, permission, role};
 use crate::error::DataError;
-use sea_orm::{
-    ColumnTrait, EntityTrait, JoinType, QueryFilter, QuerySelect, RelationTrait,
-};
+use sea_orm::{ColumnTrait, EntityTrait, JoinType, QueryFilter, QuerySelect, RelationTrait};
 
 pub struct RBACRepository;
 
@@ -20,14 +18,20 @@ impl RBACRepository {
         // We also explicitly filter by tenant_id from the context for double safety.
 
         let tenant_id = ctx.tenant_id();
-        let user_id = ctx.user_id().ok_or_else(|| DataError::ValidationError("User ID missing in context".to_string()))?;
+        let user_id = ctx
+            .user_id()
+            .ok_or_else(|| DataError::ValidationError("User ID missing in context".to_string()))?;
 
         // Sanity check: Ensure scoped context matches passed context
         if scoped.tenant_id != *tenant_id {
-             return Err(DataError::TenantAuthorizationFailed("Context mismatch in RBAC repository (tenant_id)".to_string()));
+            return Err(DataError::TenantAuthorizationFailed(
+                "Context mismatch in RBAC repository (tenant_id)".to_string(),
+            ));
         }
         if scoped.user_id.as_ref() != Some(user_id) {
-             return Err(DataError::TenantAuthorizationFailed("Context mismatch in RBAC repository (user_id)".to_string()));
+            return Err(DataError::TenantAuthorizationFailed(
+                "Context mismatch in RBAC repository (user_id)".to_string(),
+            ));
         }
 
         let db = scoped.txn();

@@ -12,13 +12,13 @@ use kernel_data::auth_context::{TenantContext, TenantId, UserId};
 mod common;
 use common::admin::TestAdminTenantContext;
 use common::auth::TestAuth;
-use kernel_data::{DataError, RBACRepository};
 use kernel_data::connection::{RawConnection, TenantScoped, with_tenant_tx};
 use kernel_data::entities::entity_record;
 use kernel_data::repository::TenantRepository;
+use kernel_data::{DataError, RBACRepository};
 use sea_orm::{
-    ActiveModelTrait, ActiveValue, ConnectionTrait, Database, DatabaseConnection, DbBackend, Statement,
-    TransactionTrait,
+    ActiveModelTrait, ActiveValue, ConnectionTrait, Database, DatabaseConnection, DbBackend,
+    Statement, TransactionTrait,
 };
 use std::sync::OnceLock;
 use testcontainers::{RunnableImage, clients};
@@ -101,7 +101,10 @@ async fn test_rbac_integration_real_postgres() {
                 created_at: ActiveValue::Set(chrono::Utc::now().into()),
                 updated_at: ActiveValue::Set(chrono::Utc::now().into()),
             };
-            let role = role.insert(scoped.txn()).await.map_err(DataError::DbError)?;
+            let role = role
+                .insert(scoped.txn())
+                .await
+                .map_err(DataError::DbError)?;
 
             // 2. Permission
             let perm = kernel_data::entities::permission::ActiveModel {
@@ -113,7 +116,9 @@ async fn test_rbac_integration_real_postgres() {
                 created_at: ActiveValue::Set(chrono::Utc::now().into()),
                 updated_at: ActiveValue::Set(chrono::Utc::now().into()),
             };
-            perm.insert(scoped.txn()).await.map_err(DataError::DbError)?;
+            perm.insert(scoped.txn())
+                .await
+                .map_err(DataError::DbError)?;
 
             // 3. Group
             let group = kernel_data::entities::group::ActiveModel {
@@ -124,7 +129,10 @@ async fn test_rbac_integration_real_postgres() {
                 created_at: ActiveValue::Set(chrono::Utc::now().into()),
                 updated_at: ActiveValue::Set(chrono::Utc::now().into()),
             };
-            let group = group.insert(scoped.txn()).await.map_err(DataError::DbError)?;
+            let group = group
+                .insert(scoped.txn())
+                .await
+                .map_err(DataError::DbError)?;
 
             // 4. GroupRole
             let gr = kernel_data::entities::group_role::ActiveModel {
@@ -162,108 +170,7 @@ async fn test_rbac_integration_real_postgres() {
 
             // Check result without logging ctx.user_id()
             match result {
-                Err(DataError::TenantAuthorizationFailed(_)) => {},
-                _ => panic!("Should fail with TenantAuthorizationFailed due to context mismatch"),
-            }
-
-            Ok(())
-        })
-    })
-    .await
-    .expect("RBAC test failed");
-}
-
-#[tokio::test(flavor = "multi_thread")]
-#[ignore] // Requires Docker
-async fn test_rbac_integration_real_postgres() {
-    let (db, _node) = setup_test_db().await;
-    TestAuth::init_keys(&db).await.expect("Failed to init keys");
-
-    let tenant_id = TenantId::new("tenant-rbac").unwrap();
-    let user_id = UserId::new("user-rbac").unwrap();
-    let ctx = TenantContext::new(tenant_id.clone(), Some(user_id.clone()));
-
-    let token = TestAuth::generate_tenant_token(&db, &tenant_id)
-        .await
-        .expect("gen token");
-
-    with_tenant_tx(&db, &ctx, &token, |scoped| {
-        let tenant_id = tenant_id.clone();
-        let user_id = user_id.clone();
-        let ctx = ctx.clone();
-        Box::pin(async move {
-            // Seed RBAC data
-            // 1. Role
-            let role = kernel_data::entities::role::ActiveModel {
-                id: ActiveValue::Set(Uuid::now_v7().into()),
-                tenant_id: ActiveValue::Set(tenant_id.to_string()),
-                name: ActiveValue::Set("role-1".to_string()),
-                description: ActiveValue::Set("desc".to_string()),
-                created_at: ActiveValue::Set(chrono::Utc::now().into()),
-                updated_at: ActiveValue::Set(chrono::Utc::now().into()),
-            };
-            let role = role.insert(scoped.txn()).await.map_err(DataError::DbError)?;
-
-            // 2. Permission
-            let perm = kernel_data::entities::permission::ActiveModel {
-                id: ActiveValue::Set(Uuid::now_v7().into()),
-                tenant_id: ActiveValue::Set(tenant_id.to_string()),
-                role_id: ActiveValue::Set(role.id.clone()),
-                resource: ActiveValue::Set("res-1".to_string()),
-                action: ActiveValue::Set("act-1".to_string()),
-                created_at: ActiveValue::Set(chrono::Utc::now().into()),
-                updated_at: ActiveValue::Set(chrono::Utc::now().into()),
-            };
-            perm.insert(scoped.txn()).await.map_err(DataError::DbError)?;
-
-            // 3. Group
-            let group = kernel_data::entities::group::ActiveModel {
-                id: ActiveValue::Set(Uuid::now_v7().into()),
-                tenant_id: ActiveValue::Set(tenant_id.to_string()),
-                name: ActiveValue::Set("group-1".to_string()),
-                description: ActiveValue::Set("desc".to_string()),
-                created_at: ActiveValue::Set(chrono::Utc::now().into()),
-                updated_at: ActiveValue::Set(chrono::Utc::now().into()),
-            };
-            let group = group.insert(scoped.txn()).await.map_err(DataError::DbError)?;
-
-            // 4. GroupRole
-            let gr = kernel_data::entities::group_role::ActiveModel {
-                id: ActiveValue::Set(Uuid::now_v7().into()),
-                group_id: ActiveValue::Set(group.id.clone()),
-                role_id: ActiveValue::Set(role.id.clone()),
-                tenant_id: ActiveValue::Set(tenant_id.to_string()),
-                created_at: ActiveValue::Set(chrono::Utc::now().into()),
-                updated_at: ActiveValue::Set(chrono::Utc::now().into()),
-            };
-            gr.insert(scoped.txn()).await.map_err(DataError::DbError)?;
-
-            // 5. GroupMember
-            let gm = kernel_data::entities::group_member::ActiveModel {
-                id: ActiveValue::Set(Uuid::now_v7().into()),
-                group_id: ActiveValue::Set(group.id.clone()),
-                user_id: ActiveValue::Set(user_id.to_string()),
-                tenant_id: ActiveValue::Set(tenant_id.to_string()),
-                created_at: ActiveValue::Set(chrono::Utc::now().into()),
-                updated_at: ActiveValue::Set(chrono::Utc::now().into()),
-            };
-            gm.insert(scoped.txn()).await.map_err(DataError::DbError)?;
-
-            // Verify
-            let perms = RBACRepository::get_user_permissions(scoped, &ctx).await?;
-            assert_eq!(perms.len(), 1);
-            assert_eq!(perms[0].resource, "res-1");
-            assert_eq!(perms[0].action, "act-1");
-
-            // Verify fail-closed behavior for non-member
-            // Note: We use a separate context logic here, but avoid logging sensitive data in failure paths.
-            let other_user = UserId::new("other-user").unwrap();
-            let other_ctx = TenantContext::new(tenant_id.clone(), Some(other_user));
-            let result = RBACRepository::get_user_permissions(scoped, &other_ctx).await;
-
-            // Check result without logging ctx.user_id()
-            match result {
-                Err(DataError::TenantAuthorizationFailed(_)) => {},
+                Err(DataError::TenantAuthorizationFailed(_)) => {}
                 _ => panic!("Should fail with TenantAuthorizationFailed due to context mismatch"),
             }
 

@@ -79,8 +79,7 @@ pub fn generate_token_with_claims(
     let footer = kid.map(|k| serde_json::json!({ "kid": k }).to_string());
     let mut builder = PasetoBuilder::<V4, Public>::default();
 
-    builder
-        .set_claim(CustomClaim::try_from(("tenant_id", tenant_id)).unwrap());
+    builder.set_claim(CustomClaim::try_from(("tenant_id", tenant_id)).unwrap());
     if let Some(uid) = user_id {
         builder.set_claim(CustomClaim::try_from(("user_id", uid)).unwrap());
     }
