@@ -3,8 +3,8 @@ use axum::{
     extract::{Extension, Path, State},
     http::{HeaderName, HeaderValue, StatusCode},
     middleware::{from_fn, from_fn_with_state},
+    response::{IntoResponse, Response},
     routing::{get, post},
-    response::IntoResponse,
 };
 use tower_http::set_header::SetResponseHeaderLayer;
 use sea_orm::DatabaseConnection;
@@ -39,6 +39,14 @@ pub struct TestWriteResponse {
 pub struct ActionStatusResponse {
     pub action_id: String,
     pub status: ActionStatus,
+}
+
+#[derive(Serialize)]
+struct JsonError {
+    status: u16,
+    error: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    request_id: Option<String>,
 }
 
 pub async fn build_app(
@@ -185,4 +193,17 @@ pub async fn get_action_status(
     }
 
     Err(StatusCode::NOT_FOUND)
+}
+
+pub fn build_json_error_response(
+    message: impl Into<String>,
+    status: StatusCode,
+    request_id: Option<String>,
+) -> Response {
+    let body = JsonError {
+        status: status.as_u16(),
+        error: message.into(),
+        request_id,
+    };
+    (status, Json(body)).into_response()
 }
