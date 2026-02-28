@@ -3,6 +3,10 @@ mod tests {
     use kernel_core::supplychain::{
         BreakGlassContext, VerificationResult, verify_break_glass,
     };
+    #[cfg(feature = "test-utils")]
+    use kernel_core::supplychain::{
+        KeyStatus, Manifest, TrustedKey, verify_manifest,
+    };
 
     #[test]
     #[cfg(feature = "test-utils")]

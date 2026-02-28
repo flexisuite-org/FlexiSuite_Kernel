@@ -6,6 +6,7 @@ use axum::{
     routing::{get, post},
     response::IntoResponse,
 };
+use tower_http::set_header::SetResponseHeaderLayer;
 use sea_orm::DatabaseConnection;
 use serde::Serialize;
 use std::sync::Arc;
@@ -86,7 +87,35 @@ pub fn build_app_with_state(
         Router::new()
             .merge(public_router)
             .merge(protected_router)
-            .layer(Extension(state)),
+            .layer(Extension(state))
+            .layer(SetResponseHeaderLayer::overriding(
+                HeaderName::from_static("x-frame-options"),
+                HeaderValue::from_static("DENY"),
+            ))
+            .layer(SetResponseHeaderLayer::overriding(
+                HeaderName::from_static("x-content-type-options"),
+                HeaderValue::from_static("nosniff"),
+            ))
+            .layer(SetResponseHeaderLayer::overriding(
+                HeaderName::from_static("strict-transport-security"),
+                HeaderValue::from_static("max-age=31536000; includeSubDomains; preload"),
+            ))
+            .layer(SetResponseHeaderLayer::overriding(
+                HeaderName::from_static("content-security-policy"),
+                HeaderValue::from_static("default-src 'none'; frame-ancestors 'none';"),
+            ))
+            .layer(SetResponseHeaderLayer::overriding(
+                HeaderName::from_static("cross-origin-opener-policy"),
+                HeaderValue::from_static("same-origin"),
+            ))
+            .layer(SetResponseHeaderLayer::overriding(
+                HeaderName::from_static("cross-origin-embedder-policy"),
+                HeaderValue::from_static("require-corp"),
+            ))
+            .layer(SetResponseHeaderLayer::overriding(
+                HeaderName::from_static("cross-origin-resource-policy"),
+                HeaderValue::from_static("same-origin"),
+            )),
         cleanup_handle,
     )
 }

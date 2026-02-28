@@ -55,6 +55,7 @@ macro_rules! define_principal_id {
             }
 
             #[cfg(not(feature = "test-utils"))]
+            #[allow(dead_code)]
             pub(crate) fn new_unchecked(id: impl Into<String>) -> Self {
                 Self(id.into())
             }

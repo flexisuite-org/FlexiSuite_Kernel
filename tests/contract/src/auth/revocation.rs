@@ -5,7 +5,7 @@ use axum::http::Request;
 use axum::http::StatusCode;
 use sea_orm::{MockDatabase, MockExecResult};
 use tower::ServiceExt; // for oneshot
-use kernel_data::entities::permission;
+use kernel_data::entities::{permission, key_record};
 use uuid::Uuid;
 use chrono::Utc;
 
@@ -26,14 +26,30 @@ async fn test_key_revocation_slo() {
 
     // Mock DB that expects one successful authorization (for Case 1)
     // Case 2 and 3 should be rejected by Auth middleware (stateless/cached) and not hit DB.
+    let hmac_key = key_record::Model {
+        kid: "hmac-key-1".to_string(),
+        key_type: key_record::KeyType::Hmac,
+        algorithm: "HS256".to_string(),
+        secret_bytes: Some(vec![0u8; 32]),
+        public_bytes: None,
+        state: key_record::KeyState::Active,
+        created_at: now.into(),
+        activated_at: Some(now.into()),
+        retired_at: None,
+        revoked_at: None,
+        expires_at: None,
+    };
+
+    // Case 1: Paseto -> KeyManager (SELECT KeyRecord) -> execute (authorize_tenant) -> query (permissions)
     let db = MockDatabase::new(sea_orm::DatabaseBackend::Postgres)
-        .append_exec_results(vec![
+        .append_query_results([[hmac_key]]) // 1. KeyManager::get_active_key
+        .append_exec_results([
             MockExecResult {
                 last_insert_id: 0,
                 rows_affected: 1,
             },
-        ])
-        .append_query_results(vec![vec![perm]])
+        ]) // 2. authorize_tenant
+        .append_query_results([[perm]]) // 3. RBAC perms
         .into_connection();
 
     let app = setup_app_with_db(db).await;

@@ -115,3 +115,35 @@ async fn test_rbac_middleware_deny() {
     let res = app.oneshot(req).await.unwrap();
     assert_eq!(res.status(), StatusCode::FORBIDDEN);
 }
+
+#[tokio::test]
+async fn test_rbac_middleware_503_on_no_active_key() {
+    let tenant_id = "tenant-1";
+    let user_id = "user-1";
+    let token = "v4.public.something"; // V4 token triggers KeyManager::generate_tenant_token
+
+    // Mock DB returns None for find active key query
+    let db = MockDatabase::new(DatabaseBackend::Postgres)
+        .append_query_results([
+            Vec::<kernel_data::entities::key_record::Model>::new(), // get_active_key_internal returns None -> NoActiveKey error
+        ])
+        .into_connection();
+
+    let app = axum::Router::new()
+        .route("/protected", axum::routing::get(|| async { "Allowed" }))
+        .layer(axum::middleware::from_fn(load_permissions_middleware))
+        .layer(axum::Extension(BearerToken(token.to_string())))
+        .layer(axum::Extension(TenantContext::new(
+            TenantId::new(tenant_id).unwrap(),
+            Some(UserId::new(user_id).unwrap()),
+        ).with_db(Arc::new(db))));
+
+    let req = Request::builder()
+        .uri("/protected")
+        .header("Authorization", format!("Bearer {}", token))
+        .body(Body::empty())
+        .unwrap();
+
+    let res = app.oneshot(req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::SERVICE_UNAVAILABLE);
+}

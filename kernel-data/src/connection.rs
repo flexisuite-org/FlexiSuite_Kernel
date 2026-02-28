@@ -181,6 +181,7 @@ where
 fn parse_tenant_from_token(token: &str) -> Option<String> {
     #[cfg(feature = "test-utils")]
     if token.starts_with("v4.public.") {
+        use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
         let parts: Vec<&str> = token.split('.').collect();
         if parts.len() >= 3 {
             if let Ok(payload_bytes) = URL_SAFE_NO_PAD.decode(parts[2]) {
@@ -322,21 +323,4 @@ mod tests {
             assert_eq!(parse_tenant_from_token(token), None);
         }
     }
-}
-
-// Legacy exports retained for binary compatibility during migration.
-// These shims now fail loudly so callers are forced to migrate.
-#[deprecated(note = "Legacy migration shim; removed - use token-based authorization API")]
-pub fn init_hmac_secret() -> Result<(), String> {
-    Err(String::from(
-        "init_hmac_secret is removed/deprecated: use token-based authorization API",
-    ))
-}
-
-#[cfg(feature = "test-utils")]
-#[deprecated(note = "Legacy migration shim; removed - use test fixtures with KeyManager")]
-pub fn init_hmac_secret_for_test(_secret: impl Into<String>) -> Result<(), String> {
-    Err(String::from(
-        "init_hmac_secret_for_test is removed/deprecated: use test fixtures with KeyManager",
-    ))
 }
