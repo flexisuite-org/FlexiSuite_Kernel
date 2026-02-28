@@ -48,6 +48,7 @@ async fn test_security_headers_present_on_401_unauthorized() {
     let req = Request::builder()
         .uri("/test")
         .method("POST")
+        .header("Idempotency-Key", "security-401-test")
         .body(Body::empty())
         .unwrap();
 

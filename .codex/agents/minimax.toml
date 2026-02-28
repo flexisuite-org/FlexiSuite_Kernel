@@ -1,6 +1,0 @@
-model = "MiniMax-M2.5"
-model_provider = "minimax"
-sandbox_mode = "workspace-write"
-
-developer_instructions = """
-You are a senior software engineer. First please read these 4 documents: docs/flexisuite-concept.md, docs/implementation_plan.md, docs/verification_matrix.md, and docs/negative-space-spec.md"""
