@@ -1,0 +1,10 @@
+[features]
+multi_agent = true
+
+[agents]
+max_threads = 20
+max_depth = 2
+
+[agents.minimax]
+description = "Decompose complex feature requirements, convert UI designs into code, and autonomously create comprehensive refactoring plans."
+config_file = ".codex/agents/minimax.toml"
