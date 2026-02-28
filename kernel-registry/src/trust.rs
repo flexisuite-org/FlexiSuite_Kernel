@@ -16,13 +16,17 @@ pub struct TrustRoot {
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct TrustRootKey {
     pub kid: String,
-    pub public_key: String, // Hex string
-    pub status: String,    // "active", "next", "retired", "revoked"
+    pub alg: String,
+    pub public_key: String,
+    pub status: String,
     pub retired_at: Option<u64>,
+    pub not_before: Option<u64>,
+    pub not_after: Option<u64>,
 }
 
 pub trait TrustProvider: Send + Sync {
     fn get_key(&self, kid: &str) -> Result<TrustedKey, RegistryError>;
+    fn trust_root_version(&self) -> &str;
 }
 
 pub struct FileTrustProvider {
@@ -81,10 +85,17 @@ impl TrustProvider for FileTrustProvider {
 
         Ok(TrustedKey {
             kid: key.kid.clone(),
+            alg: key.alg.clone(),
             status,
             retired_at: key.retired_at,
+            not_before: key.not_before,
+            not_after: key.not_after,
             public_key,
         })
+    }
+
+    fn trust_root_version(&self) -> &str {
+        &self.trust_root.version
     }
 }
 
@@ -116,6 +127,10 @@ pub mod tests {
                 .get(kid)
                 .cloned()
                 .ok_or_else(|| RegistryError::TrustRootError(format!("Key not found: {}", kid)))
+        }
+
+        fn trust_root_version(&self) -> &str {
+            "v1"
         }
     }
 }

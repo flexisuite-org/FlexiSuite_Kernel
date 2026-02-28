@@ -189,23 +189,23 @@ fn parse_tenant_from_token(token: &str) -> Option<String> {
                 // The parser must strip the last 64 bytes from the payload and then decode
                 // the remaining bytes as JSON (the "message").
                 if payload_bytes.len() > 64 {
-                     let payload_len = payload_bytes.len() - 64;
-                     let json_bytes = &payload_bytes[..payload_len];
-                     if let Ok(s) = String::from_utf8(json_bytes.to_vec()) {
-                         if let Ok(json) = serde_json::from_str::<serde_json::Value>(&s) {
-                             if let Some(tid) = json.get("tenant_id").and_then(|v| v.as_str()) {
-                                 if !tid.is_empty() {
-                                     return Some(tid.to_string());
-                                 }
-                             }
-                         }
-                     }
+                    let payload_len = payload_bytes.len() - 64;
+                    let json_bytes = &payload_bytes[..payload_len];
+                    if let Ok(s) = String::from_utf8(json_bytes.to_vec()) {
+                        if let Ok(json) = serde_json::from_str::<serde_json::Value>(&s) {
+                            if let Some(tid) = json.get("tenant_id").and_then(|v| v.as_str()) {
+                                if !tid.is_empty() {
+                                    return Some(tid.to_string());
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
     }
 
-    #[cfg(feature = "test-utils")]
+    #[cfg(debug_assertions)]
     if let Some(tenant_id) = token.strip_prefix("dev-token:") {
         // Special dev token for tests/debug with tenant ID
         if !tenant_id.is_empty() {
@@ -213,22 +213,27 @@ fn parse_tenant_from_token(token: &str) -> Option<String> {
         }
     }
 
-    #[cfg(not(feature = "test-utils"))]
+    #[cfg(not(debug_assertions))]
     if token.starts_with("dev-token:") {
-        warn!(
-            "dev-token encountered in non-test build; parsing rejected"
-        );
+        warn!("dev-token encountered in non-test build; parsing rejected");
         return None;
     }
 
     let mut parts = token.split(':');
     let ver = parts.next()?;
-    let _kid = parts.next()?;
-    let _ts = parts.next()?;
-    let _nonce = parts.next()?;
+    let kid = parts.next()?;
+    let ts = parts.next()?;
+    let nonce = parts.next()?;
     let tenant_id = parts.next()?;
-    let _sig = parts.next()?;
-    if ver != "v2" || parts.next().is_some() || tenant_id.is_empty() {
+    let sig = parts.next()?;
+    if ver != "v2"
+        || parts.next().is_some()
+        || kid.is_empty()
+        || ts.is_empty()
+        || nonce.is_empty()
+        || tenant_id.is_empty()
+        || sig.is_empty()
+    {
         return None;
     }
     Some(tenant_id.to_string())
@@ -252,12 +257,18 @@ mod tests {
 
     #[test]
     fn test_parse_extra_fields_returns_none() {
-        assert_eq!(parse_tenant_from_token("v2:kid:ts:nonce:tenant-1:sig:extra"), None);
+        assert_eq!(
+            parse_tenant_from_token("v2:kid:ts:nonce:tenant-1:sig:extra"),
+            None
+        );
     }
 
     #[test]
     fn test_parse_wrong_version_returns_none() {
-        assert_eq!(parse_tenant_from_token("v3:kid:ts:nonce:tenant-1:sig"), None);
+        assert_eq!(
+            parse_tenant_from_token("v3:kid:ts:nonce:tenant-1:sig"),
+            None
+        );
     }
 
     #[test]
@@ -266,7 +277,7 @@ mod tests {
         assert_eq!(parse_tenant_from_token(token), None);
     }
 
-    #[cfg(feature = "test-utils")]
+    #[cfg(debug_assertions)]
     mod test_utils_parsing {
         use super::*;
         use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -274,12 +285,16 @@ mod tests {
         #[test]
         fn test_dev_token_parsing() {
             // Valid
-            assert_eq!(parse_tenant_from_token("dev-token:t1"), Some("t1".to_string()));
+            assert_eq!(
+                parse_tenant_from_token("dev-token:t1"),
+                Some("t1".to_string())
+            );
 
             // Empty tenant (should be rejected per hardening)
             assert_eq!(parse_tenant_from_token("dev-token:"), None);
         }
 
+        #[cfg(feature = "test-utils")]
         #[test]
         fn test_v4_public_parsing() {
             let payload_json = r#"{"tenant_id":"t1","extra":"stuff"}"#;
@@ -292,6 +307,7 @@ mod tests {
             assert_eq!(parse_tenant_from_token(&token), Some("t1".to_string()));
         }
 
+        #[cfg(feature = "test-utils")]
         #[test]
         fn test_v4_public_empty_tenant_parsing() {
             let payload_json = r#"{"tenant_id":""}"#;
@@ -305,7 +321,7 @@ mod tests {
         }
     }
 
-    #[cfg(not(feature = "test-utils"))]
+    #[cfg(not(debug_assertions))]
     mod production_parsing {
         use super::*;
 

@@ -84,9 +84,7 @@ impl KeyManager {
 
         if let Some(active) = active_key {
             // Check if rotation is needed (e.g., > 30 days)
-            let rotation_base = active
-                .activated_at
-                .unwrap_or(active.created_at);
+            let rotation_base = active.activated_at.unwrap_or(active.created_at);
             let rotation_threshold = rotation_base + Duration::days(30);
             if now >= rotation_threshold {
                 // Rotate!

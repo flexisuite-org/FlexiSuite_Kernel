@@ -3,11 +3,11 @@ use crate::auth::helpers::{generate_token, generate_token_with_kid, setup};
 use axum::body::Body;
 use axum::http::Request;
 use axum::http::StatusCode;
+use chrono::Utc;
+use kernel_data::entities::{key_record, permission};
 use sea_orm::{MockDatabase, MockExecResult};
 use tower::ServiceExt; // for oneshot
-use kernel_data::entities::{permission, key_record};
 use uuid::Uuid;
-use chrono::Utc;
 
 #[tokio::test]
 async fn test_key_revocation_slo() {
@@ -43,12 +43,10 @@ async fn test_key_revocation_slo() {
     // Case 1: Paseto -> KeyManager (SELECT KeyRecord) -> execute (authorize_tenant) -> query (permissions)
     let db = MockDatabase::new(sea_orm::DatabaseBackend::Postgres)
         .append_query_results([[hmac_key]]) // 1. KeyManager::get_active_key
-        .append_exec_results([
-            MockExecResult {
-                last_insert_id: 0,
-                rows_affected: 1,
-            },
-        ]) // 2. authorize_tenant
+        .append_exec_results([MockExecResult {
+            last_insert_id: 0,
+            rows_affected: 1,
+        }]) // 2. authorize_tenant
         .append_query_results([[perm]]) // 3. RBAC perms
         .into_connection();
 

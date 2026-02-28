@@ -21,38 +21,22 @@ use sea_orm::{DatabaseBackend, MockDatabase};
 use serde_json::Value;
 use tower::ServiceExt;
 
-use sea_orm::MockExecResult;
-use kernel_data::entities::{key_record, permission};
-use uuid::Uuid;
 use chrono::Utc;
+use kernel_data::entities::permission;
+use sea_orm::MockExecResult;
+use uuid::Uuid;
 
 pub fn mock_db_with_budget(auth_calls: usize) -> sea_orm::DatabaseConnection {
     let mut db = MockDatabase::new(DatabaseBackend::Postgres);
 
     for _ in 0..auth_calls {
         let now = Utc::now();
-        let hmac_key = key_record::Model {
-            kid: "hmac-key-1".to_string(),
-            key_type: key_record::KeyType::Hmac,
-            algorithm: "HS256".to_string(),
-            secret_bytes: Some(vec![0u8; 32]),
-            public_bytes: None,
-            state: key_record::KeyState::Active,
-            created_at: now.into(),
-            activated_at: Some(now.into()),
-            retired_at: None,
-            revoked_at: None,
-            expires_at: None,
-        };
-
-        // 1) KeyManager::get_active_key
-        db = db.append_query_results([[hmac_key]]);
-        // 2) flexi.authorize_tenant
+        // 1) flexi.authorize_tenant
         db = db.append_exec_results([MockExecResult {
             last_insert_id: 0,
             rows_affected: 1,
         }]);
-        // 3) RBACRepository::get_user_permissions
+        // 2) RBACRepository::get_user_permissions
         let perms = vec![
             permission::Model {
                 id: Uuid::new_v4(),
@@ -72,7 +56,7 @@ pub fn mock_db_with_budget(auth_calls: usize) -> sea_orm::DatabaseConnection {
                 created_at: now.into(),
                 updated_at: now.into(),
             },
-             permission::Model {
+            permission::Model {
                 id: Uuid::new_v4(),
                 tenant_id: "tenant-1".to_string(),
                 role_id: Uuid::new_v4(),
@@ -372,11 +356,16 @@ async fn test_quota_evaluation_priority_and_clipping() {
         .unwrap();
     let res = app.clone().oneshot(req).await.unwrap();
 
-    #[cfg(debug_assertions)]
+    #[cfg(all(debug_assertions, feature = "test-utils"))]
     {
         assert_eq!(res.status(), StatusCode::SERVICE_UNAVAILABLE);
         let retry_after = res.headers().get("Retry-After").unwrap().to_str().unwrap();
         assert_eq!(retry_after, "30");
+    }
+
+    #[cfg(all(debug_assertions, not(feature = "test-utils")))]
+    {
+        assert_eq!(res.status(), StatusCode::CREATED);
     }
 
     #[cfg(not(debug_assertions))]

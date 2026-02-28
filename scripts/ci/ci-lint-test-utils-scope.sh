@@ -28,3 +28,4 @@ fi
 
 echo "OK: kernel-api test-utils usage is limited to $ALLOWED_FILE"
 cargo check --release -p kernel-api
+cargo check --release -p kernel-core

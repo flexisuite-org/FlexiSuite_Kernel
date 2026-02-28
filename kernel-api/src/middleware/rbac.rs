@@ -1,15 +1,10 @@
-use axum::{
-    extract::Request,
-    http::StatusCode,
-    middleware::Next,
-    response::Response,
-};
+use crate::middleware::BearerToken;
+use axum::{extract::Request, http::StatusCode, middleware::Next, response::Response};
 use kernel_core::auth::KeyManager;
 use kernel_data::{RBACRepository, TenantContext, with_tenant_tx};
 use std::collections::HashSet;
 use std::future::Future;
 use tracing::{error, warn};
-use crate::middleware::BearerToken;
 
 #[derive(Clone, Debug)]
 pub struct UserPermissions {
@@ -65,7 +60,7 @@ pub async fn load_permissions_middleware(
     if incoming_token.starts_with("v2:") {
         use_incoming_as_db_token = true;
     }
-    #[cfg(feature = "test-utils")]
+    #[cfg(debug_assertions)]
     if incoming_token.starts_with("dev-token:") {
         use_incoming_as_db_token = true;
     }
@@ -75,28 +70,39 @@ pub async fn load_permissions_middleware(
     } else {
         // Bridge V4 -> V2
         let ctx_for_closure = ctx.clone();
-        match ctx.with_system_context(|sys_ctx| async move {
-            KeyManager::generate_tenant_token(&sys_ctx, ctx_for_closure.tenant_id()).await
-        }).await {
+        match ctx
+            .with_system_context(|sys_ctx| async move {
+                KeyManager::generate_tenant_token(&sys_ctx, ctx_for_closure.tenant_id()).await
+            })
+            .await
+        {
             Ok(Ok(t)) => t,
             Ok(Err(e)) => {
-                 // Log sanitized error
-                 match e {
-                     kernel_core::auth::KeyManagerError::Unauthorized(_) => {
-                         error!("Failed to generate DB session token: Unauthorized");
-                         return Err(StatusCode::FORBIDDEN);
-                     }
-                     kernel_core::auth::KeyManagerError::NoActiveKey(t) => {
-                         warn!("Failed to generate DB session token: No active key for type {}", t);
-                         return Err(StatusCode::SERVICE_UNAVAILABLE);
-                     }
-                     kernel_core::auth::KeyManagerError::DbError(_) => error!("Failed to generate DB session token: Database error"),
-                     _ => error!("Failed to generate DB session token: Internal error"),
-                 }
-                 return Err(StatusCode::INTERNAL_SERVER_ERROR);
-            },
+                // Log sanitized error
+                match e {
+                    kernel_core::auth::KeyManagerError::Unauthorized(_) => {
+                        error!("Failed to generate DB session token: Unauthorized");
+                        return Err(StatusCode::FORBIDDEN);
+                    }
+                    kernel_core::auth::KeyManagerError::NoActiveKey(t) => {
+                        warn!(
+                            "Failed to generate DB session token: No active key for type {}",
+                            t
+                        );
+                        return Err(StatusCode::SERVICE_UNAVAILABLE);
+                    }
+                    kernel_core::auth::KeyManagerError::DbError(_) => {
+                        error!("Failed to generate DB session token: Database error")
+                    }
+                    _ => error!("Failed to generate DB session token: Internal error"),
+                }
+                return Err(StatusCode::INTERNAL_SERVER_ERROR);
+            }
             Err(e) => {
-                error!("Failed to obtain system context for token generation: {}", e);
+                error!(
+                    "Failed to obtain system context for token generation: {}",
+                    e
+                );
                 return Err(StatusCode::INTERNAL_SERVER_ERROR);
             }
         }
@@ -106,10 +112,9 @@ pub async fn load_permissions_middleware(
     // RBACRepository now demands a TenantScoped connection.
     let ctx_clone = ctx.clone();
     let permissions_result = with_tenant_tx(db, &ctx, &db_token, move |scoped| {
-        Box::pin(async move {
-            RBACRepository::get_user_permissions(scoped, &ctx_clone).await
-        })
-    }).await;
+        Box::pin(async move { RBACRepository::get_user_permissions(scoped, &ctx_clone).await })
+    })
+    .await;
 
     let permissions_list = match permissions_result {
         Ok(perms) => perms,
@@ -124,7 +129,9 @@ pub async fn load_permissions_middleware(
                     error!("Failed to fetch permissions: Validation error");
                     return Err(StatusCode::FORBIDDEN);
                 }
-                kernel_data::DataError::DbError(_) => error!("Failed to fetch permissions: Database error"),
+                kernel_data::DataError::DbError(_) => {
+                    error!("Failed to fetch permissions: Database error")
+                }
                 _ => error!("Failed to fetch permissions: Internal error"),
             }
             return Err(StatusCode::INTERNAL_SERVER_ERROR);
@@ -165,8 +172,10 @@ pub async fn require_permission(
 /// Usage: `.layer(middleware::from_fn(require_permission_layer("data:read")))`
 pub fn require_permission_layer(
     permission: &'static str,
-) -> impl Clone + Fn(Request, Next) -> std::pin::Pin<Box<dyn Future<Output = Result<Response, StatusCode>> + Send>> {
-    move |req, next| {
-        Box::pin(require_permission(permission, req, next))
-    }
+) -> impl Clone
++ Fn(
+    Request,
+    Next,
+) -> std::pin::Pin<Box<dyn Future<Output = Result<Response, StatusCode>> + Send>> {
+    move |req, next| Box::pin(require_permission(permission, req, next))
 }

@@ -225,8 +225,24 @@ pub struct IdempotencyScopeKey {
     pub idempotency_key: String,
 }
 
-#[derive(Clone, Debug)]
-pub struct BearerToken(pub String);
+#[derive(Clone)]
+pub struct BearerToken(String);
+
+impl BearerToken {
+    pub fn new(token: impl Into<String>) -> Self {
+        Self(token.into())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Debug for BearerToken {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("BearerToken").field(&"***").finish()
+    }
+}
 
 /// Abstract Store Trait to allow switching to Redis (REQ: Production Readiness)
 #[async_trait]
@@ -1780,7 +1796,7 @@ pub async fn quota_middleware(req: Request<Body>, next: Next) -> Result<Response
         Some(ctx) => ctx,
         None => {
             warn!("Quota middleware missing TenantContext");
-            return Ok(StatusCode::UNAUTHORIZED.into_response());
+            return Err(StatusCode::UNAUTHORIZED.into_response());
         }
     };
 
@@ -1788,7 +1804,7 @@ pub async fn quota_middleware(req: Request<Body>, next: Next) -> Result<Response
         Some(s) => s,
         None => {
             error!("MiddlewareState missing");
-            return Ok(StatusCode::INTERNAL_SERVER_ERROR.into_response());
+            return Err(StatusCode::INTERNAL_SERVER_ERROR.into_response());
         }
     };
 

@@ -1,5 +1,7 @@
-use kernel_core::supplychain::{Manifest, TrustedKey, KeyStatus, verify_manifest, VerificationResult};
 use ed25519_dalek::{Signer, SigningKey, VerifyingKey};
+use kernel_core::supplychain::{
+    KeyStatus, Manifest, TrustedKey, VerificationResult, verify_manifest,
+};
 use rand::rngs::OsRng;
 
 #[test]
@@ -22,8 +24,11 @@ fn test_manifest_signature_verification_real_crypto() {
 
     let trusted_key = TrustedKey {
         kid: "active-key".to_string(),
+        alg: "Ed25519".to_string(),
         status: KeyStatus::Active,
         retired_at: None,
+        not_before: None,
+        not_after: None,
         public_key: public_bytes,
     };
 

@@ -250,7 +250,8 @@ async fn get_health(Extension(ctx): Extension<TenantContext>) -> impl IntoRespon
                     "status": "error",
                     "details": "Database connectivity failed"
                 })),
-            ).into_response()
+            )
+                .into_response()
         }
         Err(_) => {
             tracing::error!("Health check timed out (DB)");
@@ -260,7 +261,8 @@ async fn get_health(Extension(ctx): Extension<TenantContext>) -> impl IntoRespon
                     "status": "error",
                     "details": "Database connectivity failed"
                 })),
-            ).into_response()
+            )
+                .into_response()
         }
     }
 }

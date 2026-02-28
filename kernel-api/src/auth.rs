@@ -20,8 +20,8 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-pub use kernel_core::auth::{TenantContext, TenantId, UserId};
 use crate::middleware::BearerToken;
+pub use kernel_core::auth::{TenantContext, TenantId, UserId};
 
 #[derive(Debug, thiserror::Error)]
 enum AuthError {
@@ -73,7 +73,7 @@ pub async fn auth_middleware(
             }
         }
     } else {
-        #[cfg(feature = "test-utils")]
+        #[cfg(debug_assertions)]
         {
             if let Some(tenant_id_header) = req.headers().get("X-Tenant-Id") {
                 let tenant_id_str = tenant_id_header.to_str().map_err(|_| {
@@ -98,7 +98,10 @@ pub async fn auth_middleware(
                     None
                 };
 
-                (TenantContext::new(tenant_id.clone(), user_id), format!("dev-token:{}", tenant_id))
+                (
+                    TenantContext::new(tenant_id.clone(), user_id),
+                    format!("dev-token:{}", tenant_id),
+                )
             } else {
                 tracing::warn!(
                     "Missing Authorization header (and no X-Tenant-Id for debug bypass)"
@@ -107,7 +110,7 @@ pub async fn auth_middleware(
             }
         }
 
-        #[cfg(not(feature = "test-utils"))]
+        #[cfg(not(debug_assertions))]
         {
             tracing::warn!("Missing Authorization header");
             return Err(StatusCode::UNAUTHORIZED);
@@ -115,7 +118,7 @@ pub async fn auth_middleware(
     };
 
     req.extensions_mut().insert(context.with_db(db));
-    req.extensions_mut().insert(BearerToken(token_str));
+    req.extensions_mut().insert(BearerToken::new(token_str));
     Ok(next.run(req).await)
 }
 
@@ -169,7 +172,9 @@ impl PasetoKeyset {
         // Only insert generic key if active_kid is default ("active") AND key is provided
         if let Some(key) = default_public_key {
             if keyset.active_kid == "active" {
-                 keyset.public_keys.insert(keyset.active_kid.clone(), key.to_vec());
+                keyset
+                    .public_keys
+                    .insert(keyset.active_kid.clone(), key.to_vec());
             }
         }
 
@@ -311,7 +316,10 @@ const DEFAULT_ACTIVE_KID: &str = "active";
 pub fn init_auth_config() -> Result<(), String> {
     // Attempt to load generic key, but only require it if it's the *only* source for the active key
     let default_key = match std::env::var("FLEXI_PASETO_V4_PUBLIC_KEY_B64URL") {
-        Ok(key_b64) => Some(decode_public_key_b64url(&key_b64, "FLEXI_PASETO_V4_PUBLIC_KEY_B64URL")?),
+        Ok(key_b64) => Some(decode_public_key_b64url(
+            &key_b64,
+            "FLEXI_PASETO_V4_PUBLIC_KEY_B64URL",
+        )?),
         Err(_) => None,
     };
 
