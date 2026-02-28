@@ -2,6 +2,7 @@ use serde::de::{self, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
 use std::fmt;
 use std::str::FromStr;
+use std::future::Future;
 
 macro_rules! define_principal_id {
     ($type_name:ident, $label:literal, $reserve_system:expr) => {
@@ -124,8 +125,17 @@ impl TenantContext {
             .ok_or_else(|| "Database connection not attached to context".to_string())
     }
 
-    pub fn db_arc(&self) -> Option<&std::sync::Arc<sea_orm::DatabaseConnection>> {
-        self.db.as_ref()
+    /// Provides a safe, scoped way to reuse the `Arc<DatabaseConnection>`
+    /// inside another context (e.g., when deriving a `SystemTenantContext`).
+    /// This avoids exposing the raw `Arc` to callers, preventing unintended sharing.
+    pub async fn with_system_context<F, Fut, R>(&self, f: F) -> Result<R, String>
+    where
+        F: FnOnce(TenantContext) -> Fut,
+        Fut: Future<Output = R>,
+    {
+        let db_arc = self.db.as_ref().ok_or_else(|| "Database connection not attached to context".to_string())?;
+        let sys_ctx = TenantContext::from(SystemTenantContext).with_db(db_arc.clone());
+        Ok(f(sys_ctx).await)
     }
 }
 

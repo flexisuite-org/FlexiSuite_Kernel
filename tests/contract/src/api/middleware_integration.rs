@@ -26,14 +26,11 @@ use kernel_data::entities::permission;
 use uuid::Uuid;
 use chrono::Utc;
 
-fn default_mock_db() -> sea_orm::DatabaseConnection {
-    // Default mock that allows up to 20 successful authorizations and permission checks.
-    // This covers most integration tests that expect success.
-    // Tests expecting failure or specific DB behavior should use setup_app_with_db.
+pub fn mock_db_with_budget(auth_calls: usize) -> sea_orm::DatabaseConnection {
     let mut exec_results = Vec::new();
     let mut query_results: Vec<Vec<permission::Model>> = Vec::new();
 
-    for _ in 0..20 {
+    for _ in 0..auth_calls {
         // authorize_tenant
         exec_results.push(MockExecResult {
             last_insert_id: 0,
@@ -78,6 +75,13 @@ fn default_mock_db() -> sea_orm::DatabaseConnection {
         .append_exec_results(exec_results)
         .append_query_results(query_results)
         .into_connection()
+}
+
+fn default_mock_db() -> sea_orm::DatabaseConnection {
+    // Default mock that allows up to 20 successful authorizations and permission checks.
+    // This covers most integration tests that expect success.
+    // Tests expecting failure or specific DB behavior should use setup_app_with_db.
+    mock_db_with_budget(20)
 }
 
 pub async fn setup_app() -> axum::Router {

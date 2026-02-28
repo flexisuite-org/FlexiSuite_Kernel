@@ -71,9 +71,10 @@ async fn test_key_revocation_slo() {
     let res = app.clone().oneshot(req).await.unwrap();
 
     // Strict assertion for contract suite
-    assert!(
-        res.status() == StatusCode::UNAUTHORIZED || res.status() == StatusCode::FORBIDDEN,
-        "Revoked key must be rejected (got {})",
+    assert_eq!(
+        res.status(),
+        StatusCode::UNAUTHORIZED,
+        "Revoked key must be strictly rejected with 401 UNAUTHORIZED (got {})",
         res.status()
     );
 
