@@ -16,7 +16,7 @@ jobs:
       pull-requests: write
       issues: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           # Improved checkout logic for forks and dispatch events
           ref: ${{ github.event.pull_request.head.sha || github.event.inputs.pr_number && format('refs/pull/{0}/head', github.event.inputs.pr_number) || github.ref }}
