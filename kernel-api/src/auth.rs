@@ -14,7 +14,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-pub use kernel_core::auth::{SystemTenantContext, TenantContext, TenantId, UserId};
+pub use kernel_core::auth::{TenantContext, TenantId, UserId};
 
 #[derive(Debug)]
 enum AuthError {
