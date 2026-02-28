@@ -34,11 +34,8 @@ pub async fn load_permissions_middleware(
         .extensions()
         .get::<TenantContext>()
         .cloned()
-        .ok_or_else(|| {
-            StatusCode::UNAUTHORIZED
-        })?;
+        .ok_or(StatusCode::UNAUTHORIZED)?;
 
-<<<<<<< HEAD
     // Manually extract BearerToken to avoid 500 on missing extension
     let token_ext = req
         .extensions()
@@ -49,36 +46,20 @@ pub async fn load_permissions_middleware(
     // We need a DB connection to fetch permissions
     let db = match ctx.db() {
         Ok(db) => db,
-=======
-    match ctx.db() {
-        Ok(_) => { }
->>>>>>> 2c0f4d2 (feat: Implement Row-Level Security (RLS) authorization for RBAC queries using `TenantContext` and enable `test-utils` for authentication-related testing.)
-        Err(_) => {
-            return Err(StatusCode::INTERNAL_SERVER_ERROR);
-        }
-    };
-
-<<<<<<< HEAD
-<<<<<<< HEAD
-=======
-    let db_arc = match ctx.db_arc() {
-        Ok(arc) => arc,
         Err(_) => {
             warn!("Database connection missing in TenantContext");
             return Err(StatusCode::INTERNAL_SERVER_ERROR);
         }
     };
 
->>>>>>> c278171 (fix: Address CodeRabbit review issues - dead variables, error handling, compilation error)
     // Note: user_id existence is checked inside RBACRepository::get_user_permissions
     // via TenantContext, but we can fast-fail here if needed.
     if ctx.user_id().is_none() {
         // Fail closed if user_id is missing (unauthenticated or service account not allowed here)
         warn!("User ID missing in context for RBAC protected route");
-        return Err(StatusCode::FORBIDDEN);
+        return Err(StatusCode::UNAUTHORIZED);
     }
 
-<<<<<<< HEAD
     // Branching logic for tokens (Requirement 3)
     let mut use_incoming_as_db_token = false;
     if incoming_token.starts_with("v2:") {
@@ -118,24 +99,6 @@ pub async fn load_permissions_middleware(
                 error!("Failed to obtain system context for token generation: {}", e);
                 return Err(StatusCode::INTERNAL_SERVER_ERROR);
             }
-=======
-    // The incoming token might be V4 (PASETO) which is verified by auth_middleware.
-    // However, the DB function `authorize_tenant` currently only accepts V2 (HMAC) tokens.
-    // We bridge this gap by generating a short-lived V2 token for the DB session using a System Context.
-    // In production, we assume kernel-api has access to the system keys (via DB connection).
-    let sys_ctx = TenantContext::from(SystemTenantContext).with_db(db_arc);
-    // TODO: implement Redis cache — see ISSUE-1234
-    let db_token = match KeyManager::generate_tenant_token(&sys_ctx, ctx.tenant_id()).await {
-        Ok(t) => t,
-        Err(e) => {
-             // Log sanitized error
-             match e {
-                 kernel_core::auth::KeyManagerError::Unauthorized(_) => error!("Failed to generate DB session token: Unauthorized"),
-                 kernel_core::auth::KeyManagerError::DbError(_) => error!("Failed to generate DB session token: Database error"),
-                 _ => error!("Failed to generate DB session token: Internal error"),
-             }
-             return Err(StatusCode::INTERNAL_SERVER_ERROR);
->>>>>>> c278171 (fix: Address CodeRabbit review issues - dead variables, error handling, compilation error)
         }
     };
 
@@ -164,29 +127,6 @@ pub async fn load_permissions_middleware(
                 kernel_data::DataError::DbError(_) => error!("Failed to fetch permissions: Database error"),
                 _ => error!("Failed to fetch permissions: Internal error"),
             }
-=======
-    if ctx.user_id().is_none() {
-        req.extensions_mut()
-            .insert(UserPermissions(HashSet::new()));
-        return Ok(next.run(req).await);
-    }
-
-    // Generate a temporary tenant token for RLS authorization
-    let token = match kernel_core::auth::KeyManager::generate_tenant_token(&ctx, ctx.tenant_id()).await {
-        Ok(t) => t,
-        Err(e) => {
-            warn!("Failed to generate tenant token for RBAC: {}", e);
-            return Err(StatusCode::INTERNAL_SERVER_ERROR);
-        }
-    };
-
-    let ctx_with_token = ctx.with_token(token);
-
-    let permissions_list = match RBACRepository::get_user_permissions(&ctx_with_token).await {
-        Ok(perms) => perms,
-        Err(e) => {
-            warn!("Failed to fetch permissions: {}", e);
->>>>>>> 2c0f4d2 (feat: Implement Row-Level Security (RLS) authorization for RBAC queries using `TenantContext` and enable `test-utils` for authentication-related testing.)
             return Err(StatusCode::INTERNAL_SERVER_ERROR);
         }
     };
