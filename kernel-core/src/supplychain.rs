@@ -150,10 +150,12 @@ pub fn verify_break_glass(
     now: u64,
 ) -> VerificationResult {
     if !ctx.enabled {
+        metrics::counter!("verification_result", "result" => "BreakGlassDisabled").increment(1);
         return VerificationResult::BreakGlassDisabled;
     }
     // Strict Expiry: now >= expiry means expired
     if now >= ctx.expiry_ts {
+        metrics::counter!("verification_result", "result" => "BreakGlassExpired").increment(1);
         return VerificationResult::BreakGlassExpired;
     }
 
@@ -161,20 +163,29 @@ pub fn verify_break_glass(
     match &ctx.scope_tenant_id {
         Some(scope_tid) => {
             if scope_tid != tenant_id {
+                metrics::counter!("verification_result", "result" => "BreakGlassScopeMismatch").increment(1);
                 return VerificationResult::BreakGlassScopeMismatch;
             }
         }
-        None => return VerificationResult::BreakGlassScopeMissing,
+        None => {
+            metrics::counter!("verification_result", "result" => "BreakGlassScopeMissing").increment(1);
+            return VerificationResult::BreakGlassScopeMissing;
+        }
     }
 
     match &ctx.scope_digest {
         Some(scope_dig) => {
             if scope_dig != digest {
+                metrics::counter!("verification_result", "result" => "BreakGlassScopeMismatch").increment(1);
                 return VerificationResult::BreakGlassScopeMismatch;
             }
         }
-        None => return VerificationResult::BreakGlassScopeMissing,
+        None => {
+            metrics::counter!("verification_result", "result" => "BreakGlassScopeMissing").increment(1);
+            return VerificationResult::BreakGlassScopeMissing;
+        }
     }
 
+    metrics::counter!("verification_result", "result" => "Ok").increment(1);
     VerificationResult::Ok
 }

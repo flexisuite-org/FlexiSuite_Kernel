@@ -33,31 +33,31 @@ mod tests {
             kid: "active".to_string(),
             status: KeyStatus::Active,
             retired_at: None,
-            public_key: vec![],
+            public_key: [0u8; 32],
         };
         let key_revoked = TrustedKey {
             kid: "revoked".to_string(),
             status: KeyStatus::Revoked,
             retired_at: None,
-            public_key: vec![],
+            public_key: [0u8; 32],
         };
         let key_retired_ok = TrustedKey {
             kid: "active".to_string(),
             status: KeyStatus::Retired,
             retired_at: Some(retired_at_ok),
-            public_key: vec![],
+            public_key: [0u8; 32],
         };
         let key_retired_fail = TrustedKey {
             kid: "active".to_string(),
             status: KeyStatus::Retired,
             retired_at: Some(retired_at_fail),
-            public_key: vec![],
+            public_key: [0u8; 32],
         };
         let key_next = TrustedKey {
             kid: "active".to_string(),
             status: KeyStatus::Next,
             retired_at: None,
-            public_key: vec![],
+            public_key: [0u8; 32],
         };
 
         assert!(matches!(
@@ -93,7 +93,7 @@ mod tests {
             kid: "wrong".to_string(),
             status: KeyStatus::Active,
             retired_at: None,
-            public_key: vec![],
+            public_key: [0u8; 32],
         };
         assert!(matches!(
             verify_manifest(&manifest_ok, &key_wrong, "sha256-456", now),

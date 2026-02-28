@@ -1,10 +1,10 @@
 use axum::{
     extract::Request,
     http::StatusCode,
-    middleware::{self, Next},
+    middleware::Next,
     response::Response,
 };
-use kernel_core::auth::{KeyManager, SystemTenantContext};
+use kernel_core::auth::{KeyManager};
 use kernel_data::{RBACRepository, TenantContext, with_tenant_tx};
 use std::collections::HashSet;
 use std::future::Future;
@@ -68,13 +68,14 @@ pub async fn load_permissions_middleware(
     // We trust that `auth_middleware` has already validated the user's identity/token.
     // `KeyManager` uses system-level keys to mint a new token that satisfies the DB's `authorize_tenant` check.
     // This token is short-lived and strictly scoped to the already-authenticated `tenant_id`.
-    let db_arc = ctx.db_arc().cloned().ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
-    let sys_ctx = TenantContext::from(SystemTenantContext).with_db(db_arc);
-    // TODO: optimization - cache this token in Redis to avoid signing overhead on every request.
-    // See: https://github.com/flexisuite-org/FlexiSuite_Kernel/issues/70
-    let db_token = match KeyManager::generate_tenant_token(&sys_ctx, ctx.tenant_id()).await {
-        Ok(t) => t,
-        Err(e) => {
+
+    // Use safe scoped method to get system context
+    let ctx_for_closure = ctx.clone();
+    let db_token = match ctx.with_system_context(|sys_ctx| async move {
+        KeyManager::generate_tenant_token(&sys_ctx, ctx_for_closure.tenant_id()).await
+    }).await {
+        Ok(Ok(t)) => t,
+        Ok(Err(e)) => {
              // Log sanitized error
              match e {
                  kernel_core::auth::KeyManagerError::Unauthorized(_) => {
@@ -85,6 +86,9 @@ pub async fn load_permissions_middleware(
                  _ => error!("Failed to generate DB session token: Internal error"),
              }
              return Err(StatusCode::INTERNAL_SERVER_ERROR);
+        },
+        Err(_) => {
+            return Err(StatusCode::INTERNAL_SERVER_ERROR);
         }
     };
 
