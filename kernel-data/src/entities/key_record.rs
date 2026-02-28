@@ -88,11 +88,11 @@ impl From<&Model> for KeyRecordDto {
             algorithm: value.algorithm.clone(),
             public_bytes: value.public_bytes.clone(),
             state: value.state.to_value(),
-            created_at: value.created_at.clone(),
-            activated_at: value.activated_at.clone(),
-            retired_at: value.retired_at.clone(),
-            revoked_at: value.revoked_at.clone(),
-            expires_at: value.expires_at.clone(),
+            created_at: value.created_at,
+            activated_at: value.activated_at,
+            retired_at: value.retired_at,
+            revoked_at: value.revoked_at,
+            expires_at: value.expires_at,
         }
     }
 }

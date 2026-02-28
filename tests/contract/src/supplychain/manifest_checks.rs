@@ -1,8 +1,7 @@
 #[cfg(test)]
 mod tests {
     use kernel_core::supplychain::{
-        BreakGlassContext, KeyStatus, Manifest, TrustedKey, VerificationResult, verify_break_glass,
-        verify_manifest,
+        BreakGlassContext, VerificationResult, verify_break_glass,
     };
 
     #[test]

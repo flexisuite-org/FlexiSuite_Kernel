@@ -36,7 +36,7 @@ async fn test_rbac_middleware_allow() {
     let mock_permission = permission::Model {
         id: perm_id,
         tenant_id: tenant_id.to_string(),
-        role_id: role_id,
+        role_id,
         resource: "test".to_string(),
         action: "read".to_string(),
         created_at: now.into(),

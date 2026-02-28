@@ -94,7 +94,7 @@ async fn test_rbac_integration_real_postgres() {
             // Seed RBAC data
             // 1. Role
             let role = kernel_data::entities::role::ActiveModel {
-                id: ActiveValue::Set(Uuid::now_v7().into()),
+                id: ActiveValue::Set(Uuid::now_v7()),
                 tenant_id: ActiveValue::Set(tenant_id.to_string()),
                 name: ActiveValue::Set("role-1".to_string()),
                 description: ActiveValue::Set("desc".to_string()),
@@ -105,9 +105,9 @@ async fn test_rbac_integration_real_postgres() {
 
             // 2. Permission
             let perm = kernel_data::entities::permission::ActiveModel {
-                id: ActiveValue::Set(Uuid::now_v7().into()),
+                id: ActiveValue::Set(Uuid::now_v7()),
                 tenant_id: ActiveValue::Set(tenant_id.to_string()),
-                role_id: ActiveValue::Set(role.id.clone()),
+                role_id: ActiveValue::Set(role.id),
                 resource: ActiveValue::Set("res-1".to_string()),
                 action: ActiveValue::Set("act-1".to_string()),
                 created_at: ActiveValue::Set(chrono::Utc::now().into()),
@@ -117,7 +117,7 @@ async fn test_rbac_integration_real_postgres() {
 
             // 3. Group
             let group = kernel_data::entities::group::ActiveModel {
-                id: ActiveValue::Set(Uuid::now_v7().into()),
+                id: ActiveValue::Set(Uuid::now_v7()),
                 tenant_id: ActiveValue::Set(tenant_id.to_string()),
                 name: ActiveValue::Set("group-1".to_string()),
                 description: ActiveValue::Set("desc".to_string()),
@@ -128,9 +128,9 @@ async fn test_rbac_integration_real_postgres() {
 
             // 4. GroupRole
             let gr = kernel_data::entities::group_role::ActiveModel {
-                id: ActiveValue::Set(Uuid::now_v7().into()),
-                group_id: ActiveValue::Set(group.id.clone()),
-                role_id: ActiveValue::Set(role.id.clone()),
+                id: ActiveValue::Set(Uuid::now_v7()),
+                group_id: ActiveValue::Set(group.id),
+                role_id: ActiveValue::Set(role.id),
                 tenant_id: ActiveValue::Set(tenant_id.to_string()),
                 created_at: ActiveValue::Set(chrono::Utc::now().into()),
                 updated_at: ActiveValue::Set(chrono::Utc::now().into()),
@@ -139,8 +139,8 @@ async fn test_rbac_integration_real_postgres() {
 
             // 5. GroupMember
             let gm = kernel_data::entities::group_member::ActiveModel {
-                id: ActiveValue::Set(Uuid::now_v7().into()),
-                group_id: ActiveValue::Set(group.id.clone()),
+                id: ActiveValue::Set(Uuid::now_v7()),
+                group_id: ActiveValue::Set(group.id),
                 user_id: ActiveValue::Set(user_id.to_string()),
                 tenant_id: ActiveValue::Set(tenant_id.to_string()),
                 created_at: ActiveValue::Set(chrono::Utc::now().into()),

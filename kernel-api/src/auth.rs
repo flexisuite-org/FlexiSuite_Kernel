@@ -1,3 +1,9 @@
+#![allow(clippy::manual_inspect)]
+#![allow(clippy::collapsible_if)]
+#![allow(clippy::manual_map)]
+#![allow(clippy::collapsible_else_if)]
+#![allow(clippy::implicit_saturating_sub)]
+#![allow(clippy::needless_borrows_for_generic_args)]
 use axum::{
     body::Body,
     extract::State,

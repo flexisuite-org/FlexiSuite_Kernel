@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 use sea_orm::{ConnectionTrait, DatabaseConnection, DbBackend, Statement};
 
 /// A test-only helper that wraps `DatabaseConnection` to perform administrative
