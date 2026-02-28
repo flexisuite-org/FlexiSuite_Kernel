@@ -33,12 +33,6 @@ ed25519-dalek = { workspace = true }
 hex = "0.4"
 rand = "0.8"
 
-[dev-dependencies]
-kernel-data = { path = "../kernel-data", features = ["test-utils"] }
-ed25519-dalek = { workspace = true }
-hex = "0.4"
-rand = "0.8"
-
 [features]
 default = []
 test-utils = ["kernel-data/test-utils"]

@@ -115,7 +115,7 @@ pub async fn auth_middleware(
     };
 
     req.extensions_mut().insert(context.with_db(db));
-    req.extensions_mut().insert(BearerToken::new(token_str));
+    req.extensions_mut().insert(BearerToken(token_str));
     Ok(next.run(req).await)
 }
 

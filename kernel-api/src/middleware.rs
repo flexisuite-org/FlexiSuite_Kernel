@@ -1855,6 +1855,10 @@ fn sha256_hex(input: &[u8]) -> String {
     hex
 }
 
+fn append_sha256_hex(input: &[u8], output: &mut String) {
+    output.push_str(&sha256_hex(input));
+}
+
 fn current_unix_timestamp_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
