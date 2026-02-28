@@ -6,7 +6,7 @@ pub struct Manifest {
     pub kid: String,
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum KeyStatus {
     Active,
     Next,
@@ -35,6 +35,7 @@ pub struct BreakGlassContext {
     pub expiry_ts: u64,
 }
 
+#[derive(Debug, Clone)]
 pub struct TrustedKey {
     pub kid: String,
     pub status: KeyStatus,

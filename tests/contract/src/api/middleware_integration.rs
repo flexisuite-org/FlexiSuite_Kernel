@@ -22,23 +22,37 @@ use serde_json::Value;
 use tower::ServiceExt;
 
 use sea_orm::MockExecResult;
-use kernel_data::entities::permission;
+use kernel_data::entities::{key_record, permission};
 use uuid::Uuid;
 use chrono::Utc;
 
 pub fn mock_db_with_budget(auth_calls: usize) -> sea_orm::DatabaseConnection {
-    let mut exec_results = Vec::new();
-    let mut query_results: Vec<Vec<permission::Model>> = Vec::new();
+    let mut db = MockDatabase::new(DatabaseBackend::Postgres);
 
     for _ in 0..auth_calls {
-        // authorize_tenant
-        exec_results.push(MockExecResult {
+        let now = Utc::now();
+        let hmac_key = key_record::Model {
+            kid: "hmac-key-1".to_string(),
+            key_type: key_record::KeyType::Hmac,
+            algorithm: "HS256".to_string(),
+            secret_bytes: Some(vec![0u8; 32]),
+            public_bytes: None,
+            state: key_record::KeyState::Active,
+            created_at: now.into(),
+            activated_at: Some(now.into()),
+            retired_at: None,
+            revoked_at: None,
+            expires_at: None,
+        };
+
+        // 1) KeyManager::get_active_key
+        db = db.append_query_results([[hmac_key]]);
+        // 2) flexi.authorize_tenant
+        db = db.append_exec_results([MockExecResult {
             last_insert_id: 0,
             rows_affected: 1,
-        });
-
-        // get_user_permissions
-        let now = Utc::now();
+        }]);
+        // 3) RBACRepository::get_user_permissions
         let perms = vec![
             permission::Model {
                 id: Uuid::new_v4(),
@@ -68,13 +82,10 @@ pub fn mock_db_with_budget(auth_calls: usize) -> sea_orm::DatabaseConnection {
                 updated_at: now.into(),
             },
         ];
-        query_results.push(perms);
+        db = db.append_query_results([perms]);
     }
 
-    MockDatabase::new(DatabaseBackend::Postgres)
-        .append_exec_results(exec_results)
-        .append_query_results(query_results)
-        .into_connection()
+    db.into_connection()
 }
 
 fn default_mock_db() -> sea_orm::DatabaseConnection {

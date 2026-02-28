@@ -37,10 +37,11 @@ pub async fn load_permissions_middleware(
         .ok_or(StatusCode::UNAUTHORIZED)?;
 
     // Manually extract BearerToken to avoid 500 on missing extension
-    let _token_ext = req
+    let token_ext = req
         .extensions()
         .get::<BearerToken>()
         .ok_or(StatusCode::UNAUTHORIZED)?;
+    let incoming_token = &token_ext.0;
 
     // We need a DB connection to fetch permissions
     let db = match ctx.db() {
@@ -59,37 +60,45 @@ pub async fn load_permissions_middleware(
         return Err(StatusCode::UNAUTHORIZED);
     }
 
-    // The incoming token might be V4 (PASETO) which is verified by auth_middleware.
-    // However, the DB function `authorize_tenant` currently only accepts V2 (HMAC) tokens.
-    // We bridge this gap by generating a short-lived V2 token for the DB session using a System Context.
-    // In production, we assume kernel-api has access to the system keys (via DB connection).
-    //
-    // SECURITY: This is a deliberate privilege escalation.
-    // We trust that `auth_middleware` has already validated the user's identity/token.
-    // `KeyManager` uses system-level keys to mint a new token that satisfies the DB's `authorize_tenant` check.
-    // This token is short-lived and strictly scoped to the already-authenticated `tenant_id`.
+    // Branching logic for tokens (Requirement 3)
+    let mut use_incoming_as_db_token = false;
+    if incoming_token.starts_with("v2:") {
+        use_incoming_as_db_token = true;
+    }
+    #[cfg(feature = "test-utils")]
+    if incoming_token.starts_with("dev-token:") {
+        use_incoming_as_db_token = true;
+    }
 
-    // Use safe scoped method to get system context
-    let ctx_for_closure = ctx.clone();
-    let db_token = match ctx.with_system_context(|sys_ctx| async move {
-        KeyManager::generate_tenant_token(&sys_ctx, ctx_for_closure.tenant_id()).await
-    }).await {
-        Ok(Ok(t)) => t,
-        Ok(Err(e)) => {
-             // Log sanitized error
-             match e {
-                 kernel_core::auth::KeyManagerError::Unauthorized(_) => {
-                     error!("Failed to generate DB session token: Unauthorized");
-                     return Err(StatusCode::FORBIDDEN);
+    let db_token = if use_incoming_as_db_token {
+        incoming_token.clone()
+    } else {
+        // Bridge V4 -> V2
+        let ctx_for_closure = ctx.clone();
+        match ctx.with_system_context(|sys_ctx| async move {
+            KeyManager::generate_tenant_token(&sys_ctx, ctx_for_closure.tenant_id()).await
+        }).await {
+            Ok(Ok(t)) => t,
+            Ok(Err(e)) => {
+                 // Log sanitized error
+                 match e {
+                     kernel_core::auth::KeyManagerError::Unauthorized(_) => {
+                         error!("Failed to generate DB session token: Unauthorized");
+                         return Err(StatusCode::FORBIDDEN);
+                     }
+                     kernel_core::auth::KeyManagerError::NoActiveKey(t) => {
+                         warn!("Failed to generate DB session token: No active key for type {}", t);
+                         return Err(StatusCode::SERVICE_UNAVAILABLE);
+                     }
+                     kernel_core::auth::KeyManagerError::DbError(_) => error!("Failed to generate DB session token: Database error"),
+                     _ => error!("Failed to generate DB session token: Internal error"),
                  }
-                 kernel_core::auth::KeyManagerError::DbError(_) => error!("Failed to generate DB session token: Database error"),
-                 _ => error!("Failed to generate DB session token: Internal error"),
-             }
-             return Err(StatusCode::INTERNAL_SERVER_ERROR);
-        },
-        Err(e) => {
-            error!("Failed to obtain system context for token generation: {}", e);
-            return Err(StatusCode::INTERNAL_SERVER_ERROR);
+                 return Err(StatusCode::INTERNAL_SERVER_ERROR);
+            },
+            Err(e) => {
+                error!("Failed to obtain system context for token generation: {}", e);
+                return Err(StatusCode::INTERNAL_SERVER_ERROR);
+            }
         }
     };
 
