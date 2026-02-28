@@ -1,9 +1,11 @@
 use crate::api::middleware_integration::setup_app;
 use crate::auth::helpers::setup;
-// generate_token is only used in non-debug builds; generate_token_with_claims is used in all builds
-#[cfg(not(debug_assertions))]
+// generate_token_with_claims is always needed for tests that need specific tenant/user claims.
+// generate_token is only used when dev-auth feature is NOT enabled (real Bearer token path).
+// When dev-auth is enabled, tests use X-Tenant-Id/X-User-Id debug headers instead.
+#[cfg(not(feature = "dev-auth"))]
 use crate::auth::helpers::{generate_token, generate_token_with_claims};
-#[cfg(debug_assertions)]
+#[cfg(feature = "dev-auth")]
 use crate::auth::helpers::generate_token_with_claims;
 use axum::{
     body::Body,
@@ -20,12 +22,12 @@ async fn test_security_headers_present_on_ok_201() {
         .uri("/test")
         .method("POST")
         .header("Idempotency-Key", "sec-test-201");
-    #[cfg(debug_assertions)]
+    #[cfg(feature = "dev-auth")]
     {
         builder = builder.header("X-Tenant-Id", "tenant-1");
         builder = builder.header("X-User-Id", "user-1");
     }
-    #[cfg(not(debug_assertions))]
+    #[cfg(not(feature = "dev-auth"))]
     {
         let token = generate_token(true);
         builder = builder.header("Authorization", format!("Bearer {token}"));
@@ -60,7 +62,10 @@ async fn test_security_headers_present_on_403_forbidden() {
     setup();
     let app = setup_app().await;
 
-    // Reserved tenant_id "system" is rejected by TenantId validation in auth flow.
+    // Test that reserved tenant_id "system" is rejected via real token validation.
+    // We use generate_token_with_claims (PASETO) instead of dev headers (X-Tenant-Id)
+    // because we need to exercise the actual TenantId validation logic in the auth flow,
+    // not the debug bypass path that skips validation.
     let token = generate_token_with_claims(true, Some("active"), "system", Some("user_123"));
     let req = Request::builder()
         .uri("/test")
@@ -82,12 +87,12 @@ async fn test_security_headers_present_on_404_not_found() {
     let app = setup_app().await;
 
     let mut builder = Request::builder().uri("/nonexistent-route").method("GET");
-    #[cfg(debug_assertions)]
+    #[cfg(feature = "dev-auth")]
     {
         builder = builder.header("X-Tenant-Id", "tenant-1");
         builder = builder.header("X-User-Id", "user-1");
     }
-    #[cfg(not(debug_assertions))]
+    #[cfg(not(feature = "dev-auth"))]
     {
         let token = generate_token(true);
         builder = builder.header("Authorization", format!("Bearer {token}"));
