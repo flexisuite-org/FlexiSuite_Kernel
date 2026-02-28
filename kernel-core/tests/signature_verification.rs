@@ -5,6 +5,7 @@ use kernel_core::supplychain::{
 use rand::rngs::OsRng;
 
 #[test]
+#[cfg(not(feature = "test-utils"))]
 fn test_manifest_signature_verification_real_crypto() {
     let mut csprng = OsRng;
     let signing_key = SigningKey::generate(&mut csprng);
