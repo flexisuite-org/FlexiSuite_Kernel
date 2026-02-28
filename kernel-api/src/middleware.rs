@@ -439,13 +439,18 @@ impl RedisIdempotencyStore {
     }
 
     fn format_key(key: &IdempotencyScopeKey) -> String {
-        let tenant_hash = sha256_hex(key.tenant_id.as_str().as_bytes());
-        let canonical_target_hash = sha256_hex(key.canonical_target.as_bytes());
-        let idempotency_key_hash = sha256_hex(key.idempotency_key.as_bytes());
-        format!(
-            "idemp:v3:{}:{}:{}:{}",
-            tenant_hash, key.method, canonical_target_hash, idempotency_key_hash
-        )
+        // idemp:v3:<tenant_hash>:<method>:<target_hash>:<key_hash>
+        // 9 chars prefix + 64*3 hashes + method + colons
+        let mut s = String::with_capacity(256 + key.method.len());
+        s.push_str("idemp:v3:");
+        append_sha256_hex(key.tenant_id.as_str().as_bytes(), &mut s);
+        s.push(':');
+        s.push_str(&key.method);
+        s.push(':');
+        append_sha256_hex(key.canonical_target.as_bytes(), &mut s);
+        s.push(':');
+        append_sha256_hex(key.idempotency_key.as_bytes(), &mut s);
+        s
     }
 
     fn channel_name(redis_key: &str) -> String {
@@ -1005,9 +1010,12 @@ impl RedisActionStore {
     }
 
     fn format_key(tenant_id: &str, action_id: &str) -> String {
-        let tenant_hash = sha256_hex(tenant_id.as_bytes());
-        let action_hash = sha256_hex(action_id.as_bytes());
-        format!("action:{}:{}", tenant_hash, action_hash)
+        let mut s = String::with_capacity(7 + 64 + 1 + 64);
+        s.push_str("action:");
+        append_sha256_hex(tenant_id.as_bytes(), &mut s);
+        s.push(':');
+        append_sha256_hex(action_id.as_bytes(), &mut s);
+        s
     }
 }
 
@@ -1254,25 +1262,21 @@ impl RedisQuotaStore {
                 let q = tenant_override
                     .and_then(|o| o.tenant_budget)
                     .unwrap_or(self.quota.tenant_budget);
-                let tenant_hash = sha256_hex(tenant_id_str.as_bytes());
-                Some((
-                    format!("quota:{{global}}:tenant:{}:cpu", tenant_hash),
-                    q.rate,
-                    q.capacity,
-                    q.cost,
-                ))
+                let mut s = String::with_capacity(128);
+                s.push_str("quota:{global}:tenant:");
+                append_sha256_hex(tenant_id_str.as_bytes(), &mut s);
+                s.push_str(":cpu");
+                Some((s, q.rate, q.capacity, q.cost))
             }
             QuotaLayer::ApiRateLimit => {
                 let q = tenant_override
                     .and_then(|o| o.api_rate_limit)
                     .unwrap_or(self.quota.api_rate_limit);
-                let tenant_hash = sha256_hex(tenant_id_str.as_bytes());
-                Some((
-                    format!("quota:{{global}}:tenant:{}:api", tenant_hash),
-                    q.rate,
-                    q.capacity,
-                    q.cost,
-                ))
+                let mut s = String::with_capacity(128);
+                s.push_str("quota:{global}:tenant:");
+                append_sha256_hex(tenant_id_str.as_bytes(), &mut s);
+                s.push_str(":api");
+                Some((s, q.rate, q.capacity, q.cost))
             }
             QuotaLayer::CircuitBreaker => None,
         }
@@ -1842,19 +1846,22 @@ pub async fn idempotency_middleware(req: Request<Body>, next: Next) -> Result<Re
 }
 
 fn compute_body_hash(body: &[u8]) -> String {
-    sha256_hex(body)
+    let mut s = String::with_capacity(64);
+    append_sha256_hex(body, &mut s);
+    s
 }
 
-fn sha256_hex(input: &[u8]) -> String {
+fn append_sha256_hex(input: &[u8], output: &mut String) {
     let result = digest(&SHA256, input);
     let bytes = result.as_ref();
-    let mut hex = String::with_capacity(bytes.len() * 2);
+    output.reserve(bytes.len() * 2);
+    // SAFETY: We only append ASCII characters [0-9a-f], maintaining UTF-8 validity.
+    let vec = unsafe { output.as_mut_vec() };
     const HEX_CHARS: &[u8] = b"0123456789abcdef";
     for &b in bytes {
-        hex.push(HEX_CHARS[(b >> 4) as usize] as char);
-        hex.push(HEX_CHARS[(b & 0xf) as usize] as char);
+        vec.push(HEX_CHARS[(b >> 4) as usize]);
+        vec.push(HEX_CHARS[(b & 0xf) as usize]);
     }
-    hex
 }
 
 fn current_unix_timestamp_ms() -> u64 {
@@ -2067,18 +2074,24 @@ mod tests {
         // echo -n "hello world" | sha256sum
         // b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9
         let expected = "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9";
-        assert_eq!(sha256_hex(input), expected);
+        let mut s = String::new();
+        append_sha256_hex(input, &mut s);
+        assert_eq!(s, expected);
 
         let input_empty = b"";
         // echo -n "" | sha256sum
         // e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
         let expected_empty = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
-        assert_eq!(sha256_hex(input_empty), expected_empty);
+        let mut s = String::new();
+        append_sha256_hex(input_empty, &mut s);
+        assert_eq!(s, expected_empty);
 
         // FIPS 180-4 / NIST SHA-256 test vector "abc"
         // https://csrc.nist.gov/projects/cryptographic-algorithm-validation-program/secure-hashing
         let input_nist = b"abc";
         let expected_nist = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
-        assert_eq!(sha256_hex(input_nist), expected_nist);
+        let mut s = String::new();
+        append_sha256_hex(input_nist, &mut s);
+        assert_eq!(s, expected_nist);
     }
 }
