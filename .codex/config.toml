@@ -7,4 +7,4 @@ max_depth = 2
 
 [agents.minimax]
 description = "Decompose complex feature requirements, convert UI designs into code, and autonomously create comprehensive refactoring plans."
-config_file = ".codex/agents/minimax.toml"
+config_file = "agents/minimax.toml"
