@@ -424,6 +424,14 @@ mod tests {
         TenantContext::new(TenantId::new("tenant_test").expect("valid tenant id"), None)
     }
 
+    /// Creates a mock TrustProvider for unit tests.
+    ///
+    /// Note: When the `test-utils` feature is enabled, `verify_manifest` returns Ok for any
+    /// signature except "invalid", and uses zeroed public keys from this provider. This means
+    /// unit tests in this file do NOT exercise real ED25519 signature verification.
+    /// For actual crypto verification, run the integration tests:
+    ///   - `kernel-core/tests/signature_verification.rs`
+    ///   - `tests/contract/src/supplychain/manifest_checks.rs`
     fn mock_trust_provider() -> Arc<dyn TrustProvider> {
         let mut provider = MockTrustProvider::new();
         provider.add_key(TrustedKey {

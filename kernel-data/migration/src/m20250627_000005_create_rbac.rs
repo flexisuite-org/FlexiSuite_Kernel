@@ -3,6 +3,18 @@ use sea_orm_migration::prelude::*;
 #[derive(DeriveMigrationName)]
 pub struct Migration;
 
+/// RBAC Migration - Phase 2 Implementation
+///
+/// This migration enforces tenant isolation via composite primary keys and Row Level Security (RLS).
+/// It implements the security contract documented in docs/implementation_plan.md:
+///   - Phase 2 RBAC scope (lines 819-834): Roles and permissions with tenant-scoped access control
+///   - RLS fail-closed guarantee (line 127): All tenant-scoped tables must have RLS policies
+///   - Composite key tenant isolation contract (line 98): (id, tenant_id) composite keys ensure
+///     rows are always isolated to a single tenant even without RLS
+///
+/// The tables created here (roles, permissions, groups, group_members, group_roles) use composite
+/// primary keys and the `flexi.authorized_tenant_id()` function to guarantee tenant isolation.
+
 #[async_trait::async_trait]
 impl MigrationTrait for Migration {
     async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {

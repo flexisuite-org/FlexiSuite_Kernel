@@ -26,6 +26,11 @@ use kernel_data::entities::permission;
 use sea_orm::MockExecResult;
 use uuid::Uuid;
 
+/// Creates a mock database with the specified number of authorization budget entries.
+///
+/// Note: The mock permissions are hardcoded with `tenant_id = "tenant-1"`.
+/// Tests using this mock MUST set the `X-Tenant-Id` header to "tenant-1" in debug builds
+/// for the RBAC checks to work correctly.
 pub fn mock_db_with_budget(auth_calls: usize) -> sea_orm::DatabaseConnection {
     let mut db = MockDatabase::new(DatabaseBackend::Postgres);
 
@@ -348,14 +353,24 @@ async fn test_quota_evaluation_priority_and_clipping() {
         builder = builder.header("Authorization", "Bearer invalid");
     }
 
+    // Use a unique idempotency key to ensure this test always triggers fresh quota evaluation.
+    // The key includes the feature flag to ensure isolation between test-utils and non-test-utils runs.
+    #[cfg(feature = "test-utils")]
+    let idempotency_key = "quota-test-key-test-utils";
+    #[cfg(not(feature = "test-utils"))]
+    let idempotency_key = "quota-test-key-no-test-utils";
+
     let req = builder
         .header("X-Mock-Quota-System", "true")
         .header("X-Mock-Quota-Tenant", "true")
-        .header("Idempotency-Key", "quota-test-key")
+        .header("Idempotency-Key", idempotency_key)
         .body(Body::empty())
         .unwrap();
     let res = app.clone().oneshot(req).await.unwrap();
 
+    // When test-utils is enabled, the mock quota middleware returns 503 SERVICE_UNAVAILABLE
+    // because the X-Mock-Quota-System header triggers a simulated quota violation.
+    // Without test-utils, the mock quota headers are ignored and the request succeeds with 201.
     #[cfg(all(debug_assertions, feature = "test-utils"))]
     {
         assert_eq!(res.status(), StatusCode::SERVICE_UNAVAILABLE);

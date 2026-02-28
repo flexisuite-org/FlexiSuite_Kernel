@@ -1,7 +1,10 @@
 use crate::api::middleware_integration::setup_app;
+use crate::auth::helpers::setup;
+// generate_token is only used in non-debug builds; generate_token_with_claims is used in all builds
 #[cfg(not(debug_assertions))]
-use crate::auth::helpers::generate_token;
-use crate::auth::helpers::{generate_token_with_claims, setup};
+use crate::auth::helpers::{generate_token, generate_token_with_claims};
+#[cfg(debug_assertions)]
+use crate::auth::helpers::generate_token_with_claims;
 use axum::{
     body::Body,
     http::{Request, StatusCode},
