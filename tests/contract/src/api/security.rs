@@ -5,8 +5,6 @@ use crate::auth::helpers::setup;
 // When dev-auth is enabled, tests use X-Tenant-Id/X-User-Id debug headers instead.
 #[cfg(not(feature = "dev-auth"))]
 use crate::auth::helpers::{generate_token, generate_token_with_claims};
-#[cfg(feature = "dev-auth")]
-use crate::auth::helpers::generate_token_with_claims;
 use axum::{
     body::Body,
     http::{Request, StatusCode},
@@ -110,9 +108,10 @@ async fn test_security_headers_present_on_401_unauthorized() {
 }
 
 #[tokio::test]
+#[cfg(not(feature = "dev-auth"))]
 async fn test_security_headers_present_on_403_forbidden() {
     setup();
-    let app = setup_app().await;
+    let app = setup_app_for_bearer_tests().await;
 
     // Test that reserved tenant_id "system" is rejected via real token validation.
     // We use generate_token_with_claims (PASETO) instead of dev headers (X-Tenant-Id)
