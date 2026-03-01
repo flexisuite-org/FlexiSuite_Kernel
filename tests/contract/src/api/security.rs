@@ -1,4 +1,4 @@
-use crate::api::middleware_integration::setup_app;
+use crate::api::middleware_integration::{setup_app, setup_app_with_db};
 use crate::auth::helpers::setup;
 // generate_token_with_claims is always needed for tests that need specific tenant/user claims.
 // generate_token is only used when dev-auth feature is NOT enabled (real Bearer token path).
@@ -11,11 +11,62 @@ use axum::{
     body::Body,
     http::{Request, StatusCode},
 };
+#[cfg(not(feature = "dev-auth"))]
+use chrono::Utc;
+#[cfg(not(feature = "dev-auth"))]
+use kernel_data::entities::{key_record, permission};
+#[cfg(not(feature = "dev-auth"))]
+use sea_orm::{MockDatabase, MockExecResult};
 use tower::ServiceExt;
+#[cfg(not(feature = "dev-auth"))]
+use uuid::Uuid;
+
+#[cfg(not(feature = "dev-auth"))]
+async fn setup_app_for_bearer_tests() -> axum::Router {
+    let now = Utc::now();
+
+    let hmac_key = key_record::Model {
+        kid: "hmac-key-1".to_string(),
+        key_type: key_record::KeyType::Hmac,
+        algorithm: "HS256".to_string(),
+        secret_bytes: Some(vec![0u8; 32]),
+        public_bytes: None,
+        state: key_record::KeyState::Active,
+        created_at: now.into(),
+        activated_at: Some(now.into()),
+        retired_at: None,
+        revoked_at: None,
+        expires_at: None,
+    };
+
+    let perm = permission::Model {
+        id: Uuid::new_v4(),
+        tenant_id: "tenant_001".to_string(),
+        role_id: Uuid::new_v4(),
+        resource: "test".to_string(),
+        action: "write".to_string(),
+        created_at: now.into(),
+        updated_at: now.into(),
+    };
+
+    let db = MockDatabase::new(sea_orm::DatabaseBackend::Postgres)
+        .append_query_results([[hmac_key]])
+        .append_exec_results([MockExecResult {
+            last_insert_id: 0,
+            rows_affected: 1,
+        }])
+        .append_query_results([[perm]])
+        .into_connection();
+
+    setup_app_with_db(db).await
+}
 
 #[tokio::test]
 async fn test_security_headers_present_on_ok_201() {
     setup();
+    #[cfg(not(feature = "dev-auth"))]
+    let app = setup_app_for_bearer_tests().await;
+    #[cfg(feature = "dev-auth")]
     let app = setup_app().await;
 
     let mut builder = Request::builder()
@@ -85,6 +136,9 @@ async fn test_security_headers_present_on_403_forbidden() {
 #[tokio::test]
 async fn test_security_headers_present_on_404_not_found() {
     setup();
+    #[cfg(not(feature = "dev-auth"))]
+    let app = setup_app_for_bearer_tests().await;
+    #[cfg(feature = "dev-auth")]
     let app = setup_app().await;
 
     let mut builder = Request::builder().uri("/nonexistent-route").method("GET");
