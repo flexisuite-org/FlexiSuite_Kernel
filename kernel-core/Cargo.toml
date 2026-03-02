@@ -32,6 +32,8 @@ kernel-data = { path = "../kernel-data", features = ["test-utils"] }
 ed25519-dalek = { workspace = true }
 hex = "0.4"
 rand = "0.8"
+tokio = { version = "1", features = ["macros", "rt"] }
+sea-orm = { version = "1.1.19", features = ["mock"] }
 
 [features]
 default = []

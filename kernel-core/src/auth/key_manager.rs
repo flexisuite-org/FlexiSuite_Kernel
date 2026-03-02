@@ -344,21 +344,43 @@ impl KeyManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use kernel_data::auth_context::SystemTenantContext;
+    use sea_orm::{DatabaseBackend, MockDatabase};
+    use std::sync::Arc;
 
-    #[test]
-    fn test_generate_tenant_token_has_v2_format_with_kid() {
-        // REQ-TENANT-TOKEN-V2: Verify that generated tenant tokens are v2-compliant with kid
-        // This is a unit test for the token format, actual generation requires async DB access
-        // Token format: v2:{kid}:{timestamp}:{nonce}:{tenant_id}:{signature}
-        let sample_token = "v2:hmac-key-1:1234567890:uuid-nonce:tenant_001:abcdef1234567890";
-        
-        let parts: Vec<&str> = sample_token.split(':').collect();
+    #[tokio::test]
+    async fn test_generate_tenant_token_has_v2_format_with_kid() {
+        let mocked_kid = "hmac-key-mocked-01";
+        let mock_active_key = Model {
+            kid: mocked_kid.to_string(),
+            key_type: KeyType::Hmac,
+            algorithm: "HS256".to_string(),
+            secret_bytes: Some(vec![0x11; 32]),
+            public_bytes: None,
+            state: KeyState::Active,
+            created_at: Utc::now().into(),
+            activated_at: Some(Utc::now().into()),
+            retired_at: None,
+            revoked_at: None,
+            expires_at: None,
+        };
+        let mock_db = MockDatabase::new(DatabaseBackend::Postgres)
+            // Mock KeyManager::get_active_key_internal -> KeyRecord::find().one(db)
+            .append_query_results(vec![vec![mock_active_key]])
+            .into_connection();
+        let ctx = TenantContext::from(SystemTenantContext).with_db(Arc::new(mock_db));
+        let tenant_id = TenantId::new("tenant_001").expect("tenant_id should be valid");
+
+        let token = KeyManager::generate_tenant_token(&ctx, &tenant_id)
+            .await
+            .expect("token generation should succeed");
+        let parts: Vec<&str> = token.split(':').collect();
         assert_eq!(parts.len(), 6, "v2 token must have 6 colon-separated parts");
         assert_eq!(parts[0], "v2", "version must be v2");
-        assert!(!parts[1].trim().is_empty(), "kid must not be empty (REQ-TENANT-TOKEN-V2)");
+        assert_eq!(parts[1], mocked_kid, "kid must match active key from mocked DB");
         assert!(!parts[2].is_empty(), "timestamp must not be empty");
         assert!(!parts[3].is_empty(), "nonce must not be empty");
-        assert!(!parts[4].is_empty(), "tenant_id must not be empty");
+        assert_eq!(parts[4], tenant_id.as_str(), "tenant_id must match input");
         assert!(!parts[5].is_empty(), "signature must not be empty");
     }
 }

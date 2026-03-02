@@ -61,20 +61,11 @@ async fn main() {
             Some(kernel_api::auth::start_kid_revocation_listener(redis_client))
         }
         Err(e) => {
-            // Log and continue: the 30-second polling fallback inside the listener
-            // still satisfies the SLO if Redis is temporarily unavailable at startup.
-            // If Redis becomes available later, restart the process to activate pub/sub.
-            tracing::warn!(
-                "KID revocation listener: failed to open Redis client ({}). ",
+            tracing::error!(
+                "KID revocation listener initialization failed: {}. Aborting startup.",
                 e
             );
-            tracing::warn!(
-                "Runtime KID revocation via pub/sub is DISABLED. ",
-            );
-            tracing::warn!(
-                "Only FLEXI_PASETO_V4_REVOKED_KIDS env-var will be checked (no SLO guarantee)."
-            );
-            None
+            std::process::exit(1);
         }
     };
     let (app, _cleanup_handle) = build_app(config, db.clone()).await.unwrap_or_else(|e| {
