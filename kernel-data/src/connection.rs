@@ -205,7 +205,7 @@ fn parse_tenant_from_token(token: &str) -> Option<String> {
         }
     }
 
-    #[cfg(debug_assertions)]
+    #[cfg(any(test, feature = "test-utils"))]
     if let Some(tenant_id) = token.strip_prefix("dev-token:") {
         // Special dev token for tests/debug with tenant ID
         if !tenant_id.is_empty() {
@@ -213,7 +213,7 @@ fn parse_tenant_from_token(token: &str) -> Option<String> {
         }
     }
 
-    #[cfg(not(debug_assertions))]
+    #[cfg(not(any(test, feature = "test-utils")))]
     if token.starts_with("dev-token:") {
         warn!("dev-token encountered in non-test build; parsing rejected");
         return None;
@@ -334,7 +334,7 @@ mod tests {
         assert_eq!(parse_tenant_from_token(token), None);
     }
 
-    #[cfg(debug_assertions)]
+    #[cfg(any(test, feature = "test-utils"))]
     mod test_utils_parsing {
         use super::*;
         use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -378,7 +378,7 @@ mod tests {
         }
     }
 
-    #[cfg(not(debug_assertions))]
+    #[cfg(not(any(test, feature = "test-utils")))]
     mod production_parsing {
         use super::*;
 

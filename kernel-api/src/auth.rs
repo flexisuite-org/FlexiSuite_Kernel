@@ -44,7 +44,7 @@ struct PasetoFooter {
     kid: String,
 }
 
-/// REQ-AUTH-SOURCE: Extract TenantContext from token or dev-headers (if debug)
+/// REQ-AUTH-SOURCE: Extract TenantContext from token or dev-headers (test-only build path)
 pub async fn auth_middleware(
     State(db): State<Arc<DatabaseConnection>>,
     mut req: Request<Body>,
@@ -73,7 +73,7 @@ pub async fn auth_middleware(
             }
         }
     } else {
-        #[cfg(debug_assertions)]
+        #[cfg(any(test, feature = "test-utils"))]
         {
             if let Some(tenant_id_header) = req.headers().get("X-Tenant-Id") {
                 let tenant_id_str = tenant_id_header.to_str().map_err(|_| {
@@ -110,7 +110,7 @@ pub async fn auth_middleware(
             }
         }
 
-        #[cfg(not(debug_assertions))]
+        #[cfg(not(any(test, feature = "test-utils")))]
         {
             tracing::warn!("Missing Authorization header");
             return Err(StatusCode::UNAUTHORIZED);
