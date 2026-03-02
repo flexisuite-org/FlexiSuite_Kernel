@@ -163,3 +163,191 @@ async fn test_rbac_middleware_503_on_no_active_key() {
     let res = app.oneshot(req).await.unwrap();
     assert_eq!(res.status(), StatusCode::SERVICE_UNAVAILABLE);
 }
+
+#[tokio::test]
+async fn test_rbac_rejects_v2_token_without_kid() {
+    // REQ-TENANT-TOKEN-V2: Tokens without kid MUST be rejected
+    let tenant_id = "tenant-1";
+    let user_id = "user-1";
+    // Malformed v2 token with empty kid field
+    let token_no_kid = "v2::1234567890:nonce:tenant-1:sig";
+
+    let db = MockDatabase::new(DatabaseBackend::Postgres).into_connection();
+
+    let app = axum::Router::new()
+        .route("/protected", axum::routing::get(|| async { "Allowed" }))
+        .layer(axum::middleware::from_fn(load_permissions_middleware))
+        .layer(axum::Extension(BearerToken::new(token_no_kid.to_string())))
+        .layer(axum::Extension(
+            TenantContext::new(
+                TenantId::new(tenant_id).unwrap(),
+                Some(UserId::new(user_id).unwrap()),
+            )
+            .with_db(Arc::new(db)),
+        ));
+
+    let req = Request::builder()
+        .uri("/protected")
+        .header("Authorization", format!("Bearer {}", token_no_kid))
+        .body(Body::empty())
+        .unwrap();
+
+    let res = app.oneshot(req).await.unwrap();
+    assert_eq!(
+        res.status(),
+        StatusCode::UNAUTHORIZED,
+        "Token without kid must be rejected (REQ-TENANT-TOKEN-V2)"
+    );
+}
+
+#[tokio::test]
+async fn test_rbac_rejects_v2_token_with_insufficient_parts() {
+    // REQ-TENANT-TOKEN-V2: Malformed v2 tokens MUST be rejected
+    let tenant_id = "tenant-1";
+    let user_id = "user-1";
+    // Invalid v2 token with only 3 parts
+    let token_malformed = "v2:kid:timestamp";
+
+    let db = MockDatabase::new(DatabaseBackend::Postgres).into_connection();
+
+    let app = axum::Router::new()
+        .route("/protected", axum::routing::get(|| async { "Allowed" }))
+        .layer(axum::middleware::from_fn(load_permissions_middleware))
+        .layer(axum::Extension(BearerToken::new(token_malformed.to_string())))
+        .layer(axum::Extension(
+            TenantContext::new(
+                TenantId::new(tenant_id).unwrap(),
+                Some(UserId::new(user_id).unwrap()),
+            )
+            .with_db(Arc::new(db)),
+        ));
+
+    let req = Request::builder()
+        .uri("/protected")
+        .header("Authorization", format!("Bearer {}", token_malformed))
+        .body(Body::empty())
+        .unwrap();
+
+    let res = app.oneshot(req).await.unwrap();
+    assert_eq!(
+        res.status(),
+        StatusCode::UNAUTHORIZED,
+        "Malformed v2 token must be rejected"
+    );
+}
+
+#[tokio::test]
+async fn test_rbac_accepts_v2_token_with_valid_kid() {
+    // REQ-TENANT-TOKEN-V2: Tokens with valid kid MUST be accepted
+    let tenant_id = "tenant-1";
+    let user_id = "user-1";
+    let token_with_kid = "v2:hmac-key-1:1234567890:uuid-nonce:tenant-1:abcdef1234";
+
+    let mock_permission = permission::Model {
+        id: Uuid::new_v4(),
+        tenant_id: tenant_id.to_string(),
+        role_id: Uuid::new_v4(),
+        resource: "test".to_string(),
+        action: "read".to_string(),
+        created_at: chrono::Utc::now().into(),
+        updated_at: chrono::Utc::now().into(),
+    };
+
+    let db = MockDatabase::new(DatabaseBackend::Postgres)
+        .append_exec_results(vec![sea_orm::MockExecResult {
+            last_insert_id: 0,
+            rows_affected: 1,
+        }]) // authorize_tenant
+        .append_query_results(vec![vec![mock_permission]]) // permissions query
+        .into_connection();
+
+    let app = axum::Router::new()
+        .route(
+            "/protected",
+            axum::routing::get(|| async { "Allowed" }).layer(axum::middleware::from_fn(
+                |req, next| require_permission("test:read", req, next),
+            )),
+        )
+        .layer(axum::middleware::from_fn(load_permissions_middleware))
+        .layer(axum::Extension(BearerToken::new(token_with_kid.to_string())))
+        .layer(axum::Extension(
+            TenantContext::new(
+                TenantId::new(tenant_id).unwrap(),
+                Some(UserId::new(user_id).unwrap()),
+            )
+            .with_db(Arc::new(db)),
+        ));
+
+    let req = Request::builder()
+        .uri("/protected")
+        .header("Authorization", format!("Bearer {}", token_with_kid))
+        .body(Body::empty())
+        .unwrap();
+
+    let res = app.oneshot(req).await.unwrap();
+    assert_eq!(
+        res.status(),
+        StatusCode::OK,
+        "Token with valid kid must be accepted (REQ-TENANT-TOKEN-V2)"
+    );
+}
+
+#[tokio::test]
+async fn test_rbac_fails_without_tenant_context() {
+    // Middleware ordering enforcement: load_permissions_middleware MUST fail without TenantContext
+    let token = "v2:kid:ts:nonce:tenant-1:sig";
+
+    let _db = MockDatabase::new(DatabaseBackend::Postgres).into_connection();
+
+    let app = axum::Router::new()
+        .route("/protected", axum::routing::get(|| async { "Allowed" }))
+        .layer(axum::middleware::from_fn(load_permissions_middleware))
+        // Missing TenantContext extension - simulates skipped authentication
+        .layer(axum::Extension(BearerToken::new(token.to_string())));
+
+    let req = Request::builder()
+        .uri("/protected")
+        .header("Authorization", format!("Bearer {}", token))
+        .body(Body::empty())
+        .unwrap();
+
+    let res = app.oneshot(req).await.unwrap();
+    assert_eq!(
+        res.status(),
+        StatusCode::UNAUTHORIZED,
+        "RBAC middleware must fail without TenantContext (authentication bypass protection)"
+    );
+}
+
+#[tokio::test]
+async fn test_rbac_fails_without_bearer_token() {
+    // Middleware ordering enforcement: load_permissions_middleware MUST fail without BearerToken
+    let tenant_id = "tenant-1";
+    let user_id = "user-1";
+
+    let db = MockDatabase::new(DatabaseBackend::Postgres).into_connection();
+
+    let app = axum::Router::new()
+        .route("/protected", axum::routing::get(|| async { "Allowed" }))
+        .layer(axum::middleware::from_fn(load_permissions_middleware))
+        // Missing BearerToken extension - simulates skipped authentication
+        .layer(axum::Extension(
+            TenantContext::new(
+                TenantId::new(tenant_id).unwrap(),
+                Some(UserId::new(user_id).unwrap()),
+            )
+            .with_db(Arc::new(db)),
+        ));
+
+    let req = Request::builder()
+        .uri("/protected")
+        .body(Body::empty())
+        .unwrap();
+
+    let res = app.oneshot(req).await.unwrap();
+    assert_eq!(
+        res.status(),
+        StatusCode::UNAUTHORIZED,
+        "RBAC middleware must fail without BearerToken (authentication bypass protection)"
+    );
+}
