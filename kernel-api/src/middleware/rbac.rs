@@ -1,11 +1,81 @@
+//! RBAC Middleware for FlexiSuite Kernel
+//!
+//! This module provides Role-Based Access Control (RBAC) middleware for protecting routes.
+//!
+//! # Middleware Ordering Requirements (CRITICAL)
+//!
+//! The RBAC middleware has strict ordering dependencies that MUST be enforced:
+//!
+//! 1. **Authentication Middleware** (MUST run first)
+//!    - Validates tokens and creates `TenantContext` with `tenant_id` and `user_id`
+//!    - Injects `BearerToken` extension
+//!    - Example: `extract_bearer_token_middleware`, `validate_token_middleware`
+//!
+//! 2. **load_permissions_middleware** (MUST run after authentication)
+//!    - Depends on: `TenantContext` (with user_id), `BearerToken`
+//!    - Loads user permissions from database
+//!    - Injects `UserPermissions` extension
+//!
+//! 3. **require_permission** (MUST run after load_permissions_middleware)
+//!    - Depends on: `UserPermissions`
+//!    - Enforces specific permission requirements
+//!
+//! ## Runtime Safety
+//!
+//! Missing dependencies are detected at runtime and return `401 UNAUTHORIZED`.
+//! However, misconfigured routes that skip authentication entirely will bypass
+//! permission checks. Always verify middleware ordering in route configuration.
+//!
+//! ## Example Usage
+//!
+//! ```rust,ignore
+//! use axum::{Router, routing::get, middleware::from_fn};
+//! use kernel_api::middleware::{
+//!     extract_bearer_token_middleware,
+//!     validate_token_middleware,
+//!     load_permissions_middleware,
+//!     require_permission_layer,
+//! };
+//!
+//! let app = Router::new()
+//!     .route("/api/data", get(handler))
+//!     // Step 3: Require specific permission
+//!     .layer(from_fn(require_permission_layer("data:read")))
+//!     // Step 2: Load permissions (depends on TenantContext + BearerToken)
+//!     .layer(from_fn(load_permissions_middleware))
+//!     // Step 1: Authentication (creates TenantContext + BearerToken)
+//!     .layer(from_fn(validate_token_middleware))
+//!     .layer(from_fn(extract_bearer_token_middleware));
+//! ```
+//!
 use crate::middleware::BearerToken;
 use axum::{extract::Request, http::StatusCode, middleware::Next, response::Response};
 use kernel_core::auth::KeyManager;
-use kernel_data::{RBACRepository, TenantContext, with_tenant_tx};
+use kernel_data::{AuthenticatedScoped, RBACRepository, TenantContext, with_tenant_tx};
 use std::collections::HashSet;
 use std::future::Future;
 use tracing::{error, warn};
 
+
+/// Validates that a v2 token has the required kid field.
+/// Token format: v2:{kid}:{timestamp}:{nonce}:{tenant_id}:{signature}
+/// REQ-TENANT-TOKEN-V2: kid MUST be required in v2 tokens.
+fn validate_v2_token_kid(token: &str) -> Result<(), StatusCode> {
+    let parts: Vec<&str> = token.split(':').collect();
+    if parts.len() != 6 {
+        error!("Invalid v2 token format: expected 6 parts, got {}", parts.len());
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+    
+    // parts[0] = "v2", parts[1] = kid
+    let kid = parts[1];
+    if kid.trim().is_empty() {
+        error!("v2 token missing required kid field (REQ-TENANT-TOKEN-V2)");
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+    
+    Ok(())
+}
 #[derive(Clone, Debug)]
 pub struct UserPermissions {
     inner: HashSet<String>,
@@ -58,6 +128,8 @@ pub async fn load_permissions_middleware(
     // Branching logic for tokens (Requirement 3)
     let mut use_incoming_as_db_token = false;
     if incoming_token.starts_with("v2:") {
+        // REQ-TENANT-TOKEN-V2: Validate that v2 token has required kid field
+        validate_v2_token_kid(incoming_token)?;
         use_incoming_as_db_token = true;
     }
     #[cfg(debug_assertions)]
@@ -109,13 +181,18 @@ pub async fn load_permissions_middleware(
     };
 
     // Execute within a tenant-scoped transaction to ensure RLS is active.
-    // RBACRepository now demands a TenantScoped connection.
-    let ctx_clone = ctx.clone();
+    // `AuthenticatedScoped::try_from_scoped` derives user_id directly from `scoped`,
+    // preventing any external user_id injection (user-impersonation-by-misuse).
     let permissions_result = with_tenant_tx(db, &ctx, &db_token, move |scoped| {
-        Box::pin(async move { RBACRepository::get_user_permissions(scoped, &ctx_clone).await })
+        Box::pin(async move {
+            let auth_scoped = AuthenticatedScoped::try_from_scoped(scoped)
+                .map_err(|_| kernel_data::DataError::ValidationError(
+                    "user_id missing in scoped context".to_string(),
+                ))?;
+            RBACRepository::get_user_permissions(&auth_scoped).await
+        })
     })
     .await;
-
     let permissions_list = match permissions_result {
         Ok(perms) => perms,
         Err(e) => {
@@ -126,9 +203,9 @@ pub async fn load_permissions_middleware(
                     return Err(StatusCode::FORBIDDEN);
                 }
                 kernel_data::DataError::ValidationError(_) => {
-                    error!("Failed to fetch permissions: Validation error");
-                    return Err(StatusCode::FORBIDDEN);
-                }
+                    error!("Failed to fetch permissions: Validation error (programming error)");
+                    return Err(StatusCode::INTERNAL_SERVER_ERROR);
+}
                 kernel_data::DataError::DbError(_) => {
                     error!("Failed to fetch permissions: Database error")
                 }

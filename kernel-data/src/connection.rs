@@ -239,6 +239,63 @@ fn parse_tenant_from_token(token: &str) -> Option<String> {
     Some(tenant_id.to_string())
 }
 
+/// A tenant-scoped connection that additionally guarantees an authenticated user.
+///
+/// Unlike [`TenantScoped<RawConnection>`], this type holds a *concrete* [`UserId`] obtained
+/// **after** the authentication middleware has already verified the token. It eliminates
+/// the dual-source-of-truth problem where callers previously had to pass both a
+/// `TenantScoped` handle (which carries `Option<UserId>`) and a separate `TenantContext`.
+///
+/// # Construction
+///
+/// Call [`AuthenticatedScoped::try_from_scoped`]. Construction succeeds only when
+/// `scoped.user_id` is `Some`, which is guaranteed by the `ctx.user_id().is_none()`
+/// fast-fail guard that runs in `load_permissions_middleware` before `with_tenant_tx`.
+/// The `user_id` is always derived from the same `TenantScoped` handle — no external
+/// `UserId` can be injected, preventing user-impersonation-by-misuse.
+pub struct AuthenticatedScoped<'a> {
+    scoped: &'a TenantScoped<RawConnection>,
+    user_id: crate::auth_context::UserId,
+}
+
+impl<'a> AuthenticatedScoped<'a> {
+    /// Construct an `AuthenticatedScoped` from a reference to an already-verified
+    /// `TenantScoped` connection.
+    ///
+    /// Returns `Err` if `scoped.user_id` is `None` (unauthenticated context).  The
+    /// `user_id` is always taken from `scoped` itself — callers cannot supply an
+    /// arbitrary `UserId`, which prevents user-impersonation-by-misuse.
+    ///
+    /// The lifetime `'a` ties this struct to the lifetime of `scoped`, which is exactly
+    /// what we need inside a `with_tenant_tx` closure where the transaction reference
+    /// is borrowed for the duration of the closure.
+    pub fn try_from_scoped(
+        scoped: &'a TenantScoped<RawConnection>,
+    ) -> Result<Self, crate::error::DataError> {
+        let user_id = scoped
+            .user_id
+            .clone()
+            .ok_or_else(|| {
+                crate::error::DataError::ValidationError(
+                    "AuthenticatedScoped requires a user_id in TenantScoped context".to_string(),
+                )
+            })?;
+        Ok(Self { scoped, user_id })
+    }
+
+    pub fn tenant_id(&self) -> &crate::auth_context::TenantId {
+        &self.scoped.tenant_id
+    }
+
+    pub fn user_id(&self) -> &crate::auth_context::UserId {
+        &self.user_id
+    }
+
+    pub fn txn(&self) -> &DatabaseTransaction {
+        self.scoped.txn()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
