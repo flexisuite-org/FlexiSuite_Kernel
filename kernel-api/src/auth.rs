@@ -209,6 +209,10 @@ fn mark_revoked_kids_saturated(source: &'static str, kid: &str) {
 }
 
 fn insert_dynamic_revoked_kid(raw_kid: &str, source: &'static str) {
+    if revoked_kids_saturated_flag().load(Ordering::SeqCst) {
+        return;
+    }
+
     let kid = raw_kid.trim().to_string();
     if kid.is_empty() {
         tracing::warn!(source = source, "KID revocation listener: empty payload ignored");
@@ -232,7 +236,9 @@ fn insert_dynamic_revoked_kid(raw_kid: &str, source: &'static str) {
 }
 
 pub fn is_auth_config_ready() -> bool {
-    PASETO_PUBLIC_KEY.get().is_some() && PASETO_KEYSET.get().is_some()
+    PASETO_PUBLIC_KEY.get().is_some()
+        && PASETO_KEYSET.get().is_some()
+        && !revoked_kids_saturated_flag().load(Ordering::SeqCst)
 }
 
 #[derive(Debug)]
@@ -1123,6 +1129,16 @@ mod tests {
                 verify_paseto_v4_public_from_env_token(&token),
                 Err(AuthError::Unauthorized)
             ));
+        });
+    }
+
+    #[test]
+    fn test_auth_config_not_ready_when_revocation_overlay_saturated() {
+        with_env_test_lock(|| {
+            let _ = setup_auth_runtime_test();
+            assert!(is_auth_config_ready());
+            mark_revoked_kids_saturated("test", "overflow-kid");
+            assert!(!is_auth_config_ready());
         });
     }
 }

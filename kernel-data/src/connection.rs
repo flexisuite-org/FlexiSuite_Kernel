@@ -1,11 +1,8 @@
 #![allow(clippy::items_after_test_module)]
 #![allow(clippy::collapsible_if)]
-#![allow(unused_imports)]
-use base64::Engine;
 
 use crate::auth_context::TenantContext;
 use crate::error::DataError;
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use futures::future::BoxFuture;
 use sea_orm::{
     ConnectionTrait, DatabaseConnection, DatabaseTransaction, DbBackend, DbErr, Statement,
