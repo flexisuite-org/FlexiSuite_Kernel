@@ -142,6 +142,7 @@ struct BoundedRevokedKids {
 enum RevokedKidInsertOutcome {
     Inserted,
     AlreadyPresent,
+    CapacityExceeded,
 }
 
 impl BoundedRevokedKids {
@@ -162,12 +163,8 @@ impl BoundedRevokedKids {
             return RevokedKidInsertOutcome::AlreadyPresent;
         }
 
-        while self.kids.len() >= self.max_entries {
-            if let Some(oldest) = self.order.pop_front() {
-                self.kids.remove(&oldest);
-            } else {
-                break;
-            }
+        if self.kids.len() >= self.max_entries {
+            return RevokedKidInsertOutcome::CapacityExceeded;
         }
         self.kids.insert(kid.clone());
         self.order.push_back(kid);
@@ -204,6 +201,14 @@ fn insert_dynamic_revoked_kid(raw_kid: &str, source: &'static str) {
         }
         RevokedKidInsertOutcome::Inserted => {
             tracing::info!(kid = %kid, source = source, "KID dynamically revoked");
+        }
+        RevokedKidInsertOutcome::CapacityExceeded => {
+            tracing::error!(
+                kid = %kid,
+                source = source,
+                capacity = MAX_DYNAMIC_REVOKED_KIDS,
+                "KID revocation overlay at capacity; dropping new revocation to fail closed for existing denylist"
+            );
         }
     }
 }
@@ -503,13 +508,35 @@ fn verify_paseto_v4_public_from_env_token(token: &str) -> Result<TenantContext, 
 /// The returned [`tokio::task::JoinHandle`] can be aborted to stop the task.
 pub fn start_kid_revocation_listener(client: redis::Client) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
+        fn poll_env_revocations() {
+            let fresh = parse_kid_csv_env("FLEXI_PASETO_V4_REVOKED_KIDS");
+            for kid in fresh {
+                insert_dynamic_revoked_kid(&kid, "env-poll");
+            }
+        }
+
+        async fn backoff_with_env_poll(poll_interval: &mut tokio::time::Interval) {
+            let backoff = tokio::time::Duration::from_secs(5);
+            let deadline = tokio::time::Instant::now() + backoff;
+            loop {
+                let now = tokio::time::Instant::now();
+                if now >= deadline {
+                    break;
+                }
+                let remaining = deadline - now;
+                tokio::select! {
+                    _ = tokio::time::sleep(remaining) => break,
+                    _ = poll_interval.tick() => {
+                        poll_env_revocations();
+                    }
+                }
+            }
+        }
+
         // Seed the override set with the static environment-variable list so that any
         // kids already in FLEXI_PASETO_V4_REVOKED_KIDS are immediately effective.
-        {
-            let env_kids = parse_kid_csv_env("FLEXI_PASETO_V4_REVOKED_KIDS");
-            for kid in env_kids {
-                insert_dynamic_revoked_kid(&kid, "startup-env-seed");
-            }
+        for kid in parse_kid_csv_env("FLEXI_PASETO_V4_REVOKED_KIDS") {
+            insert_dynamic_revoked_kid(&kid, "startup-env-seed");
         }
 
         let mut poll_interval = tokio::time::interval(std::time::Duration::from_secs(30));
@@ -521,13 +548,15 @@ pub fn start_kid_revocation_listener(client: redis::Client) -> tokio::task::Join
                     Ok(p) => break p,
                     Err(e) => {
                         tracing::warn!("KID revocation listener: pub/sub connect failed: {e}");
-                        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                        poll_env_revocations();
+                        backoff_with_env_poll(&mut poll_interval).await;
                     }
                 }
             };
             if let Err(e) = pubsub.subscribe("flexi:auth:kid_revoked").await {
                 tracing::warn!("KID revocation listener: subscribe failed: {e}");
-                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                poll_env_revocations();
+                backoff_with_env_poll(&mut poll_interval).await;
                 continue 'reconnect;
             }
             tracing::info!("KID revocation listener: subscribed to flexi:auth:kid_revoked");
@@ -538,10 +567,7 @@ pub fn start_kid_revocation_listener(client: redis::Client) -> tokio::task::Join
                 tokio::select! {
                     // Polling branch: refresh from env every 30 s.
                     _ = poll_interval.tick() => {
-                        let fresh = parse_kid_csv_env("FLEXI_PASETO_V4_REVOKED_KIDS");
-                        for kid in fresh {
-                            insert_dynamic_revoked_kid(&kid, "env-poll");
-                        }
+                        poll_env_revocations();
                     }
                     // Pub/Sub branch: react to real-time revocation events.
                     msg_opt = stream.next() => {
@@ -1011,7 +1037,7 @@ mod tests {
     }
 
     #[test]
-    fn test_bounded_revoked_kids_evicts_oldest_when_full() {
+    fn test_bounded_revoked_kids_rejects_new_entry_when_full() {
         let mut bounded = BoundedRevokedKids::new(2);
         assert!(matches!(
             bounded.insert("kid-1".to_string()),
@@ -1026,11 +1052,11 @@ mod tests {
 
         assert!(matches!(
             bounded.insert("kid-3".to_string()),
-            RevokedKidInsertOutcome::Inserted
+            RevokedKidInsertOutcome::CapacityExceeded
         ));
-        assert!(!bounded.contains("kid-1"));
+        assert!(bounded.contains("kid-1"));
         assert!(bounded.contains("kid-2"));
-        assert!(bounded.contains("kid-3"));
+        assert!(!bounded.contains("kid-3"));
     }
 
     #[test]

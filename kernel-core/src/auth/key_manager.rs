@@ -378,10 +378,24 @@ mod tests {
         assert_eq!(parts.len(), 6, "v2 token must have 6 colon-separated parts");
         assert_eq!(parts[0], "v2", "version must be v2");
         assert_eq!(parts[1], mocked_kid, "kid must match active key from mocked DB");
-        assert!(!parts[2].is_empty(), "timestamp must not be empty");
-        assert!(!parts[3].is_empty(), "nonce must not be empty");
+        assert!(
+            parts[2].parse::<u64>().is_ok(),
+            "timestamp must be valid epoch seconds"
+        );
+        assert!(
+            uuid::Uuid::parse_str(parts[3]).is_ok(),
+            "nonce must be a valid UUID"
+        );
         assert_eq!(parts[4], tenant_id.as_str(), "tenant_id must match input");
-        assert!(!parts[5].is_empty(), "signature must not be empty");
+        assert_eq!(
+            parts[5].len(),
+            64,
+            "signature must be 64 hex chars (HMAC-SHA256)"
+        );
+        assert!(
+            parts[5].chars().all(|c| c.is_ascii_hexdigit()),
+            "signature must be hex-encoded"
+        );
     }
 
     #[tokio::test]

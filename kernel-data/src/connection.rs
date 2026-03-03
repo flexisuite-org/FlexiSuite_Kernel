@@ -47,7 +47,7 @@ impl<C> TenantScoped<C> {
 
 impl TenantScoped<RawConnection> {
     #[cfg(not(feature = "test-utils"))]
-    pub(crate) fn txn(&self) -> &DatabaseTransaction {
+    fn txn(&self) -> &DatabaseTransaction {
         &self.inner.txn
     }
 
@@ -183,7 +183,11 @@ fn parse_tenant_from_token(token: &str) -> Option<String> {
     if token.starts_with("v4.public.") {
         use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
         let parts: Vec<&str> = token.split('.').collect();
-        if parts.len() >= 3 {
+        if parts.len() == 3
+            && !parts[0].is_empty()
+            && !parts[1].is_empty()
+            && !parts[2].is_empty()
+        {
             if let Ok(payload_bytes) = URL_SAFE_NO_PAD.decode(parts[2]) {
                 // PASETO v4.public payload format is "message || 64-byte Ed25519 signature".
                 // The parser must strip the last 64 bytes from the payload and then decode
@@ -335,6 +339,48 @@ mod tests {
     }
 
     #[cfg(feature = "test-utils")]
+    #[tokio::test]
+    async fn test_authenticated_scoped_rejects_missing_user_id() {
+        use sea_orm::TransactionTrait;
+        let scoped = TenantScoped::new(
+            RawConnection::new(
+                sea_orm::MockDatabase::new(sea_orm::DatabaseBackend::Postgres)
+                    .into_connection()
+                    .begin()
+                    .await
+                    .expect("begin mock tx"),
+            ),
+            crate::auth_context::TenantId::new("tenant-1").expect("valid tenant"),
+            None,
+        );
+        let result = AuthenticatedScoped::try_from_scoped(&scoped);
+        assert!(result.is_err());
+    }
+
+    #[cfg(feature = "test-utils")]
+    #[tokio::test]
+    async fn test_authenticated_scoped_accepts_present_user_id() {
+        use sea_orm::TransactionTrait;
+        let user_id = crate::auth_context::UserId::new("user-1").expect("valid user");
+        let scoped = TenantScoped::new(
+            RawConnection::new(
+                sea_orm::MockDatabase::new(sea_orm::DatabaseBackend::Postgres)
+                    .into_connection()
+                    .begin()
+                    .await
+                    .expect("begin mock tx"),
+            ),
+            crate::auth_context::TenantId::new("tenant-1").expect("valid tenant"),
+            Some(user_id.clone()),
+        );
+        let result = AuthenticatedScoped::try_from_scoped(&scoped);
+        assert!(result.is_ok());
+        let auth = result.expect("must create authenticated scoped");
+        assert_eq!(auth.tenant_id().as_str(), "tenant-1");
+        assert_eq!(auth.user_id().as_str(), user_id.as_str());
+    }
+
+    #[cfg(feature = "test-utils")]
     mod test_utils_parsing {
         use super::*;
         use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -359,7 +405,7 @@ mod tests {
             let mut full_payload = payload_bytes.to_vec();
             full_payload.extend_from_slice(&[0u8; 64]); // Mock signature
             let b64 = URL_SAFE_NO_PAD.encode(&full_payload);
-            let token = format!("v4.public.{}.footer", b64);
+            let token = format!("v4.public.{}", b64);
 
             assert_eq!(parse_tenant_from_token(&token), Some("t1".to_string()));
         }
@@ -372,7 +418,7 @@ mod tests {
             let mut full_payload = payload_bytes.to_vec();
             full_payload.extend_from_slice(&[0u8; 64]); // Mock signature
             let b64 = URL_SAFE_NO_PAD.encode(&full_payload);
-            let token = format!("v4.public.{}.footer", b64);
+            let token = format!("v4.public.{}", b64);
 
             assert_eq!(parse_tenant_from_token(&token), None);
         }

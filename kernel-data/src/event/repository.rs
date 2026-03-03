@@ -88,7 +88,7 @@ impl EventRepository {
         };
 
         outbox_model
-            .insert(db.txn())
+            .insert(&db.inner.txn)
             .await
             .map_err(|e| EventError::Store(format!("failed to insert into outbox: {}", e)))?;
 
@@ -123,7 +123,7 @@ impl EventRepository {
             last_seq: Set(1),
         })
         .on_conflict(on_conflict)
-        .exec_with_returning(db.txn())
+        .exec_with_returning(&db.inner.txn)
         .await?;
 
         Ok(model.last_seq)
@@ -146,7 +146,7 @@ impl EventRepository {
             last_seq: Set(1),
         })
         .on_conflict(on_conflict)
-        .exec_with_returning(db.txn())
+        .exec_with_returning(&db.inner.txn)
         .await?;
 
         Ok(model.last_seq)

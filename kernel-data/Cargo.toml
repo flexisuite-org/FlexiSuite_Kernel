@@ -39,4 +39,4 @@ testcontainers-modules = { version = "0.3", features = ["postgres"] }
 kernel-data = { path = ".", features = ["test-utils"] }
 
 [features]
-test-utils = []
+test-utils = ["sea-orm/mock"]
