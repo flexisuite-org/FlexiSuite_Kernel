@@ -43,23 +43,6 @@ impl<C> TenantScoped<C> {
 }
 
 impl TenantScoped<RawConnection> {
-    #[cfg(not(feature = "test-utils"))]
-    fn txn(&self) -> &DatabaseTransaction {
-        &self.inner.txn
-    }
-
-    /// # Safety
-    ///
-    /// This method exposes the raw database transaction, bypassing strict tenant scoping.
-    /// Callers MUST ensure that any operations performed using this transaction
-    /// are authorized via `flexi.authorize_tenant` or otherwise maintain tenant isolation invariants.
-    ///
-    /// This is exposed primarily for test seeding and special integration scenarios.
-    #[cfg(feature = "test-utils")]
-    pub(crate) fn txn(&self) -> &DatabaseTransaction {
-        &self.inner.txn
-    }
-
     pub(crate) async fn commit(self) -> Result<(), DbErr> {
         self.inner.txn.commit().await
     }
@@ -277,7 +260,7 @@ impl<'a> AuthenticatedScoped<'a> {
             .user_id
             .clone()
             .ok_or_else(|| {
-                crate::error::DataError::ValidationError(
+                crate::error::DataError::TenantAuthorizationFailed(
                     "AuthenticatedScoped requires a user_id in TenantScoped context".to_string(),
                 )
             })?;
@@ -290,10 +273,6 @@ impl<'a> AuthenticatedScoped<'a> {
 
     pub fn user_id(&self) -> &crate::auth_context::UserId {
         &self.user_id
-    }
-
-    pub(super) fn txn(&self) -> &DatabaseTransaction {
-        self.scoped.txn()
     }
 }
 

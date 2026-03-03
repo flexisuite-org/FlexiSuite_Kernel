@@ -1,4 +1,5 @@
-use crate::connection::AuthenticatedScoped;
+use crate::connection::{RawConnection, TenantScoped};
+use crate::auth_context::UserId;
 use crate::entities::{group, group_member, group_role, permission, role};
 use crate::error::DataError;
 use sea_orm::{ColumnTrait, EntityTrait, JoinType, QueryFilter, QuerySelect, RelationTrait};
@@ -9,7 +10,8 @@ impl RBACRepository {
     // TODO(perf): Add Redis caching for this query. This is a hot path (called on every request)
     // and involves a 5-table join. Tracking issue: https://github.com/flexisuite-org/FlexiSuite_Kernel/issues/99
     pub async fn get_user_permissions(
-        scoped: &AuthenticatedScoped<'_>,
+        scoped: &TenantScoped<RawConnection>,
+        user_id: &UserId,
     ) -> Result<Vec<permission::Model>, DataError> {
         // Tenant isolation is guaranteed structurally:
         //   1. The underlying transaction was opened via `with_tenant_tx`, which calls
@@ -20,10 +22,9 @@ impl RBACRepository {
         // Defense-in-depth: we additionally filter every table in the 5-table JOIN by
         // `tenant_id` so that a misconfigured RLS policy can never leak cross-tenant rows.
 
-        let tenant_id = scoped.tenant_id().as_str();
-        let user_id = scoped.user_id().as_str();
-
-        let db = scoped.txn();
+        let tenant_id = scoped.tenant_id.as_str();
+        let user_id = user_id.as_str();
+        let db = &scoped.inner.txn;
 
         let permissions = permission::Entity::find()
             .filter(permission::Column::TenantId.eq(tenant_id))
@@ -63,7 +64,10 @@ pub async fn seed_rbac_membership_for_tests(
         created_at: ActiveValue::Set(now),
         updated_at: ActiveValue::Set(now),
     };
-    let role = role.insert(scoped.txn()).await.map_err(DataError::DbError)?;
+    let role = role
+        .insert(&scoped.inner.txn)
+        .await
+        .map_err(DataError::DbError)?;
 
     let perm = permission::ActiveModel {
         id: ActiveValue::Set(Uuid::now_v7()),
@@ -74,7 +78,9 @@ pub async fn seed_rbac_membership_for_tests(
         created_at: ActiveValue::Set(now),
         updated_at: ActiveValue::Set(now),
     };
-    perm.insert(scoped.txn()).await.map_err(DataError::DbError)?;
+    perm.insert(&scoped.inner.txn)
+        .await
+        .map_err(DataError::DbError)?;
 
     let group = group::ActiveModel {
         id: ActiveValue::Set(Uuid::now_v7()),
@@ -84,7 +90,10 @@ pub async fn seed_rbac_membership_for_tests(
         created_at: ActiveValue::Set(now),
         updated_at: ActiveValue::Set(now),
     };
-    let group = group.insert(scoped.txn()).await.map_err(DataError::DbError)?;
+    let group = group
+        .insert(&scoped.inner.txn)
+        .await
+        .map_err(DataError::DbError)?;
 
     let gr = group_role::ActiveModel {
         id: ActiveValue::Set(Uuid::now_v7()),
@@ -94,7 +103,9 @@ pub async fn seed_rbac_membership_for_tests(
         created_at: ActiveValue::Set(now),
         updated_at: ActiveValue::Set(now),
     };
-    gr.insert(scoped.txn()).await.map_err(DataError::DbError)?;
+    gr.insert(&scoped.inner.txn)
+        .await
+        .map_err(DataError::DbError)?;
 
     let gm = group_member::ActiveModel {
         id: ActiveValue::Set(Uuid::now_v7()),
@@ -104,7 +115,9 @@ pub async fn seed_rbac_membership_for_tests(
         created_at: ActiveValue::Set(now),
         updated_at: ActiveValue::Set(now),
     };
-    gm.insert(scoped.txn()).await.map_err(DataError::DbError)?;
+    gm.insert(&scoped.inner.txn)
+        .await
+        .map_err(DataError::DbError)?;
 
     Ok(())
 }

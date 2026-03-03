@@ -186,10 +186,10 @@ pub async fn load_permissions_middleware(
     let permissions_result = with_tenant_tx(db, &ctx, &db_token, move |scoped| {
         Box::pin(async move {
             let auth_scoped = AuthenticatedScoped::try_from_scoped(scoped)
-                .map_err(|_| kernel_data::DataError::ValidationError(
+                .map_err(|_| kernel_data::DataError::TenantAuthorizationFailed(
                     "user_id missing in scoped context".to_string(),
                 ))?;
-            RBACRepository::get_user_permissions(&auth_scoped).await
+            RBACRepository::get_user_permissions(scoped, auth_scoped.user_id()).await
         })
     })
     .await;
