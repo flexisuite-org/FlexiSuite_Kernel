@@ -295,7 +295,7 @@ impl<'a> AuthenticatedScoped<'a> {
         &self.user_id
     }
 
-    pub(crate) fn txn(&self) -> &DatabaseTransaction {
+    pub(super) fn txn(&self) -> &DatabaseTransaction {
         self.scoped.txn()
     }
 }

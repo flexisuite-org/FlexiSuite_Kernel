@@ -14,8 +14,9 @@ use chrono::DateTime;
 use rusty_paseto::prelude::*;
 use sea_orm::DatabaseConnection;
 use serde::Deserialize;
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::middleware::BearerToken;
@@ -134,7 +135,6 @@ const MAX_DYNAMIC_REVOKED_KIDS: usize = 10_000;
 #[derive(Debug)]
 struct BoundedRevokedKids {
     kids: HashSet<String>,
-    order: VecDeque<String>,
     max_entries: usize,
 }
 
@@ -149,7 +149,6 @@ impl BoundedRevokedKids {
     fn new(max_entries: usize) -> Self {
         Self {
             kids: HashSet::new(),
-            order: VecDeque::new(),
             max_entries,
         }
     }
@@ -166,23 +165,47 @@ impl BoundedRevokedKids {
         if self.kids.len() >= self.max_entries {
             return RevokedKidInsertOutcome::CapacityExceeded;
         }
-        self.kids.insert(kid.clone());
-        self.order.push_back(kid);
+        self.kids.insert(kid);
         RevokedKidInsertOutcome::Inserted
     }
 
     #[cfg(test)]
     fn clear(&mut self) {
         self.kids.clear();
-        self.order.clear();
     }
 }
 
 static REVOKED_KIDS_OVERRIDE: OnceLock<std::sync::RwLock<BoundedRevokedKids>> = OnceLock::new();
+static REVOKED_KIDS_SATURATED: OnceLock<AtomicBool> = OnceLock::new();
 
 fn revoked_kids_override() -> &'static std::sync::RwLock<BoundedRevokedKids> {
     REVOKED_KIDS_OVERRIDE
         .get_or_init(|| std::sync::RwLock::new(BoundedRevokedKids::new(MAX_DYNAMIC_REVOKED_KIDS)))
+}
+
+fn revoked_kids_saturated_flag() -> &'static AtomicBool {
+    REVOKED_KIDS_SATURATED.get_or_init(|| AtomicBool::new(false))
+}
+
+fn mark_revoked_kids_saturated(source: &'static str, kid: &str) {
+    if revoked_kids_saturated_flag()
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_ok()
+    {
+        tracing::error!(
+            source = source,
+            kid = %kid,
+            capacity = MAX_DYNAMIC_REVOKED_KIDS,
+            "KID revocation overlay saturated; failing closed for all token verification until remediation"
+        );
+    } else {
+        tracing::error!(
+            source = source,
+            kid = %kid,
+            capacity = MAX_DYNAMIC_REVOKED_KIDS,
+            "KID revocation overlay remains saturated"
+        );
+    }
 }
 
 fn insert_dynamic_revoked_kid(raw_kid: &str, source: &'static str) {
@@ -203,12 +226,7 @@ fn insert_dynamic_revoked_kid(raw_kid: &str, source: &'static str) {
             tracing::info!(kid = %kid, source = source, "KID dynamically revoked");
         }
         RevokedKidInsertOutcome::CapacityExceeded => {
-            tracing::error!(
-                kid = %kid,
-                source = source,
-                capacity = MAX_DYNAMIC_REVOKED_KIDS,
-                "KID revocation overlay at capacity; dropping new revocation to fail closed for existing denylist"
-            );
+            mark_revoked_kids_saturated(source, &kid);
         }
     }
 }
@@ -459,6 +477,10 @@ fn init_auth_config_with_decoded_public_key_and_keyset(
 
 fn verify_paseto_v4_public_from_env_token(token: &str) -> Result<TenantContext, AuthError> {
     let keyset = PASETO_KEYSET.get().ok_or(AuthError::Unauthorized)?;
+    if revoked_kids_saturated_flag().load(Ordering::SeqCst) {
+        tracing::error!("KID revocation overlay saturated; rejecting token verification");
+        return Err(AuthError::Unauthorized);
+    }
 
     let (kid, footer_raw) = extract_footer_kid(token).inspect_err(|_e| {
         tracing::warn!("PASETO footer missing or invalid");
@@ -794,6 +816,7 @@ mod tests {
             .write()
             .unwrap_or_else(|e| e.into_inner());
         guard.clear();
+        revoked_kids_saturated_flag().store(false, Ordering::SeqCst);
 
         *private_key
     }
@@ -1085,6 +1108,21 @@ mod tests {
 
             insert_dynamic_revoked_kid("   ", "test-malformed-payload");
             assert!(verify_paseto_v4_public_from_env_token(&token).is_ok());
+        });
+    }
+
+    #[test]
+    fn test_dynamic_revocation_overlay_saturation_fails_closed() {
+        with_env_test_lock(|| {
+            let private_key = setup_auth_runtime_test();
+            let token = generate_test_paseto_token(private_key, "active");
+            assert!(verify_paseto_v4_public_from_env_token(&token).is_ok());
+
+            mark_revoked_kids_saturated("test", "overflow-kid");
+            assert!(matches!(
+                verify_paseto_v4_public_from_env_token(&token),
+                Err(AuthError::Unauthorized)
+            ));
         });
     }
 }
