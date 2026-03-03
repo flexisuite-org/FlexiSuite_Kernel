@@ -490,7 +490,8 @@ pub fn start_kid_revocation_listener(client: redis::Client) -> tokio::task::Join
                                         continue;
                                     }
                                 };
-                                if !kid.trim().is_empty() {
+                                let kid = kid.trim().to_string();
+                                if !kid.is_empty() {
                                     tracing::info!(kid = %kid, "KID dynamically revoked via Redis pub/sub");
                                     let mut guard = revoked_kids_override()
                                         .write()
