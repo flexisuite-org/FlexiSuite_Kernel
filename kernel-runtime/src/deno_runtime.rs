@@ -251,6 +251,13 @@ fn thread_cpu_time(clock_id: libc::clockid_t) -> Result<Duration, SandboxError> 
             "thread CPU clock returned negative timestamp".to_string(),
         ));
     }
+    // POSIX requires tv_nsec to be within [0, 999_999_999]. Validate defensively.
+    if ts.tv_nsec >= 1_000_000_000 {
+        return Err(SandboxError::RuntimeError(format!(
+            "thread CPU clock returned invalid nanoseconds: {}",
+            ts.tv_nsec
+        )));
+    }
     Ok(Duration::from_secs(ts.tv_sec as u64)
         .saturating_add(Duration::from_nanos(ts.tv_nsec as u64)))
 }
