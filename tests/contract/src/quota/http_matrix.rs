@@ -84,5 +84,18 @@ mod tests {
             retry_after_s: 15,
         };
         assert_eq!(v_sys_ok.headers()[0].1, "15");
+
+        // Case 4: CircuitBreaker must floor Retry-After to 1s
+        let v_cb_low = QuotaViolation {
+            layer: QuotaLayer::CircuitBreaker,
+            retry_after_s: 0,
+        };
+        assert_eq!(v_cb_low.headers()[0].1, "1");
+
+        let v_cb_high = QuotaViolation {
+            layer: QuotaLayer::CircuitBreaker,
+            retry_after_s: 120,
+        };
+        assert_eq!(v_cb_high.headers()[0].1, "120");
     }
 }

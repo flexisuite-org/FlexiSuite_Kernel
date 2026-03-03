@@ -3,199 +3,149 @@ use sea_orm_migration::prelude::*;
 #[derive(DeriveMigrationName)]
 pub struct Migration;
 
+/// RBAC Migration - Phase 2 Implementation
+///
+/// This migration enforces tenant isolation via composite primary keys and Row Level Security (RLS).
+/// It implements the security contract documented in docs/implementation_plan.md:
+///   - Phase 2 RBAC scope (lines 819-834): Roles and permissions with tenant-scoped access control
+///   - RLS fail-closed guarantee (line 127): All tenant-scoped tables must have RLS policies
+///   - Composite key tenant isolation contract (line 98): (id, tenant_id) composite keys ensure
+///     rows are always isolated to a single tenant even without RLS
+///
+/// The tables created here (roles, permissions, groups, group_members, group_roles) use composite
+/// primary keys and the `flexi.authorized_tenant_id()` function to guarantee tenant isolation.
+
 #[async_trait::async_trait]
 impl MigrationTrait for Migration {
     async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
         let db = crate::MigrationConnection::new(manager.get_connection());
 
-        // 1. Create roles table with unique constraint on (tenant_id, name)
+        // 1. Roles table
         db.execute_unprepared(
             r#"
             CREATE TABLE IF NOT EXISTS flexi.roles (
-                id UUID NOT NULL DEFAULT gen_random_uuid(),
+                id UUID NOT NULL,
                 tenant_id TEXT NOT NULL,
                 name TEXT NOT NULL,
-                description TEXT,
+                description TEXT NOT NULL,
                 created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                 updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                PRIMARY KEY (id),
-                UNIQUE (tenant_id, name),
-                CONSTRAINT uq_roles_tenant_id_id UNIQUE (tenant_id, id)
-            );
-            "#,
-        )
-        .await?;
-
-        // 2. Create groups table with unique constraint on (tenant_id, name)
-        db.execute_unprepared(
-            r#"
-            CREATE TABLE IF NOT EXISTS flexi.groups (
-                id UUID NOT NULL DEFAULT gen_random_uuid(),
-                tenant_id TEXT NOT NULL,
-                name TEXT NOT NULL,
-                description TEXT,
-                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                PRIMARY KEY (id),
+                PRIMARY KEY (id, tenant_id),
                 UNIQUE (tenant_id, name)
             );
             "#,
         )
         .await?;
 
-        // 3. Create permissions table with unique constraint on (tenant_id, role_id, resource, action)
+        // 2. Permissions table
         db.execute_unprepared(
             r#"
             CREATE TABLE IF NOT EXISTS flexi.permissions (
-                id UUID NOT NULL DEFAULT gen_random_uuid(),
+                id UUID NOT NULL,
                 tenant_id TEXT NOT NULL,
                 role_id UUID NOT NULL,
                 resource TEXT NOT NULL,
                 action TEXT NOT NULL,
                 created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                PRIMARY KEY (id),
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                PRIMARY KEY (id, tenant_id),
+                FOREIGN KEY (role_id, tenant_id) REFERENCES flexi.roles(id, tenant_id) ON DELETE CASCADE,
                 UNIQUE (tenant_id, role_id, resource, action)
             );
             "#,
-        )
-        .await?;
+        ).await?;
 
-        // 4. Create role_members table (many-to-many between roles and groups/users)
+        // 3. Groups table
         db.execute_unprepared(
             r#"
-            CREATE TABLE IF NOT EXISTS flexi.role_members (
-                id UUID NOT NULL DEFAULT gen_random_uuid(),
+            CREATE TABLE IF NOT EXISTS flexi.groups (
+                id UUID NOT NULL,
                 tenant_id TEXT NOT NULL,
-                role_id UUID NOT NULL,
-                member_type TEXT NOT NULL, -- 'user' or 'group'
-                member_id UUID NOT NULL,   -- references users.id or groups.id
+                name TEXT NOT NULL,
+                description TEXT NOT NULL,
                 created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                PRIMARY KEY (id),
-                CONSTRAINT ck_role_members_member_type CHECK (member_type IN ('user', 'group')),
-                UNIQUE (tenant_id, role_id, member_type, member_id)
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                PRIMARY KEY (id, tenant_id),
+                UNIQUE (tenant_id, name)
             );
             "#,
         )
         .await?;
 
-        // 5. Enable RLS for all tables
-        for table in &["roles", "groups", "permissions", "role_members"] {
+        // 4. Group Members table (User <-> Group)
+        db.execute_unprepared(
+            r#"
+            CREATE TABLE IF NOT EXISTS flexi.group_members (
+                id UUID NOT NULL,
+                tenant_id TEXT NOT NULL,
+                group_id UUID NOT NULL,
+                user_id TEXT NOT NULL,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                PRIMARY KEY (id, tenant_id),
+                FOREIGN KEY (group_id, tenant_id) REFERENCES flexi.groups(id, tenant_id) ON DELETE CASCADE,
+                UNIQUE (tenant_id, group_id, user_id)
+            );
+            "#,
+        ).await?;
+
+        // 5. Group Roles table (Group <-> Role)
+        db.execute_unprepared(
+            r#"
+            CREATE TABLE IF NOT EXISTS flexi.group_roles (
+                id UUID NOT NULL,
+                tenant_id TEXT NOT NULL,
+                group_id UUID NOT NULL,
+                role_id UUID NOT NULL,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                PRIMARY KEY (id, tenant_id),
+                FOREIGN KEY (group_id, tenant_id) REFERENCES flexi.groups(id, tenant_id) ON DELETE CASCADE,
+                FOREIGN KEY (role_id, tenant_id) REFERENCES flexi.roles(id, tenant_id) ON DELETE CASCADE,
+                UNIQUE (tenant_id, group_id, role_id)
+            );
+            "#,
+        ).await?;
+
+        // Enable RLS for all tables
+        let tables = [
+            "roles",
+            "permissions",
+            "groups",
+            "group_members",
+            "group_roles",
+        ];
+        for table in tables {
             db.execute_unprepared(&format!(
-                "ALTER TABLE flexi.{} ENABLE ROW LEVEL SECURITY;",
-                table
-            ))
-            .await?;
-            db.execute_unprepared(&format!(
-                "ALTER TABLE flexi.{} FORCE ROW LEVEL SECURITY;",
-                table
+                r#"
+                ALTER TABLE flexi.{table} ENABLE ROW LEVEL SECURITY;
+                ALTER TABLE flexi.{table} FORCE ROW LEVEL SECURITY;
+                DROP POLICY IF EXISTS tenant_isolation ON flexi.{table};
+                CREATE POLICY tenant_isolation ON flexi.{table}
+                    FOR ALL
+                    TO flexi
+                    USING (tenant_id = flexi.authorized_tenant_id())
+                    WITH CHECK (tenant_id = flexi.authorized_tenant_id());
+                "#
             ))
             .await?;
         }
 
-        // 6. Create RLS policies for roles
-        db.execute_unprepared(
-            r#"
-            DROP POLICY IF EXISTS roles_tenant_isolation ON flexi.roles;
-            CREATE POLICY roles_tenant_isolation ON flexi.roles
-                FOR ALL
-                TO PUBLIC
-                USING (tenant_id = flexi.authorized_tenant_id());
-            "#,
-        )
-        .await?;
+        // Add Indexes
+        // Roles: tenant_id, name (for lookup) - covered by UNIQUE constraint but adding explicit index doesn't hurt read perf,
+        // however UNIQUE constraint already creates an index implicitly in Postgres.
+        // We can skip explicit index creation for (tenant_id, name) if unique constraint exists.
+        // But let's keep the non-unique index if we want it for specific query patterns or just rely on the unique constraint.
+        // The previous migration had explicit CREATE INDEX. The review suggested adjusting or removing it.
+        // "adjust or remove the existing non-unique index referenced in the migration to avoid redundancy/conflict."
+        // We will remove idx_roles_tenant_name as it is redundant with the UNIQUE constraint on (tenant_id, name).
 
-        // 7. Create RLS policies for groups
-        db.execute_unprepared(
-            r#"
-            DROP POLICY IF EXISTS groups_tenant_isolation ON flexi.groups;
-            CREATE POLICY groups_tenant_isolation ON flexi.groups
-                FOR ALL
-                TO PUBLIC
-                USING (tenant_id = flexi.authorized_tenant_id());
-            "#,
-        )
-        .await?;
-
-        // 8. Create RLS policies for permissions
-        db.execute_unprepared(
-            r#"
-            DROP POLICY IF EXISTS permissions_tenant_isolation ON flexi.permissions;
-            CREATE POLICY permissions_tenant_isolation ON flexi.permissions
-                FOR ALL
-                TO PUBLIC
-                USING (tenant_id = flexi.authorized_tenant_id());
-            "#,
-        )
-        .await?;
-
-        // 9. Create RLS policies for role_members
-        db.execute_unprepared(
-            r#"
-            DROP POLICY IF EXISTS role_members_tenant_isolation ON flexi.role_members;
-            CREATE POLICY role_members_tenant_isolation ON flexi.role_members
-                FOR ALL
-                TO PUBLIC
-                USING (tenant_id = flexi.authorized_tenant_id());
-            "#,
-        )
-        .await?;
-
-        // 10. Add foreign key constraints
-        db.execute_unprepared(
-            r#"
-            ALTER TABLE flexi.permissions
-                ADD CONSTRAINT fk_permissions_role_id
-                FOREIGN KEY (tenant_id, role_id) REFERENCES flexi.roles(tenant_id, id) ON DELETE CASCADE;
-            "#,
-        )
-        .await?;
-
-        db.execute_unprepared(
-            r#"
-            ALTER TABLE flexi.role_members
-                ADD CONSTRAINT fk_role_members_role_id
-                FOREIGN KEY (tenant_id, role_id) REFERENCES flexi.roles(tenant_id, id) ON DELETE CASCADE;
-            "#,
-        )
-        .await?;
-
-        // 11. Create indexes for efficient querying
-        db.execute_unprepared(
-            r#"
-            CREATE INDEX IF NOT EXISTS idx_roles_tenant_id ON flexi.roles (tenant_id);
-            "#,
-        )
-        .await?;
-
-        db.execute_unprepared(
-            r#"
-            CREATE INDEX IF NOT EXISTS idx_groups_tenant_id ON flexi.groups (tenant_id);
-            "#,
-        )
-        .await?;
-
-        db.execute_unprepared(
-            r#"
-            CREATE INDEX IF NOT EXISTS idx_permissions_tenant_id_role_id 
-                ON flexi.permissions (tenant_id, role_id);
-            "#,
-        )
-        .await?;
-
-        db.execute_unprepared(
-            r#"
-            CREATE INDEX IF NOT EXISTS idx_role_members_role_id 
-                ON flexi.role_members (role_id);
-            "#,
-        )
-        .await?;
-        db.execute_unprepared(
-            r#"
-            CREATE INDEX IF NOT EXISTS idx_role_members_tenant_id 
-                ON flexi.role_members (tenant_id);
-            "#,
-        )
-        .await?;
+        // Permissions: tenant_id, role_id (for fetch)
+        db.execute_unprepared("CREATE INDEX IF NOT EXISTS idx_permissions_tenant_role ON flexi.permissions (tenant_id, role_id)").await?;
+        // Group Members: tenant_id, user_id (to find user's groups)
+        db.execute_unprepared("CREATE INDEX IF NOT EXISTS idx_group_members_tenant_user ON flexi.group_members (tenant_id, user_id)").await?;
+        // Group Roles: tenant_id, group_id (to find group's roles)
+        db.execute_unprepared("CREATE INDEX IF NOT EXISTS idx_group_roles_tenant_group ON flexi.group_roles (tenant_id, group_id)").await?;
 
         Ok(())
     }
@@ -203,37 +153,17 @@ impl MigrationTrait for Migration {
     async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
         let db = crate::MigrationConnection::new(manager.get_connection());
 
-        // Drop indexes first
-        db.execute_unprepared("DROP INDEX IF EXISTS flexi.idx_role_members_tenant_id;")
-            .await?;
-        db.execute_unprepared("DROP INDEX IF EXISTS flexi.idx_role_members_role_id;")
-            .await?;
-        db.execute_unprepared("DROP INDEX IF EXISTS flexi.idx_permissions_tenant_id_role_id;")
-            .await?;
-        db.execute_unprepared("DROP INDEX IF EXISTS flexi.idx_groups_tenant_id;")
-            .await?;
-        db.execute_unprepared("DROP INDEX IF EXISTS flexi.idx_roles_tenant_id;")
-            .await?;
-
-        // Drop foreign key constraints
-        db.execute_unprepared(
-            "ALTER TABLE flexi.role_members DROP CONSTRAINT IF EXISTS fk_role_members_role_id;",
-        )
-        .await?;
-        db.execute_unprepared(
-            "ALTER TABLE flexi.permissions DROP CONSTRAINT IF EXISTS fk_permissions_role_id;",
-        )
-        .await?;
-
-        // Drop tables
-        db.execute_unprepared("DROP TABLE IF EXISTS flexi.role_members;")
-            .await?;
-        db.execute_unprepared("DROP TABLE IF EXISTS flexi.permissions;")
-            .await?;
-        db.execute_unprepared("DROP TABLE IF EXISTS flexi.groups;")
-            .await?;
-        db.execute_unprepared("DROP TABLE IF EXISTS flexi.roles;")
-            .await?;
+        let tables = [
+            "group_roles",
+            "group_members",
+            "groups",
+            "permissions",
+            "roles",
+        ];
+        for table in tables {
+            db.execute_unprepared(&format!("DROP TABLE IF EXISTS flexi.{table}"))
+                .await?;
+        }
 
         Ok(())
     }

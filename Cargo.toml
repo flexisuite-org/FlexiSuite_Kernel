@@ -13,4 +13,4 @@ members = [
 ]
 
 [workspace.dependencies]
-ed25519-dalek = { version = "2.0", features = ["rand_core"] }
+ed25519-dalek = { version = "=2.2.0", features = ["rand_core"] }

@@ -20,7 +20,7 @@ uuid = { version = "1", features = ["v7", "serde"] }
 async-trait = "0.1"
 kernel-core = { path = "../kernel-core" }
 kernel-data = { path = "../kernel-data" }
-# TODO(security): Pinned to =0.1.43 to avoid upstream regression in 0.1.44 (10MB bloat due to included test-macros).
+# TODO(security): Pinned to =0.1.44 due to upstream packaging regression concerns.
 # Tracking: https://github.com/tokio-rs/tracing/issues/3455
 # Internal Tracking: https://github.com/flexisuite-org/FlexiSuite_Kernel/issues/25
 tracing = "=0.1.44"
@@ -35,9 +35,14 @@ opentelemetry_sdk = { version = "0.31", features = ["metrics"] }
 opentelemetry-prometheus = { version = "0.31", default-features = false }
 prometheus = "0.14"
 sysinfo = "0.30"
+thiserror = "1.0"
 
 [dev-dependencies]
 temp-env = "=0.3.6"
+# test-utils feature is primarily used for integration tests
+kernel-data = { path = "../kernel-data", features = ["test-utils"] }
+ed25519-dalek = { workspace = true }
+rand = "0.8"
 
 [features]
-test-utils = []
+test-utils = ["kernel-data/test-utils"]

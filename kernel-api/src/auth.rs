@@ -1,3 +1,7 @@
+#[cfg(all(not(test), not(debug_assertions), feature = "test-utils"))]
+compile_error!(
+    "feature \"test-utils\" must not be enabled in release builds; remove it from production dependencies or CI"
+);
 use axum::{
     body::Body,
     extract::State,
@@ -12,13 +16,17 @@ use sea_orm::DatabaseConnection;
 use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::middleware::BearerToken;
 pub use kernel_core::auth::{TenantContext, TenantId, UserId};
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 enum AuthError {
+    #[error("Unauthorized")]
     Unauthorized,
+    #[error("Forbidden")]
     Forbidden,
 }
 
@@ -35,19 +43,25 @@ struct PasetoFooter {
     kid: String,
 }
 
-/// REQ-AUTH-SOURCE: Extract TenantContext from token or dev-headers (if debug)
+/// REQ-AUTH-SOURCE: Extract TenantContext from token or dev-headers (test-only build path)
 pub async fn auth_middleware(
     State(db): State<Arc<DatabaseConnection>>,
     mut req: Request<Body>,
     next: Next,
 ) -> Result<Response, StatusCode> {
-    let context = if let Some(header) = req.headers().get("Authorization") {
+    let (context, token_str) = if let Some(header) = req.headers().get("Authorization") {
         let value = header.to_str().map_err(|_| {
             tracing::warn!("Invalid Authorization header encoding");
             StatusCode::UNAUTHORIZED
         })?;
-        match verify_paseto_v4_public_from_env(value) {
-            Ok(ctx) => ctx,
+        let token_part = if let Some(token) = extract_bearer_token(value) {
+            token.to_string()
+        } else {
+            return Err(StatusCode::UNAUTHORIZED);
+        };
+
+        match verify_paseto_v4_public_from_env_token(&token_part) {
+            Ok(ctx) => (ctx, token_part),
             Err(AuthError::Unauthorized) => {
                 tracing::warn!("PASETO token verification failed: Unauthorized");
                 return Err(StatusCode::UNAUTHORIZED);
@@ -58,7 +72,7 @@ pub async fn auth_middleware(
             }
         }
     } else {
-        #[cfg(debug_assertions)]
+        #[cfg(any(test, feature = "test-utils"))]
         {
             if let Some(tenant_id_header) = req.headers().get("X-Tenant-Id") {
                 let tenant_id_str = tenant_id_header.to_str().map_err(|_| {
@@ -76,14 +90,17 @@ pub async fn auth_middleware(
                         StatusCode::FORBIDDEN
                     })?;
                     Some(UserId::new(id_str).map_err(|_| {
-                        tracing::warn!(user_id = %id_str, "Invalid user_id in X-User-Id");
+                        tracing::warn!("Invalid user_id in X-User-Id (format invalid)");
                         StatusCode::FORBIDDEN
                     })?)
                 } else {
                     None
                 };
 
-                TenantContext::new(tenant_id, user_id)
+                (
+                    TenantContext::new(tenant_id.clone(), user_id),
+                    format!("dev-token:{}", tenant_id),
+                )
             } else {
                 tracing::warn!(
                     "Missing Authorization header (and no X-Tenant-Id for debug bypass)"
@@ -92,7 +109,7 @@ pub async fn auth_middleware(
             }
         }
 
-        #[cfg(not(debug_assertions))]
+        #[cfg(not(any(test, feature = "test-utils")))]
         {
             tracing::warn!("Missing Authorization header");
             return Err(StatusCode::UNAUTHORIZED);
@@ -100,6 +117,7 @@ pub async fn auth_middleware(
     };
 
     req.extensions_mut().insert(context.with_db(db));
+    req.extensions_mut().insert(BearerToken::new(token_str));
     Ok(next.run(req).await)
 }
 
@@ -108,6 +126,152 @@ use std::sync::OnceLock;
 static PASETO_PUBLIC_KEY: OnceLock<Vec<u8>> = OnceLock::new();
 static PASETO_KEYSET: OnceLock<PasetoKeyset> = OnceLock::new();
 
+/// Dynamic revocation overlay.
+///
+/// Kids added here are treated as revoked in addition to those in `PASETO_KEYSET.revoked_kids`.
+/// Updated at runtime by [`start_kid_revocation_listener`] without restarting the process.
+const MAX_DYNAMIC_REVOKED_KIDS: usize = 10_000;
+const MAX_KID_BYTES: usize = 128;
+
+#[derive(Debug)]
+struct BoundedRevokedKids {
+    kids: HashSet<String>,
+    max_entries: usize,
+}
+
+#[derive(Debug)]
+enum RevokedKidInsertOutcome {
+    Inserted,
+    AlreadyPresent,
+    CapacityExceeded,
+}
+
+impl BoundedRevokedKids {
+    fn new(max_entries: usize) -> Self {
+        Self {
+            kids: HashSet::new(),
+            max_entries,
+        }
+    }
+
+    fn contains(&self, kid: &str) -> bool {
+        self.kids.contains(kid)
+    }
+
+    fn insert(&mut self, kid: String) -> RevokedKidInsertOutcome {
+        if self.kids.contains(&kid) {
+            return RevokedKidInsertOutcome::AlreadyPresent;
+        }
+
+        if self.kids.len() >= self.max_entries {
+            return RevokedKidInsertOutcome::CapacityExceeded;
+        }
+        self.kids.insert(kid);
+        RevokedKidInsertOutcome::Inserted
+    }
+
+    #[cfg(test)]
+    fn clear(&mut self) {
+        self.kids.clear();
+    }
+}
+
+static REVOKED_KIDS_OVERRIDE: OnceLock<std::sync::RwLock<BoundedRevokedKids>> = OnceLock::new();
+static REVOKED_KIDS_SATURATED: OnceLock<AtomicBool> = OnceLock::new();
+
+fn revoked_kids_override() -> &'static std::sync::RwLock<BoundedRevokedKids> {
+    REVOKED_KIDS_OVERRIDE
+        .get_or_init(|| std::sync::RwLock::new(BoundedRevokedKids::new(MAX_DYNAMIC_REVOKED_KIDS)))
+}
+
+fn revoked_kids_saturated_flag() -> &'static AtomicBool {
+    REVOKED_KIDS_SATURATED.get_or_init(|| AtomicBool::new(false))
+}
+
+fn mark_revoked_kids_saturated(source: &'static str, kid: &str) {
+    if revoked_kids_saturated_flag()
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_ok()
+    {
+        tracing::error!(
+            source = source,
+            kid = %kid,
+            capacity = MAX_DYNAMIC_REVOKED_KIDS,
+            "KID revocation overlay saturated; failing closed for all token verification until remediation"
+        );
+    } else {
+        tracing::error!(
+            source = source,
+            kid = %kid,
+            capacity = MAX_DYNAMIC_REVOKED_KIDS,
+            "KID revocation overlay remains saturated"
+        );
+    }
+}
+
+fn insert_dynamic_revoked_kid(raw_kid: &str, source: &'static str) {
+    if revoked_kids_saturated_flag().load(Ordering::SeqCst) {
+        return;
+    }
+
+    if raw_kid.as_bytes().len() > MAX_KID_BYTES {
+        tracing::warn!(
+            source = source,
+            raw_len = raw_kid.as_bytes().len(),
+            max_len = MAX_KID_BYTES,
+            "KID revocation listener: payload too large; ignored"
+        );
+        return;
+    }
+
+    let trimmed = raw_kid.trim();
+    if trimmed.is_empty() {
+        tracing::warn!(source = source, "KID revocation listener: empty payload ignored");
+        return;
+    }
+    if trimmed.as_bytes().len() > MAX_KID_BYTES {
+        tracing::warn!(
+            source = source,
+            kid_len = trimmed.as_bytes().len(),
+            max_len = MAX_KID_BYTES,
+            "KID revocation listener: KID too large after trim; ignored"
+        );
+        return;
+    }
+    if !trimmed
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+    {
+        tracing::warn!(
+            source = source,
+            "KID revocation listener: invalid KID charset; ignored"
+        );
+        return;
+    }
+    let kid = trimmed.to_string();
+
+    let mut guard = revoked_kids_override()
+        .write()
+        .unwrap_or_else(|e| e.into_inner());
+    match guard.insert(kid.clone()) {
+        RevokedKidInsertOutcome::AlreadyPresent => {
+            tracing::debug!(kid = %kid, source = source, "KID already present in revocation overlay");
+        }
+        RevokedKidInsertOutcome::Inserted => {
+            tracing::info!(kid = %kid, source = source, "KID dynamically revoked");
+        }
+        RevokedKidInsertOutcome::CapacityExceeded => {
+            mark_revoked_kids_saturated(source, &kid);
+        }
+    }
+}
+
+pub fn is_auth_config_ready() -> bool {
+    PASETO_PUBLIC_KEY.get().is_some()
+        && PASETO_KEYSET.get().is_some()
+        && !revoked_kids_saturated_flag().load(Ordering::SeqCst)
+}
+
 #[derive(Debug)]
 struct PasetoKeyset {
     active_kid: String,
@@ -115,7 +279,6 @@ struct PasetoKeyset {
     retired_kids: HashSet<String>,
     revoked_kids: HashSet<String>,
     public_keys: HashMap<String, Vec<u8>>,
-    allow_legacy_no_kid: bool,
 }
 
 impl PasetoKeyset {
@@ -126,28 +289,32 @@ impl PasetoKeyset {
             retired_kids: HashSet::new(),
             revoked_kids: HashSet::new(),
             public_keys: HashMap::new(),
-            allow_legacy_no_kid: false,
         }
     }
 
-    fn from_env(default_public_key: &[u8]) -> Result<Self, String> {
+    fn from_env(default_public_key: Option<&[u8]>) -> Result<Self, String> {
         let active_kid =
             std::env::var("FLEXI_PASETO_V4_ACTIVE_KID").unwrap_or_else(|_| "active".to_string());
         let next_kids = parse_kid_csv_env("FLEXI_PASETO_V4_NEXT_KIDS");
         let retired_kids = parse_kid_csv_env("FLEXI_PASETO_V4_RETIRED_KIDS");
         let revoked_kids = parse_kid_csv_env("FLEXI_PASETO_V4_REVOKED_KIDS");
-        let allow_legacy_no_kid = parse_bool_env("FLEXI_PASETO_V4_ALLOW_LEGACY_NO_KID", false);
         let mut keyset = Self {
             active_kid,
             next_kids,
             retired_kids,
             revoked_kids,
             public_keys: HashMap::new(),
-            allow_legacy_no_kid,
         };
-        keyset
-            .public_keys
-            .insert(keyset.active_kid.clone(), default_public_key.to_vec());
+
+        // Only insert generic key if active_kid is default ("active") AND key is provided
+        if let Some(key) = default_public_key
+            && keyset.active_kid == "active"
+        {
+            keyset
+                .public_keys
+                .insert(keyset.active_kid.clone(), key.to_vec());
+        }
+
         keyset.load_per_kid_public_keys_from_env()?;
         Ok(keyset)
     }
@@ -168,8 +335,11 @@ impl PasetoKeyset {
             }
         };
 
+        // If active_kid != "active", it is REQUIRED to be loaded from explicit env var.
         let require_explicit_active_key = self.active_kid != "active";
         load_key_for_kid(&self.active_kid, require_explicit_active_key)?;
+
+        // Next/Retired always required
         for kid in self.next_kids.iter().chain(self.retired_kids.iter()) {
             load_key_for_kid(kid, true)?;
         }
@@ -192,12 +362,12 @@ impl PasetoKeyset {
             .chain(self.retired_kids.iter().map(String::as_str))
         {
             let normalized = normalize_kid_for_env(kid);
-            if let Some(existing) = normalized_owner.insert(normalized.clone(), kid) {
-                if existing != kid {
-                    return Err(format!(
-                        "kid normalization collision: '{existing}' and '{kid}' map to FLEXI_PASETO_V4_PUBLIC_KEY_B64URL_{normalized}"
-                    ));
-                }
+            if let Some(existing) = normalized_owner.insert(normalized.clone(), kid)
+                && existing != kid
+            {
+                return Err(format!(
+                    "kid normalization collision: '{existing}' and '{kid}' map to FLEXI_PASETO_V4_PUBLIC_KEY_B64URL_{normalized}"
+                ));
             }
         }
 
@@ -259,9 +429,6 @@ impl PasetoKeyset {
         Ok(())
     }
 
-    fn is_legacy_without_kid_allowed(&self) -> bool {
-        self.allow_legacy_no_kid && self.revoked_kids.is_empty()
-    }
 
     fn validate_token_kid(&self, kid: &str) -> Result<(), AuthError> {
         if self.revoked_kids.contains(kid) {
@@ -278,12 +445,32 @@ impl PasetoKeyset {
     }
 }
 
+const DEFAULT_ACTIVE_KID: &str = "active";
+
 pub fn init_auth_config() -> Result<(), String> {
-    let key_b64 = std::env::var("FLEXI_PASETO_V4_PUBLIC_KEY_B64URL")
-        .map_err(|_| "FLEXI_PASETO_V4_PUBLIC_KEY_B64URL is not set".to_string())?;
-    let decoded = decode_public_key_b64url(&key_b64, "FLEXI_PASETO_V4_PUBLIC_KEY_B64URL")?;
-    let keyset = PasetoKeyset::from_env(&decoded)?;
-    init_auth_config_with_decoded_public_key_and_keyset(decoded, keyset)
+    // Attempt to load generic key, but only require it if it's the *only* source for the active key
+    let default_key = match std::env::var("FLEXI_PASETO_V4_PUBLIC_KEY_B64URL") {
+        Ok(key_b64) => Some(decode_public_key_b64url(
+            &key_b64,
+            "FLEXI_PASETO_V4_PUBLIC_KEY_B64URL",
+        )?),
+        Err(_) => None,
+    };
+
+    let keyset = PasetoKeyset::from_env(default_key.as_deref())?;
+
+    // Check if we actually have the active key
+    let active_key_bytes = keyset.public_key_for_kid(&keyset.active_kid)
+        .ok_or_else(|| {
+            if keyset.active_kid == DEFAULT_ACTIVE_KID {
+                format!("Active key for kid '{}' failed to load. Set FLEXI_PASETO_V4_PUBLIC_KEY_B64URL or FLEXI_PASETO_V4_PUBLIC_KEY_B64URL_ACTIVE", keyset.active_kid)
+            } else {
+                format!("Active key for kid '{}' failed to load", keyset.active_kid)
+            }
+        })?
+        .to_vec();
+
+    init_auth_config_with_decoded_public_key_and_keyset(active_key_bytes, keyset)
 }
 
 pub fn init_auth_config_with_public_key_b64url(key: &str) -> Result<(), String> {
@@ -294,22 +481,12 @@ pub fn init_auth_config_with_public_key_and_revoked_kids(
     key: &str,
     revoked_kids: &[&str],
 ) -> Result<(), String> {
-    init_auth_config_with_public_key_and_revoked_kids_and_legacy_mode(key, revoked_kids, false)
-}
-
-pub fn init_auth_config_with_public_key_and_revoked_kids_and_legacy_mode(
-    key: &str,
-    revoked_kids: &[&str],
-    allow_legacy_no_kid: bool,
-) -> Result<(), String> {
-    let keyset = keyset_for_revoked_kids(revoked_kids, allow_legacy_no_kid);
+    let keyset = keyset_for_revoked_kids(revoked_kids);
     init_auth_config_with_public_key_and_keyset(key, keyset)
 }
-
-fn keyset_for_revoked_kids(revoked_kids: &[&str], allow_legacy_no_kid: bool) -> PasetoKeyset {
+fn keyset_for_revoked_kids(revoked_kids: &[&str]) -> PasetoKeyset {
     let mut keyset = PasetoKeyset::default_for_single_key();
     keyset.revoked_kids = revoked_kids.iter().map(|v| (*v).to_string()).collect();
-    keyset.allow_legacy_no_kid = allow_legacy_no_kid;
     keyset
 }
 
@@ -335,41 +512,145 @@ fn init_auth_config_with_decoded_public_key_and_keyset(
         .map_err(|_| "Auth keyset already initialized".to_string())
 }
 
-/// Verifies a PASETO v4.public token from the auth header after extracting and validating footer.kid.
-fn verify_paseto_v4_public_from_env(auth_header: &str) -> Result<TenantContext, AuthError> {
-    let token = extract_bearer_token(auth_header).ok_or(AuthError::Unauthorized)?;
-    let default_public_key = PASETO_PUBLIC_KEY.get().ok_or(AuthError::Unauthorized)?;
+fn verify_paseto_v4_public_from_env_token(token: &str) -> Result<TenantContext, AuthError> {
     let keyset = PASETO_KEYSET.get().ok_or(AuthError::Unauthorized)?;
-
-    if has_legacy_paseto_layout(token) {
-        if !keyset.is_legacy_without_kid_allowed() {
-            if keyset.allow_legacy_no_kid && !keyset.revoked_kids.is_empty() {
-                tracing::warn!("Legacy token mode is disabled while revoked kids are configured");
-            }
-            tracing::warn!("PASETO footer.kid is required but missing");
-            return Err(AuthError::Unauthorized);
-        }
-        return verify_paseto_v4_public_token(token, default_public_key, None).map_err(|e| {
-            tracing::warn!("PASETO signature or claim validation failed");
-            e
-        });
+    if revoked_kids_saturated_flag().load(Ordering::SeqCst) {
+        tracing::error!("KID revocation overlay saturated; rejecting token verification");
+        return Err(AuthError::Unauthorized);
     }
 
-    let (kid, footer_raw) = extract_footer_kid(token).map_err(|e| {
+    let (kid, footer_raw) = extract_footer_kid(token).inspect_err(|_e| {
         tracing::warn!("PASETO footer missing or invalid");
-        e
     })?;
-    keyset.validate_token_kid(&kid).map_err(|e| {
+    keyset.validate_token_kid(&kid).inspect_err(|_e| {
         tracing::warn!(kid = %kid, "PASETO kid rejected");
-        e
     })?;
+    // Dynamic revocation overlay: check kids revoked at runtime via Redis pub/sub.
+    // This check runs after the static keyset check so statically-configured revocations
+    // remain unaffected by the override state.
+    if revoked_kids_override()
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .contains(&kid)
+    {
+        tracing::warn!(kid = %kid, "PASETO kid revoked via dynamic override");
+        return Err(AuthError::Unauthorized);
+    }
     let key_for_kid = keyset.public_key_for_kid(&kid).ok_or_else(|| {
         tracing::warn!(kid = %kid, "No public key configured for kid");
         AuthError::Unauthorized
     })?;
-    verify_paseto_v4_public_token(token, key_for_kid, Some(&footer_raw)).map_err(|e| {
+    verify_paseto_v4_public_token(token, key_for_kid, Some(&footer_raw)).inspect_err(|_e| {
         tracing::warn!("PASETO signature or claim validation failed");
-        e
+    })
+}
+
+/// Starts a background task that maintains the dynamic KID revocation list.
+///
+/// # Mechanism
+///
+/// 1. **Redis Pub/Sub** (primary): Subscribes to `flexi:auth:kid_revoked` and adds any
+///    received KID string to [`REVOKED_KIDS_OVERRIDE`] immediately.
+/// 2. **Polling fallback** (secondary): Every 30 seconds re-reads the
+///    `FLEXI_PASETO_V4_REVOKED_KIDS` environment variable. This ensures that nodes which
+///    miss a pub/sub event (due to Redis connection interruptions) eventually converge.
+///    Combined with the 30-second polling interval this gives a worst-case propagation
+///    latency of ≤ 60 seconds across all nodes, satisfying the p95 SLO.
+///
+/// # Arguments
+///
+/// * `client` – A Redis client used exclusively for the pub/sub connection. A dedicated
+///   connection is required because pub/sub puts the connection into subscriber mode.
+///
+/// # Shutdown
+///
+/// The returned [`tokio::task::JoinHandle`] can be aborted to stop the task.
+pub fn start_kid_revocation_listener(client: redis::Client) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        fn poll_env_revocations() {
+            let fresh = parse_kid_csv_env("FLEXI_PASETO_V4_REVOKED_KIDS");
+            for kid in fresh {
+                insert_dynamic_revoked_kid(&kid, "env-poll");
+            }
+        }
+
+        async fn backoff_with_env_poll(poll_interval: &mut tokio::time::Interval) {
+            let backoff = tokio::time::Duration::from_secs(5);
+            let deadline = tokio::time::Instant::now() + backoff;
+            loop {
+                let now = tokio::time::Instant::now();
+                if now >= deadline {
+                    break;
+                }
+                let remaining = deadline - now;
+                tokio::select! {
+                    _ = tokio::time::sleep(remaining) => break,
+                    _ = poll_interval.tick() => {
+                        poll_env_revocations();
+                    }
+                }
+            }
+        }
+
+        // Seed the override set with the static environment-variable list so that any
+        // kids already in FLEXI_PASETO_V4_REVOKED_KIDS are immediately effective.
+        for kid in parse_kid_csv_env("FLEXI_PASETO_V4_REVOKED_KIDS") {
+            insert_dynamic_revoked_kid(&kid, "startup-env-seed");
+        }
+
+        let mut poll_interval = tokio::time::interval(std::time::Duration::from_secs(30));
+
+        // Outer reconnect loop for pub/sub.
+        'reconnect: loop {
+            let mut pubsub = loop {
+                match client.get_async_pubsub().await {
+                    Ok(p) => break p,
+                    Err(e) => {
+                        tracing::warn!("KID revocation listener: pub/sub connect failed: {e}");
+                        poll_env_revocations();
+                        backoff_with_env_poll(&mut poll_interval).await;
+                    }
+                }
+            };
+            if let Err(e) = pubsub.subscribe("flexi:auth:kid_revoked").await {
+                tracing::warn!("KID revocation listener: subscribe failed: {e}");
+                poll_env_revocations();
+                backoff_with_env_poll(&mut poll_interval).await;
+                continue 'reconnect;
+            }
+            tracing::info!("KID revocation listener: subscribed to flexi:auth:kid_revoked");
+
+            use futures_util::StreamExt as _;
+            let mut stream = pubsub.on_message();
+            loop {
+                tokio::select! {
+                    // Polling branch: refresh from env every 30 s.
+                    _ = poll_interval.tick() => {
+                        poll_env_revocations();
+                    }
+                    // Pub/Sub branch: react to real-time revocation events.
+                    msg_opt = stream.next() => {
+                        match msg_opt {
+                            Some(msg) => {
+                                let kid: String = match msg.get_payload() {
+                                    Ok(k) => k,
+                                    Err(e) => {
+                                        tracing::warn!("KID revocation listener: invalid payload: {e}");
+                                        continue;
+                                    }
+                                };
+                                insert_dynamic_revoked_kid(&kid, "redis-pubsub");
+                            }
+                            None => {
+                                // Stream closed; break inner loop to reconnect.
+                                tracing::warn!("KID revocation listener: pub/sub stream closed, reconnecting");
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
     })
 }
 
@@ -466,27 +747,6 @@ fn parse_kid_csv_env(key: &str) -> HashSet<String> {
         .unwrap_or_default()
 }
 
-fn parse_bool_env(key: &str, default: bool) -> bool {
-    match std::env::var(key) {
-        Ok(raw) => {
-            let trimmed = raw.trim().to_ascii_lowercase();
-            match trimmed.as_str() {
-                "1" | "true" | "yes" | "on" => true,
-                "0" | "false" | "no" | "off" => false,
-                _ => {
-                    tracing::warn!(
-                        key = %key,
-                        value = %raw,
-                        "Invalid boolean environment variable; using default"
-                    );
-                    default
-                }
-            }
-        }
-        Err(_) => default,
-    }
-}
-
 fn decode_public_key_b64url(raw: &str, env_key: &str) -> Result<Vec<u8>, String> {
     let decoded = URL_SAFE_NO_PAD
         .decode(raw)
@@ -514,10 +774,6 @@ fn normalize_kid_for_env(kid: &str) -> String {
             }
         })
         .collect::<String>()
-}
-
-fn has_legacy_paseto_layout(token: &str) -> bool {
-    token.split('.').count() == 3
 }
 
 /// Pre-parses the PASETO v4.public token to extract kid from the footer.
@@ -553,10 +809,15 @@ fn extract_footer_kid(token: &str) -> Result<(String, String), AuthError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    use chrono::{Duration, SecondsFormat, Utc};
     use kernel_core::auth::is_valid_principal;
+    use rusty_paseto::core::{Key, PasetoAsymmetricPrivateKey};
     use std::sync::{Mutex, OnceLock as TestOnceLock};
 
     static ENV_TEST_LOCK: TestOnceLock<Mutex<()>> = TestOnceLock::new();
+    static AUTH_INIT: TestOnceLock<()> = TestOnceLock::new();
+    static TEST_KEYS: TestOnceLock<([u8; 64], String)> = TestOnceLock::new();
 
     fn with_env_test_lock<F: FnOnce()>(f: F) {
         let guard = ENV_TEST_LOCK
@@ -565,6 +826,65 @@ mod tests {
             .expect("ENV_TEST_LOCK poisoned");
         f();
         drop(guard);
+    }
+
+    fn setup_auth_runtime_test() -> [u8; 64] {
+        let (private_key, public_key_b64) = TEST_KEYS.get_or_init(|| {
+            use ed25519_dalek::{SigningKey, VerifyingKey};
+            use rand::rngs::OsRng;
+
+            let mut csprng = OsRng;
+            let signing_key = SigningKey::generate(&mut csprng);
+            let verifying_key: VerifyingKey = (&signing_key).into();
+
+            let mut combined = [0u8; 64];
+            combined[..32].copy_from_slice(&signing_key.to_bytes());
+            combined[32..].copy_from_slice(verifying_key.as_bytes());
+
+            (combined, URL_SAFE_NO_PAD.encode(verifying_key.as_bytes()))
+        });
+
+        AUTH_INIT.get_or_init(|| {
+            init_auth_config_with_public_key_and_revoked_kids(public_key_b64, &[])
+                .expect("Auth initialization failed in runtime test");
+        });
+
+        let mut guard = revoked_kids_override()
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
+        guard.clear();
+        revoked_kids_saturated_flag().store(false, Ordering::SeqCst);
+
+        *private_key
+    }
+
+    fn generate_test_paseto_token(private_key_bytes: [u8; 64], kid: &str) -> String {
+        let key = Key::<64>::from(private_key_bytes);
+        let private_key = PasetoAsymmetricPrivateKey::<V4, Public>::from(&key);
+
+        let now = Utc::now();
+        let exp = now + Duration::hours(1);
+        let nbf = now - Duration::minutes(5);
+        let footer = serde_json::json!({ "kid": kid }).to_string();
+
+        let mut builder = PasetoBuilder::<V4, Public>::default();
+        builder.set_claim(CustomClaim::try_from(("tenant_id", "tenant_001")).unwrap());
+        builder.set_claim(CustomClaim::try_from(("user_id", "user_123")).unwrap());
+        builder.set_claim(
+            ExpirationClaim::try_from(exp.to_rfc3339_opts(SecondsFormat::Secs, true).as_str())
+                .unwrap(),
+        );
+        builder.set_claim(
+            NotBeforeClaim::try_from(nbf.to_rfc3339_opts(SecondsFormat::Secs, true).as_str())
+                .unwrap(),
+        );
+        builder.set_claim(
+            IssuedAtClaim::try_from(now.to_rfc3339_opts(SecondsFormat::Secs, true).as_str())
+                .unwrap(),
+        );
+        builder.set_footer(Footer::from(footer.as_str()));
+
+        builder.build(&private_key).expect("Paseto build failed")
     }
 
     #[test]
@@ -689,7 +1009,6 @@ mod tests {
         // Successful default
         let default = PasetoKeyset::default_for_single_key();
         assert_eq!(default.active_kid, "active");
-        assert!(!default.allow_legacy_no_kid);
 
         // From env
         let key_b64 = URL_SAFE_NO_PAD.encode([7_u8; 32]);
@@ -708,11 +1027,10 @@ mod tests {
                 ],
                 || {
                     let default_key = [1_u8; 32];
-                    let keyset = PasetoKeyset::from_env(&default_key).unwrap();
+                    let keyset = PasetoKeyset::from_env(Some(&default_key)).unwrap();
                     assert_eq!(keyset.active_kid, "env-active");
                     assert!(keyset.revoked_kids.contains("r1"));
                     assert!(keyset.revoked_kids.contains("r2"));
-                    assert!(!keyset.allow_legacy_no_kid);
                     assert_eq!(keyset.public_key_for_kid("env-active").unwrap(), [7_u8; 32]);
                     assert_eq!(keyset.public_key_for_kid("next-a").unwrap(), [9_u8; 32]);
                 },
@@ -724,7 +1042,7 @@ mod tests {
     fn test_paseto_keyset_initialization_requires_kid_key_for_next() {
         with_env_test_lock(|| {
             temp_env::with_vars([("FLEXI_PASETO_V4_NEXT_KIDS", Some("next-a"))], || {
-                let keyset = PasetoKeyset::from_env(&[1_u8; 32]);
+                let keyset = PasetoKeyset::from_env(Some(&[1_u8; 32]));
                 assert!(keyset.is_err());
             });
         });
@@ -736,7 +1054,8 @@ mod tests {
             temp_env::with_vars(
                 [("FLEXI_PASETO_V4_ACTIVE_KID", Some("custom-active"))],
                 || {
-                    let keyset = PasetoKeyset::from_env(&[1_u8; 32]);
+                    // Pass None for generic key to explicitly test lookup logic
+                    let keyset = PasetoKeyset::from_env(None);
                     assert!(keyset.is_err());
                 },
             );
@@ -772,37 +1091,110 @@ mod tests {
     }
 
     #[test]
-    fn test_legacy_without_kid_blocked_when_revocation_exists() {
-        let mut keyset = PasetoKeyset::default_for_single_key();
-        keyset.revoked_kids.insert("revoked".to_string());
-        assert!(!keyset.is_legacy_without_kid_allowed());
+    fn test_keyset_for_revoked_kids_populates_revoked_kids() {
+        let keyset = keyset_for_revoked_kids(&["revoked"]);
+        assert!(keyset.revoked_kids.contains("revoked"));
     }
 
     #[test]
-    fn test_parse_bool_env() {
+    fn test_bounded_revoked_kids_rejects_new_entry_when_full() {
+        let mut bounded = BoundedRevokedKids::new(2);
+        assert!(matches!(
+            bounded.insert("kid-1".to_string()),
+            RevokedKidInsertOutcome::Inserted
+        ));
+        assert!(matches!(
+            bounded.insert("kid-2".to_string()),
+            RevokedKidInsertOutcome::Inserted
+        ));
+        assert!(bounded.contains("kid-1"));
+        assert!(bounded.contains("kid-2"));
+
+        assert!(matches!(
+            bounded.insert("kid-3".to_string()),
+            RevokedKidInsertOutcome::CapacityExceeded
+        ));
+        assert!(bounded.contains("kid-1"));
+        assert!(bounded.contains("kid-2"));
+        assert!(!bounded.contains("kid-3"));
+    }
+
+    #[test]
+    fn test_dynamic_revocation_overlay_fail_closed_after_runtime_revoke() {
         with_env_test_lock(|| {
-            temp_env::with_vars(
-                [
-                    ("BOOL_TRUE", Some("true")),
-                    ("BOOL_FALSE", Some("0")),
-                    ("BOOL_INVALID", Some("wat")),
-                ],
-                || {
-                    assert!(parse_bool_env("BOOL_TRUE", false));
-                    assert!(!parse_bool_env("BOOL_FALSE", true));
-                    // Invalid input falls back to the provided default.
-                    assert!(parse_bool_env("BOOL_INVALID", true));
-                    assert!(!parse_bool_env("BOOL_MISSING", false));
-                },
-            );
+            let private_key = setup_auth_runtime_test();
+            let token = generate_test_paseto_token(private_key, "active");
+
+            assert!(verify_paseto_v4_public_from_env_token(&token).is_ok());
+
+            insert_dynamic_revoked_kid("active", "test");
+            assert!(matches!(
+                verify_paseto_v4_public_from_env_token(&token),
+                Err(AuthError::Unauthorized)
+            ));
         });
     }
 
     #[test]
-    fn test_keyset_for_revoked_kids_disables_legacy_mode_by_default_api_contract() {
-        let keyset = keyset_for_revoked_kids(&["revoked"], false);
-        assert!(keyset.revoked_kids.contains("revoked"));
-        assert!(!keyset.allow_legacy_no_kid);
-        assert!(!keyset.is_legacy_without_kid_allowed());
+    fn test_dynamic_revocation_overlay_ignores_malformed_payload() {
+        with_env_test_lock(|| {
+            let private_key = setup_auth_runtime_test();
+            let token = generate_test_paseto_token(private_key, "active");
+
+            assert!(verify_paseto_v4_public_from_env_token(&token).is_ok());
+
+            insert_dynamic_revoked_kid("   ", "test-malformed-payload");
+            assert!(verify_paseto_v4_public_from_env_token(&token).is_ok());
+        });
+    }
+
+    #[test]
+    fn test_dynamic_revocation_overlay_rejects_invalid_kid_charset() {
+        with_env_test_lock(|| {
+            let private_key = setup_auth_runtime_test();
+            let token = generate_test_paseto_token(private_key, "active");
+            assert!(verify_paseto_v4_public_from_env_token(&token).is_ok());
+
+            insert_dynamic_revoked_kid("active\nbinary", "test-invalid-charset");
+            assert!(verify_paseto_v4_public_from_env_token(&token).is_ok());
+        });
+    }
+
+    #[test]
+    fn test_dynamic_revocation_overlay_rejects_oversized_kid() {
+        with_env_test_lock(|| {
+            let private_key = setup_auth_runtime_test();
+            let token = generate_test_paseto_token(private_key, "active");
+            assert!(verify_paseto_v4_public_from_env_token(&token).is_ok());
+
+            let oversized = "a".repeat(MAX_KID_BYTES + 1);
+            insert_dynamic_revoked_kid(&oversized, "test-oversized-kid");
+            assert!(verify_paseto_v4_public_from_env_token(&token).is_ok());
+        });
+    }
+
+    #[test]
+    fn test_dynamic_revocation_overlay_saturation_fails_closed() {
+        with_env_test_lock(|| {
+            let private_key = setup_auth_runtime_test();
+            let token = generate_test_paseto_token(private_key, "active");
+            assert!(verify_paseto_v4_public_from_env_token(&token).is_ok());
+
+            mark_revoked_kids_saturated("test", "overflow-kid");
+            assert!(matches!(
+                verify_paseto_v4_public_from_env_token(&token),
+                Err(AuthError::Unauthorized)
+            ));
+        });
+    }
+
+    #[test]
+    fn test_auth_config_not_ready_when_revocation_overlay_saturated() {
+        with_env_test_lock(|| {
+            let _ = setup_auth_runtime_test();
+            assert!(is_auth_config_ready());
+            mark_revoked_kids_saturated("test", "overflow-kid");
+            assert!(!is_auth_config_ready());
+        });
     }
 }

@@ -1,3 +1,4 @@
+#![allow(clippy::collapsible_if)]
 use crate::event::{EventEnvelope, EventError, PublishAck, ReliableProducer, SHARD_COUNT};
 use async_trait::async_trait;
 use redis::Client;

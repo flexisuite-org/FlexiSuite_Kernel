@@ -1,3 +1,6 @@
+#![allow(clippy::items_after_test_module)]
+#![allow(clippy::collapsible_if)]
+
 use crate::auth_context::TenantContext;
 use crate::error::DataError;
 use futures::future::BoxFuture;
@@ -40,10 +43,6 @@ impl<C> TenantScoped<C> {
 }
 
 impl TenantScoped<RawConnection> {
-    pub(crate) fn txn(&self) -> &DatabaseTransaction {
-        &self.inner.txn
-    }
-
     pub(crate) async fn commit(self) -> Result<(), DbErr> {
         self.inner.txn.commit().await
     }
@@ -159,33 +158,269 @@ where
     }
 }
 
-fn parse_tenant_from_token(token: &str) -> Option<&str> {
-    let mut parts = token.split(':');
-    let ver = parts.next()?;
-    let _kid = parts.next()?;
-    let _ts = parts.next()?;
-    let _nonce = parts.next()?;
-    let tenant_id = parts.next()?;
-    let _sig = parts.next()?;
-    if ver != "v2" || parts.next().is_some() {
+fn parse_tenant_from_token(token: &str) -> Option<String> {
+    #[cfg(feature = "test-utils")]
+    if token.starts_with("v4.public.") {
+        use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+        let parts: Vec<&str> = token.split('.').collect();
+        if parts.len() == 3
+            && !parts[0].is_empty()
+            && !parts[1].is_empty()
+            && !parts[2].is_empty()
+        {
+            if let Ok(payload_bytes) = URL_SAFE_NO_PAD.decode(parts[2]) {
+                // PASETO v4.public payload format is "message || 64-byte Ed25519 signature".
+                // The parser must strip the last 64 bytes from the payload and then decode
+                // the remaining bytes as JSON (the "message").
+                if payload_bytes.len() > 64 {
+                    let payload_len = payload_bytes.len() - 64;
+                    let json_bytes = &payload_bytes[..payload_len];
+                    if let Ok(s) = String::from_utf8(json_bytes.to_vec()) {
+                        if let Ok(json) = serde_json::from_str::<serde_json::Value>(&s) {
+                            if let Some(tid) = json.get("tenant_id").and_then(|v| v.as_str()) {
+                                if !tid.is_empty() {
+                                    return Some(tid.to_string());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[cfg(feature = "test-utils")]
+    if let Some(tenant_id) = token.strip_prefix("dev-token:") {
+        // Special dev token for tests/debug with tenant ID
+        if !tenant_id.is_empty() {
+            return Some(tenant_id.to_string());
+        }
+    }
+
+    #[cfg(not(feature = "test-utils"))]
+    if token.starts_with("dev-token:") {
+        warn!("dev-token encountered in non-test build; parsing rejected");
         return None;
     }
-    Some(tenant_id)
+
+    let mut parts = token.split(':');
+    let ver = parts.next()?;
+    let kid = parts.next()?;
+    let ts = parts.next()?;
+    let nonce = parts.next()?;
+    let tenant_id = parts.next()?;
+    let sig = parts.next()?;
+    if ver != "v2"
+        || parts.next().is_some()
+        || kid.is_empty()
+        || ts.is_empty()
+        || nonce.is_empty()
+        || tenant_id.is_empty()
+        || sig.is_empty()
+    {
+        return None;
+    }
+    Some(tenant_id.to_string())
 }
 
-// Legacy exports retained for binary compatibility during migration.
-// These shims now fail loudly so callers are forced to migrate.
-#[deprecated(note = "Legacy migration shim; removed - use token-based authorization API")]
-pub fn init_hmac_secret() -> Result<(), String> {
-    Err(String::from(
-        "init_hmac_secret is removed/deprecated: use token-based authorization API",
-    ))
+/// A tenant-scoped connection that additionally guarantees an authenticated user.
+///
+/// Unlike [`TenantScoped<RawConnection>`], this type holds a *concrete* [`UserId`] obtained
+/// **after** the authentication middleware has already verified the token. It eliminates
+/// the dual-source-of-truth problem where callers previously had to pass both a
+/// `TenantScoped` handle (which carries `Option<UserId>`) and a separate `TenantContext`.
+///
+/// # Construction
+///
+/// Call [`AuthenticatedScoped::try_from_scoped`]. Construction succeeds only when
+/// `scoped.user_id` is `Some`, which is guaranteed by the `ctx.user_id().is_none()`
+/// fast-fail guard that runs in `load_permissions_middleware` before `with_tenant_tx`.
+/// The `user_id` is always derived from the same `TenantScoped` handle — no external
+/// `UserId` can be injected, preventing user-impersonation-by-misuse.
+pub struct AuthenticatedScoped<'a> {
+    scoped: &'a TenantScoped<RawConnection>,
+    user_id: crate::auth_context::UserId,
 }
 
-#[cfg(feature = "test-utils")]
-#[deprecated(note = "Legacy migration shim; removed - use test fixtures with KeyManager")]
-pub fn init_hmac_secret_for_test(_secret: impl Into<String>) -> Result<(), String> {
-    Err(String::from(
-        "init_hmac_secret_for_test is removed/deprecated: use test fixtures with KeyManager",
-    ))
+impl<'a> AuthenticatedScoped<'a> {
+    /// Construct an `AuthenticatedScoped` from a reference to an already-verified
+    /// `TenantScoped` connection.
+    ///
+    /// Returns `Err` if `scoped.user_id` is `None` (unauthenticated context).  The
+    /// `user_id` is always taken from `scoped` itself — callers cannot supply an
+    /// arbitrary `UserId`, which prevents user-impersonation-by-misuse.
+    ///
+    /// The lifetime `'a` ties this struct to the lifetime of `scoped`, which is exactly
+    /// what we need inside a `with_tenant_tx` closure where the transaction reference
+    /// is borrowed for the duration of the closure.
+    pub fn try_from_scoped(
+        scoped: &'a TenantScoped<RawConnection>,
+    ) -> Result<Self, crate::error::DataError> {
+        let user_id = scoped
+            .user_id
+            .clone()
+            .ok_or_else(|| {
+                crate::error::DataError::TenantAuthorizationFailed(
+                    "AuthenticatedScoped requires a user_id in TenantScoped context".to_string(),
+                )
+            })?;
+        Ok(Self { scoped, user_id })
+    }
+
+    pub fn tenant_id(&self) -> &crate::auth_context::TenantId {
+        &self.scoped.tenant_id
+    }
+
+    pub fn user_id(&self) -> &crate::auth_context::UserId {
+        &self.user_id
+    }
+
+    pub(crate) fn txn(&self) -> &DatabaseTransaction {
+        &self.scoped.inner.txn
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_valid_token_returns_some() {
+        let token = "v2:kid:ts:nonce:tenant-1:sig";
+        assert_eq!(parse_tenant_from_token(token), Some("tenant-1".to_string()));
+    }
+
+    #[test]
+    fn test_parse_missing_fields_returns_none() {
+        assert_eq!(parse_tenant_from_token("v2:kid:ts:nonce:tenant-1"), None); // missing sig
+        assert_eq!(parse_tenant_from_token("v2:kid:ts:nonce"), None); // missing tenant_id + sig
+    }
+
+    #[test]
+    fn test_parse_extra_fields_returns_none() {
+        assert_eq!(
+            parse_tenant_from_token("v2:kid:ts:nonce:tenant-1:sig:extra"),
+            None
+        );
+    }
+
+    #[test]
+    fn test_parse_wrong_version_returns_none() {
+        assert_eq!(
+            parse_tenant_from_token("v3:kid:ts:nonce:tenant-1:sig"),
+            None
+        );
+    }
+
+    #[test]
+    fn test_parse_empty_tenant_returns_none() {
+        let token = "v2:kid:ts:nonce::sig";
+        assert_eq!(parse_tenant_from_token(token), None);
+    }
+
+    #[cfg(feature = "test-utils")]
+    #[tokio::test]
+    async fn test_authenticated_scoped_rejects_missing_user_id() {
+        use sea_orm::TransactionTrait;
+        let scoped = TenantScoped::new(
+            RawConnection::new(
+                sea_orm::MockDatabase::new(sea_orm::DatabaseBackend::Postgres)
+                    .into_connection()
+                    .begin()
+                    .await
+                    .expect("begin mock tx"),
+            ),
+            crate::auth_context::TenantId::new("tenant-1").expect("valid tenant"),
+            None,
+        );
+        let result = AuthenticatedScoped::try_from_scoped(&scoped);
+        assert!(result.is_err());
+    }
+
+    #[cfg(feature = "test-utils")]
+    #[tokio::test]
+    async fn test_authenticated_scoped_accepts_present_user_id() {
+        use sea_orm::TransactionTrait;
+        let user_id = crate::auth_context::UserId::new("user-1").expect("valid user");
+        let scoped = TenantScoped::new(
+            RawConnection::new(
+                sea_orm::MockDatabase::new(sea_orm::DatabaseBackend::Postgres)
+                    .into_connection()
+                    .begin()
+                    .await
+                    .expect("begin mock tx"),
+            ),
+            crate::auth_context::TenantId::new("tenant-1").expect("valid tenant"),
+            Some(user_id.clone()),
+        );
+        let result = AuthenticatedScoped::try_from_scoped(&scoped);
+        assert!(result.is_ok());
+        let auth = result.expect("must create authenticated scoped");
+        assert_eq!(auth.tenant_id().as_str(), "tenant-1");
+        assert_eq!(auth.user_id().as_str(), user_id.as_str());
+    }
+
+    #[cfg(feature = "test-utils")]
+    mod test_utils_parsing {
+        use super::*;
+        use base64::Engine as _;
+        use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+
+        #[test]
+        fn test_dev_token_parsing() {
+            // Valid
+            assert_eq!(
+                parse_tenant_from_token("dev-token:t1"),
+                Some("t1".to_string())
+            );
+
+            // Empty tenant (should be rejected per hardening)
+            assert_eq!(parse_tenant_from_token("dev-token:"), None);
+        }
+
+        #[cfg(feature = "test-utils")]
+        #[test]
+        fn test_v4_public_parsing() {
+            let payload_json = r#"{"tenant_id":"t1","extra":"stuff"}"#;
+            let payload_bytes = payload_json.as_bytes();
+            let mut full_payload = payload_bytes.to_vec();
+            full_payload.extend_from_slice(&[0u8; 64]); // Mock signature
+            let b64 = URL_SAFE_NO_PAD.encode(&full_payload);
+            let token = format!("v4.public.{}", b64);
+
+            assert_eq!(parse_tenant_from_token(&token), Some("t1".to_string()));
+        }
+
+        #[cfg(feature = "test-utils")]
+        #[test]
+        fn test_v4_public_empty_tenant_parsing() {
+            let payload_json = r#"{"tenant_id":""}"#;
+            let payload_bytes = payload_json.as_bytes();
+            let mut full_payload = payload_bytes.to_vec();
+            full_payload.extend_from_slice(&[0u8; 64]); // Mock signature
+            let b64 = URL_SAFE_NO_PAD.encode(&full_payload);
+            let token = format!("v4.public.{}", b64);
+
+            assert_eq!(parse_tenant_from_token(&token), None);
+        }
+    }
+
+    #[cfg(not(feature = "test-utils"))]
+    mod production_parsing {
+        use super::*;
+
+        #[test]
+        fn test_dev_token_rejected() {
+            assert_eq!(parse_tenant_from_token("dev-token:t1"), None);
+        }
+
+        #[test]
+        fn test_v4_public_ignored() {
+            // In prod, v4 public token parsing logic is compiled out or falls through
+            // The function only parses v2 format if feature is disabled.
+            // "v4.public..." does not match "v2:..." structure.
+            let token = "v4.public.header.payload.footer";
+            assert_eq!(parse_tenant_from_token(token), None);
+        }
+    }
 }

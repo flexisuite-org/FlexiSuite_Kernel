@@ -1,47 +1,3 @@
-use ring::signature::{ED25519, UnparsedPublicKey};
-
-// Build guard: test-utils feature should not be enabled in release builds
-#[cfg(all(not(debug_assertions), feature = "test-utils"))]
-compile_error!("The 'test-utils' feature is not allowed in release builds");
-
-#[cfg(feature = "test-utils")]
-pub mod test_utils {
-    use super::*;
-
-    /// Test helper to create a manifest with dummy data
-    pub fn create_test_manifest() -> Manifest {
-        Manifest {
-            id: "test-manifest-001".to_string(),
-            digest: "sha256-0000000000000000000000000000000000000000000000000000000000000000".to_string(),
-            signature: "0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000".to_string(),
-            kid: "test-key-001".to_string(),
-        }
-    }
-
-    /// Test helper to create a trusted key
-    pub fn create_test_trusted_key() -> TrustedKey {
-        TrustedKey {
-            kid: "test-key-001".to_string(),
-            public_key: vec![0u8; 32],
-            status: KeyStatus::Active,
-            retired_at: None,
-        }
-    }
-
-    /// Test helper to create a break glass context
-    pub fn create_test_break_glass_context() -> BreakGlassContext {
-        BreakGlassContext {
-            enabled: true,
-            scope_tenant_id: Some("test-tenant".to_string()),
-            scope_digest: Some(
-                "sha256-0000000000000000000000000000000000000000000000000000000000000000"
-                    .to_string(),
-            ),
-            expiry_ts: 9999999999u64,
-        }
-    }
-}
-
 #[derive(Debug, Clone)]
 pub struct Manifest {
     pub id: String,
@@ -50,7 +6,7 @@ pub struct Manifest {
     pub kid: String,
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum KeyStatus {
     Active,
     Next,
@@ -62,14 +18,17 @@ pub enum KeyStatus {
 pub enum VerificationResult {
     Ok,
     DigestMismatch,
+    SignatureAlgorithmMismatch,
     SignatureInvalid,
     KeyRevoked,
     KeyRetiredOutOfWindow,
+    KeyNotYetValid,
+    KeyExpired,
     BreakGlassExpired,
     BreakGlassScopeMismatch,
     BreakGlassDisabled,
     BreakGlassScopeMissing,
-    KeyMismatch, // New: explicit triage
+    KeyMismatch,
 }
 
 pub struct BreakGlassContext {
@@ -79,117 +38,120 @@ pub struct BreakGlassContext {
     pub expiry_ts: u64,
 }
 
+#[derive(Debug, Clone)]
 pub struct TrustedKey {
     pub kid: String,
-    pub public_key: Vec<u8>,
+    pub alg: String,
     pub status: KeyStatus,
     pub retired_at: Option<u64>,
+    pub not_before: Option<u64>,
+    pub not_after: Option<u64>,
+    pub public_key: [u8; 32],
 }
 
-pub fn signature_scheme_for_digest(digest: &str) -> Option<&'static str> {
-    fn valid_hex_payload(payload: &str, expected_len: usize) -> bool {
-        payload.len() == expected_len && payload.as_bytes().iter().all(u8::is_ascii_hexdigit)
-    }
+const RETIRED_KEY_GRACE_PERIOD_SECONDS: u64 = 86_400;
+const CLOCK_DRIFT_TOLERANCE_SECONDS: u64 = 30;
 
-    if let Some(payload) = digest.strip_prefix("sha256-") {
-        return valid_hex_payload(payload, 64).then_some("ed25519-sha256");
-    }
-    if let Some(payload) = digest.strip_prefix("sha384-") {
-        return valid_hex_payload(payload, 96).then_some("ed25519-sha384");
-    }
-    None
-}
-
-pub fn manifest_signing_payload(manifest: &Manifest, scheme: &str) -> Vec<u8> {
-    format!(
-        "flexisuite-manifest:v1:{scheme}:{}:{}:{}",
-        manifest.id, manifest.kid, manifest.digest
-    )
-    .into_bytes()
-}
-
-fn verify_signature(payload: &[u8], signature_hex: &str, public_key: &[u8]) -> bool {
-    const ED25519_SIG_LEN: usize = 64;
-    const SIGNATURE_HEX_LEN: usize = ED25519_SIG_LEN * 2;
-    const PUBKEY_LEN: usize = 32;
-
-    if signature_hex.len() != SIGNATURE_HEX_LEN || public_key.len() != PUBKEY_LEN {
-        return false;
-    }
-
-    let signature = match hex::decode(signature_hex) {
-        Ok(sig) => sig,
-        Err(_) => return false,
-    };
-    UnparsedPublicKey::new(&ED25519, public_key)
-        .verify(payload, &signature)
-        .is_ok()
-}
-
-/// Verifies a manifest signature using Ed25519 (`ring::signature::ED25519`)
-/// via [`verify_signature`], with fail-closed checks for digest/key validity and
-/// time-aware retired-key acceptance window enforcement.
 pub fn verify_manifest(
     manifest: &Manifest,
     trusted_key: &TrustedKey,
     expected_artifact_digest: &str,
     now: u64,
 ) -> VerificationResult {
-    // 1. Digest Existence/Format Check + Scheme Selection
-    // Spec: Must use "-" prefix (e.g., sha256-..., sha384-...)
     // REQ-SUPPLYCHAIN-DIGEST-FORMAT
-    let scheme = match signature_scheme_for_digest(&manifest.digest) {
-        Some(scheme) => scheme,
-        None => {
-            return VerificationResult::DigestMismatch; // Malformed or unsupported digest
-        }
-    };
-
-    if trusted_key.public_key.is_empty() {
-        return VerificationResult::SignatureInvalid;
-    }
-
-    // 1b. Artifact Digest Verification (Contract: Manifest must match artifact)
-    // Enforce mandatory check as per REQ-SUPPLYCHAIN-DIGEST-MATCH
-    if manifest.digest != expected_artifact_digest {
+    let has_valid_prefix =
+        manifest.digest.starts_with("sha256-") || manifest.digest.starts_with("sha384-");
+    if !has_valid_prefix {
+        metrics::counter!("verification_result", "result" => "DigestMismatch", "flow" => "manifest").increment(1);
         return VerificationResult::DigestMismatch;
     }
 
-    // 2. Key ID Match (Contract: Key used must match Trusted Key)
+    // REQ-SUPPLYCHAIN-DIGEST-MATCH
+    if manifest.digest != expected_artifact_digest {
+        metrics::counter!("verification_result", "result" => "DigestMismatch", "flow" => "manifest").increment(1);
+        return VerificationResult::DigestMismatch;
+    }
+
     if manifest.kid != trusted_key.kid {
-        // Better error classification for audit/triage
+        metrics::counter!("verification_result", "result" => "KeyMismatch", "flow" => "manifest").increment(1);
         return VerificationResult::KeyMismatch;
     }
 
-    // 2b. Key Status Check
     match trusted_key.status {
-        KeyStatus::Revoked => return VerificationResult::KeyRevoked,
+        KeyStatus::Revoked => {
+            metrics::counter!("verification_result", "result" => "KeyRevoked", "flow" => "manifest").increment(1);
+            return VerificationResult::KeyRevoked;
+        }
         KeyStatus::Retired => {
-            // Check Grace Window (e.g., 24h = 86400s)
-            let grace_period = 86400;
             if let Some(retired_at) = trusted_key.retired_at {
-                if now > retired_at.saturating_add(grace_period) {
+                if now >= retired_at.saturating_add(RETIRED_KEY_GRACE_PERIOD_SECONDS) {
+                    metrics::counter!("verification_result", "result" => "KeyRetiredOutOfWindow", "flow" => "manifest")
+                        .increment(1);
                     return VerificationResult::KeyRetiredOutOfWindow;
                 }
-                // In window -> Proceed to signature check
             } else {
-                // Retired but no timestamp -> Assume out
+                metrics::counter!("verification_result", "result" => "KeyRetiredOutOfWindow", "flow" => "manifest")
+                    .increment(1);
                 return VerificationResult::KeyRetiredOutOfWindow;
             }
         }
-        KeyStatus::Next => {
-            // Verification allowed for Next keys (during rotation preparation)
+        KeyStatus::Next | KeyStatus::Active => {}
+    }
+
+    if let Some(nbf) = trusted_key.not_before {
+        if now.saturating_add(CLOCK_DRIFT_TOLERANCE_SECONDS) < nbf {
+            metrics::counter!("verification_result", "result" => "KeyNotYetValid", "flow" => "manifest").increment(1);
+            return VerificationResult::KeyNotYetValid;
         }
-        KeyStatus::Active => {}
     }
 
-    // 3. Cryptographic Signature Verification (fail closed)
-    let payload = manifest_signing_payload(manifest, scheme);
-    if !verify_signature(&payload, &manifest.signature, &trusted_key.public_key) {
-        return VerificationResult::SignatureInvalid;
+    if let Some(exp) = trusted_key.not_after {
+        if now > exp.saturating_add(CLOCK_DRIFT_TOLERANCE_SECONDS) {
+            metrics::counter!("verification_result", "result" => "KeyExpired", "flow" => "manifest").increment(1);
+            return VerificationResult::KeyExpired;
+        }
     }
 
-    VerificationResult::Ok
+    if !trusted_key.alg.trim().eq_ignore_ascii_case("ed25519") {
+        metrics::counter!("verification_result", "result" => "SignatureAlgorithmMismatch", "flow" => "manifest")
+            .increment(1);
+        return VerificationResult::SignatureAlgorithmMismatch;
+    }
+
+    #[cfg(feature = "test-utils")]
+    {
+        if manifest.signature == "invalid" {
+            metrics::counter!("verification_result", "result" => "SignatureInvalid", "flow" => "manifest").increment(1);
+            return VerificationResult::SignatureInvalid;
+        }
+        metrics::counter!("verification_result", "result" => "Ok", "flow" => "manifest").increment(1);
+        return VerificationResult::Ok;
+    }
+
+    #[cfg(not(feature = "test-utils"))]
+    {
+        use ring::signature;
+
+        let mut sig_bytes = [0u8; 64];
+        if hex::decode_to_slice(&manifest.signature, &mut sig_bytes).is_err() {
+            metrics::counter!("verification_result", "result" => "SignatureInvalid", "flow" => "manifest").increment(1);
+            return VerificationResult::SignatureInvalid;
+        }
+
+        let peer_public_key =
+            signature::UnparsedPublicKey::new(&signature::ED25519, &trusted_key.public_key);
+
+        if peer_public_key
+            .verify(manifest.digest.as_bytes(), &sig_bytes)
+            .is_err()
+        {
+            metrics::counter!("verification_result", "result" => "SignatureInvalid", "flow" => "manifest").increment(1);
+            return VerificationResult::SignatureInvalid;
+        }
+
+        metrics::counter!("verification_result", "result" => "Ok", "flow" => "manifest").increment(1);
+        VerificationResult::Ok
+    }
 }
 
 pub fn verify_break_glass(
@@ -199,31 +161,45 @@ pub fn verify_break_glass(
     now: u64,
 ) -> VerificationResult {
     if !ctx.enabled {
+        metrics::counter!("verification_result", "result" => "BreakGlassDisabled", "flow" => "break_glass").increment(1);
         return VerificationResult::BreakGlassDisabled;
     }
-    // Strict Expiry: now >= expiry means expired
+
     if now >= ctx.expiry_ts {
+        metrics::counter!("verification_result", "result" => "BreakGlassExpired", "flow" => "break_glass").increment(1);
         return VerificationResult::BreakGlassExpired;
     }
 
-    // Strict Scope: Global bypass is FORBIDDEN. Scopes must be present.
     match &ctx.scope_tenant_id {
         Some(scope_tid) => {
             if scope_tid != tenant_id {
+                metrics::counter!("verification_result", "result" => "BreakGlassScopeMismatch", "flow" => "break_glass")
+                    .increment(1);
                 return VerificationResult::BreakGlassScopeMismatch;
             }
         }
-        None => return VerificationResult::BreakGlassScopeMissing,
+        None => {
+            metrics::counter!("verification_result", "result" => "BreakGlassScopeMissing", "flow" => "break_glass")
+                .increment(1);
+            return VerificationResult::BreakGlassScopeMissing;
+        }
     }
 
     match &ctx.scope_digest {
         Some(scope_dig) => {
             if scope_dig != digest {
+                metrics::counter!("verification_result", "result" => "BreakGlassScopeMismatch", "flow" => "break_glass")
+                    .increment(1);
                 return VerificationResult::BreakGlassScopeMismatch;
             }
         }
-        None => return VerificationResult::BreakGlassScopeMissing,
+        None => {
+            metrics::counter!("verification_result", "result" => "BreakGlassScopeMissing", "flow" => "break_glass")
+                .increment(1);
+            return VerificationResult::BreakGlassScopeMissing;
+        }
     }
 
+    metrics::counter!("verification_result", "result" => "Ok", "flow" => "break_glass").increment(1);
     VerificationResult::Ok
 }

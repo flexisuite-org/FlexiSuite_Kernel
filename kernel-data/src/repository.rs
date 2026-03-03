@@ -84,10 +84,10 @@ fn history_actor_id(tenant_id: &str, user_id: Option<&crate::auth_context::UserI
         .unwrap_or_else(|| "system".to_string())
 }
 
-fn required_active_value<T: Clone>(value: &ActiveValue<T>, field_name: &str) -> Result<T, DataError>
-where
-    T: Into<sea_orm::Value>,
-{
+fn required_active_value<T: Clone + Into<sea_orm::Value>>(
+    value: &ActiveValue<T>,
+    field_name: &str,
+) -> Result<T, DataError> {
     match value {
         ActiveValue::Set(v) | ActiveValue::Unchanged(v) => Ok(v.clone()),
         ActiveValue::NotSet => Err(DataError::ValidationError(format!(
@@ -96,10 +96,7 @@ where
     }
 }
 
-fn active_value_or<T: Clone>(value: &ActiveValue<T>, default: T) -> T
-where
-    T: Into<sea_orm::Value>,
-{
+fn active_value_or<T: Clone + Into<sea_orm::Value>>(value: &ActiveValue<T>, default: T) -> T {
     match value {
         ActiveValue::Set(v) | ActiveValue::Unchanged(v) => v.clone(),
         ActiveValue::NotSet => default,

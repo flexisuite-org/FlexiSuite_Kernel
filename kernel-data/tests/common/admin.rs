@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 use sea_orm::{ConnectionTrait, DatabaseConnection, DbBackend, Statement};
 
 /// A test-only helper that wraps `DatabaseConnection` to perform administrative
@@ -6,16 +7,19 @@ use sea_orm::{ConnectionTrait, DatabaseConnection, DbBackend, Statement};
 /// This exists to enforce the rule that all DB access must go through a usage-specific
 /// context (like `TenantContext`), while acknowledging that tests need to perform
 /// setup steps that are inherently "super-user" and not tenant-scoped.
+#[allow(dead_code)]
 pub struct TestAdminTenantContext<'a> {
     db: &'a DatabaseConnection,
 }
 
 impl<'a> TestAdminTenantContext<'a> {
+    #[allow(dead_code)]
     pub fn new(db: &'a DatabaseConnection) -> Self {
         Self { db }
     }
 
     /// Creates the 'flexi' role if it does not exist.
+    #[allow(dead_code)]
     pub async fn create_role(&self) -> Result<(), Box<dyn std::error::Error>> {
         self.db
             .execute_unprepared("DO $$ BEGIN IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = 'flexi') THEN CREATE ROLE flexi; END IF; END $$;")
@@ -24,6 +28,7 @@ impl<'a> TestAdminTenantContext<'a> {
     }
 
     /// Runs database migrations.
+    #[allow(dead_code)]
     pub async fn run_migrations(&self) -> Result<(), Box<dyn std::error::Error>> {
         use migration::MigratorTrait;
         migration::Migrator::up(self.db, None).await?;
@@ -31,6 +36,7 @@ impl<'a> TestAdminTenantContext<'a> {
     }
 
     /// Sets a secret for the 'postgres' role.
+    #[allow(dead_code)]
     pub async fn set_secret(&self, secret: &str) -> Result<(), Box<dyn std::error::Error>> {
         // PostgreSQL's ALTER ROLE ... SET does not support parameters ($1).
         // Escape single quotes to keep SQL string literal boundaries intact.
@@ -54,6 +60,7 @@ impl<'a> TestAdminTenantContext<'a> {
     /// tenant isolation. It should ONLY be used for test setup/teardown or
     /// verifying specific security controls (e.g. attempting to tamper with
     /// session variables).
+    #[allow(dead_code)]
     pub async fn execute_unprepared_bloody_murder(
         &self,
         sql: &str,
@@ -67,6 +74,7 @@ impl<'a> TestAdminTenantContext<'a> {
     /// # Safety
     /// This method allows executing arbitrary SQL, bypassing type checks and
     /// tenant isolation. It should ONLY be used for test assertions.
+    #[allow(dead_code)]
     pub async fn query_one_check(
         &self,
         sql: &str,
@@ -83,6 +91,7 @@ impl<'a> TestAdminTenantContext<'a> {
     /// # Safety
     /// This method allows executing arbitrary SQL, bypassing type checks and
     /// tenant isolation. It should ONLY be used for test assertions.
+    #[allow(dead_code)]
     pub async fn query_all_check(
         &self,
         sql: &str,

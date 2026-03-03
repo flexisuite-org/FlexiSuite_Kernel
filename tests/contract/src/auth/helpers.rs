@@ -1,6 +1,6 @@
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::{Duration, SecondsFormat, Utc};
-use kernel_api::auth::init_auth_config_with_public_key_and_revoked_kids_and_legacy_mode;
+use kernel_api::auth::init_auth_config_with_public_key_and_revoked_kids;
 use rusty_paseto::core::{Key, PasetoAsymmetricPrivateKey};
 use rusty_paseto::prelude::*;
 use std::sync::OnceLock;
@@ -14,10 +14,9 @@ pub fn setup() {
     let (_, pub_b64) = get_test_keypair();
     AUTH_INIT.get_or_init(|| {
         let _ = tracing_subscriber::fmt().with_test_writer().try_init();
-        init_auth_config_with_public_key_and_revoked_kids_and_legacy_mode(
+        init_auth_config_with_public_key_and_revoked_kids(
             &pub_b64,
             &["revoked"],
-            false,
         )
         .expect("Auth initialization failed");
     });
@@ -49,6 +48,15 @@ pub fn generate_token(valid: bool) -> String {
 }
 
 pub fn generate_token_with_kid(valid: bool, kid: Option<&str>) -> String {
+    generate_token_with_claims(valid, kid, "tenant_001", Some("user_123"))
+}
+
+pub fn generate_token_with_claims(
+    valid: bool,
+    kid: Option<&str>,
+    tenant_id: &str,
+    user_id: Option<&str>,
+) -> String {
     let (combined_bytes, _) = get_test_keypair();
     let key_array: [u8; 64] = combined_bytes.try_into().unwrap();
     let key = Key::<64>::from(key_array);
@@ -70,8 +78,10 @@ pub fn generate_token_with_kid(valid: bool, kid: Option<&str>) -> String {
     let footer = kid.map(|k| serde_json::json!({ "kid": k }).to_string());
     let mut builder = PasetoBuilder::<V4, Public>::default();
 
-    builder.set_claim(CustomClaim::try_from(("tenant_id", "tenant_001")).unwrap());
-    builder.set_claim(CustomClaim::try_from(("user_id", "user_123")).unwrap());
+    builder.set_claim(CustomClaim::try_from(("tenant_id", tenant_id)).unwrap());
+    if let Some(uid) = user_id {
+        builder.set_claim(CustomClaim::try_from(("user_id", uid)).unwrap());
+    }
     builder.set_claim(ExpirationClaim::try_from(exp_str.as_str()).unwrap());
     builder.set_claim(NotBeforeClaim::try_from(nbf_str.as_str()).unwrap());
     builder.set_claim(IssuedAtClaim::try_from(iat_str.as_str()).unwrap());

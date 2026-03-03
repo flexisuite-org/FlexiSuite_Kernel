@@ -1,28 +1,33 @@
 use axum::{
     Json, Router,
-    body::Body,
     extract::{Extension, Path},
-    http::{HeaderName, HeaderValue, Request, StatusCode},
-    middleware::{Next, from_fn, from_fn_with_state},
-    response::Response,
-    routing::get,
+    http::{HeaderName, HeaderValue, StatusCode},
+    middleware::{from_fn, from_fn_with_state},
+    response::{IntoResponse, Response},
+    routing::{get, post},
 };
 use sea_orm::DatabaseConnection;
 use serde::Serialize;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::task::JoinHandle;
+use tower_http::set_header::SetResponseHeaderLayer;
 use uuid::Uuid;
 
 use crate::auth::{TenantContext, auth_middleware};
 use crate::middleware::{
     ActionStatus, MiddlewareConfig, MiddlewareState, get_action, idempotency_middleware,
-    quota_middleware, record_action,
+    load_permissions_middleware, quota_middleware, record_action, require_permission,
 };
 
 pub mod auth;
 pub mod diagnostics;
 pub mod middleware;
 pub mod profile;
+
+// Re-export entities from kernel-data for use in tests and other consumers
+#[cfg(feature = "test-utils")]
+pub use kernel_data::entities;
 
 #[derive(Serialize)]
 pub struct TestWriteResponse {
@@ -38,11 +43,11 @@ pub struct ActionStatusResponse {
 }
 
 #[derive(Serialize)]
-pub struct ErrorResponse {
-    pub error: String,
-    pub code: String,
-    pub action_id: Option<String>,
-    pub tenant_id: String,
+struct JsonError {
+    status: u16,
+    error: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    request_id: Option<String>,
 }
 
 pub async fn build_app(
@@ -59,65 +64,131 @@ pub fn build_app_with_state(
 ) -> (Router, JoinHandle<()>) {
     let cleanup_handle = state.start_cleanup_task();
 
-    // Public health endpoints (no auth required)
     let public_router = Router::new()
-        .route("/health", get(|| async { "OK" }))
-        .route("/readiness", get(readiness));
+        .route("/health", get(liveness))
+        .route("/health/liveness", get(liveness));
 
-    // Test endpoints - only available in test mode or with test-utils feature
-    #[cfg(any(test, feature = "test-utils"))]
-    let test_router = Router::new()
-        .route("/test", axum::routing::post(write_test).put(write_test))
-        .route("/actions/:action_id", get(get_action_status));
+    let auth_only_router = Router::new()
+        .route("/health/readiness", get(readiness))
+        .layer(from_fn_with_state(db.clone(), auth_middleware));
 
-    #[cfg(not(any(test, feature = "test-utils")))]
-    let test_router: Router<()> = Router::new();
+    // Middleware chain (outermost -> innermost):
+    // Auth -> LoadPermissions -> RequirePermission -> Quota -> Idempotency
 
-    let protected_router = test_router
+    let require_perm = |p: &'static str| from_fn(move |req, next| require_permission(p, req, next));
+
+    #[allow(unused_mut)]
+    let mut protected_router = Router::new()
+        .route(
+            "/test",
+            post(write_test)
+                .put(write_test)
+                .layer(from_fn(idempotency_middleware))
+                .layer(from_fn(quota_middleware))
+                .layer(require_perm("test:write")),
+        )
+        .route(
+            "/actions/:action_id",
+            get(get_action_status)
+                .layer(from_fn(idempotency_middleware))
+                .layer(from_fn(quota_middleware))
+                .layer(require_perm("action:read")),
+        )
         // Diagnostics routes under /api/v1/diagnostics
         .nest("/api/v1/diagnostics", diagnostics::routes())
-        // Outermost applied last: Auth -> Idempotency -> Quota
-        .route_layer(from_fn(quota_middleware))
-        .route_layer(from_fn(idempotency_middleware))
-        .route_layer(from_fn_with_state(db.clone(), auth_middleware));
+        // Outermost applied last
+        .layer(from_fn(load_permissions_middleware))
+        .layer(from_fn_with_state(db.clone(), auth_middleware));
+
+    #[cfg(feature = "test-utils")]
+    {
+        protected_router = protected_router.route(
+            "/test/protected",
+            get(|| async { "Access Granted" })
+                .layer(from_fn(idempotency_middleware))
+                .layer(from_fn(quota_middleware))
+                .layer(require_perm("test:read")),
+        );
+    }
 
     (
         Router::new()
             .merge(public_router)
+            .merge(auth_only_router)
             .merge(protected_router)
-            .layer(from_fn(security_headers_middleware))
-            .layer(Extension(state)),
+            .layer(Extension(state))
+            .layer(Extension(db))
+            .layer(SetResponseHeaderLayer::overriding(
+                HeaderName::from_static("x-frame-options"),
+                HeaderValue::from_static("DENY"),
+            ))
+            .layer(SetResponseHeaderLayer::overriding(
+                HeaderName::from_static("x-content-type-options"),
+                HeaderValue::from_static("nosniff"),
+            ))
+            .layer(SetResponseHeaderLayer::overriding(
+                HeaderName::from_static("strict-transport-security"),
+                HeaderValue::from_static("max-age=31536000; includeSubDomains; preload"),
+            ))
+            .layer(SetResponseHeaderLayer::overriding(
+                HeaderName::from_static("content-security-policy"),
+                HeaderValue::from_static("default-src 'none'; frame-ancestors 'none';"),
+            ))
+            .layer(SetResponseHeaderLayer::overriding(
+                HeaderName::from_static("cross-origin-opener-policy"),
+                HeaderValue::from_static("same-origin"),
+            ))
+            .layer(SetResponseHeaderLayer::overriding(
+                HeaderName::from_static("cross-origin-embedder-policy"),
+                HeaderValue::from_static("require-corp"),
+            ))
+            .layer(SetResponseHeaderLayer::overriding(
+                HeaderName::from_static("cross-origin-resource-policy"),
+                HeaderValue::from_static("same-origin"),
+            )),
         cleanup_handle,
     )
 }
 
-async fn security_headers_middleware(req: Request<Body>, next: Next) -> Response {
-    let mut response = next.run(req).await;
-    let headers = response.headers_mut();
-    headers.insert(
-        axum::http::header::STRICT_TRANSPORT_SECURITY,
-        HeaderValue::from_static("max-age=31536000; includeSubDomains"),
-    );
-    headers.insert(
-        HeaderName::from_static("x-content-type-options"),
-        HeaderValue::from_static("nosniff"),
-    );
-    headers.insert(
-        HeaderName::from_static("x-frame-options"),
-        HeaderValue::from_static("DENY"),
-    );
-    headers.insert(
-        HeaderName::from_static("content-security-policy"),
-        HeaderValue::from_static("default-src 'none'; frame-ancestors 'none'; base-uri 'none'"),
-    );
-    response
+async fn liveness() -> StatusCode {
+    StatusCode::OK
 }
 
-pub async fn readiness(Extension(state): Extension<MiddlewareState>) -> StatusCode {
-    if state.is_ready().await {
-        StatusCode::OK
-    } else {
-        StatusCode::SERVICE_UNAVAILABLE
+fn readiness_db_timeout() -> Duration {
+    std::env::var("HEALTH_READINESS_DB_TIMEOUT_MS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|v| *v > 0)
+        .map(Duration::from_millis)
+        .unwrap_or_else(|| Duration::from_secs(1))
+}
+
+async fn readiness(Extension(ctx): Extension<TenantContext>) -> impl IntoResponse {
+    let timeout = readiness_db_timeout();
+    let result = ctx
+        .with_system_context(|system_ctx| async move {
+            let db = system_ctx.db().map_err(|e| format!("context error: {e}"))?;
+            match tokio::time::timeout(timeout, db.ping()).await {
+                Ok(Ok(_)) => Ok(()),
+                Ok(Err(e)) => Err(format!("db ping failed: {e}")),
+                Err(_) => Err(format!(
+                    "db ping timed out after {}ms",
+                    timeout.as_millis()
+                )),
+            }
+        })
+        .await;
+
+    match result {
+        Ok(Ok(())) => (StatusCode::OK, "OK").into_response(),
+        Ok(Err(e)) => {
+            tracing::error!("Readiness check failed (system context): {e}");
+            (StatusCode::SERVICE_UNAVAILABLE, "Unhealthy (DB)").into_response()
+        }
+        Err(e) => {
+            tracing::error!("Readiness check failed (context): {e}");
+            (StatusCode::SERVICE_UNAVAILABLE, "Unhealthy (Context)").into_response()
+        }
     }
 }
 
@@ -164,7 +235,7 @@ pub async fn get_action_status(
     Path(action_id): Path<String>,
     Extension(state): Extension<MiddlewareState>,
     Extension(ctx): Extension<TenantContext>,
-) -> Result<Json<ActionStatusResponse>, (StatusCode, Json<ErrorResponse>)> {
+) -> Result<Json<ActionStatusResponse>, StatusCode> {
     if let Some(record) = get_action(&state, ctx.tenant_id().clone(), &action_id).await {
         return Ok(Json(ActionStatusResponse {
             action_id,
@@ -172,13 +243,18 @@ pub async fn get_action_status(
         }));
     }
 
-    Err((
-        StatusCode::NOT_FOUND,
-        Json(ErrorResponse {
-            error: "action not found".to_string(),
-            code: "ACTION_NOT_FOUND".to_string(),
-            action_id: Some(action_id),
-            tenant_id: ctx.tenant_id().to_string(),
-        }),
-    ))
+    Err(StatusCode::NOT_FOUND)
+}
+
+pub fn build_json_error_response(
+    message: impl Into<String>,
+    status: StatusCode,
+    request_id: Option<String>,
+) -> Response {
+    let body = JsonError {
+        status: status.as_u16(),
+        error: message.into(),
+        request_id,
+    };
+    (status, Json(body)).into_response()
 }

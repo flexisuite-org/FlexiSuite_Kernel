@@ -26,13 +26,19 @@ impl QuotaViolation {
     pub fn headers(&self) -> Vec<(String, String)> {
         let mut headers = vec![];
         // REQ-QUOTA-HTTP-CONTRACT: Must include Retry-After
-        let value = if matches!(self.layer, QuotaLayer::CircuitBreaker) || self.status_code() == 503
-        {
-            // System-protection window for service unavailable responses.
-            self.retry_after_s.clamp(1, 30)
-        } else {
-            // Guard: Cap at 1 year (31,536,000s) to prevent overflow/abuse
-            self.retry_after_s.clamp(1, 31_536_000)
+        let value = match self.layer {
+            QuotaLayer::SystemHardLimit => {
+                // Spec: 1-30s clip for system protection
+                self.retry_after_s.clamp(1, 30)
+            }
+            QuotaLayer::CircuitBreaker => {
+                // Circuit-breaker backoff must never be 0s.
+                self.retry_after_s.max(1)
+            }
+            _ => {
+                // Guard: Cap at 1 year (31,536,000s) to prevent overflow/abuse
+                self.retry_after_s.min(31_536_000)
+            }
         };
         headers.push(("Retry-After".to_string(), value.to_string()));
         headers
