@@ -132,7 +132,7 @@ struct Ctx {
     limits: StoreLimits,
     stdout: MemoryOutputPipe,
     client: reqwest::Client,
-    allowlist: Vec<String>,
+    allowlist: crate::NormalizedAllowlist,
 }
 
 #[derive(Deserialize)]
@@ -353,7 +353,7 @@ impl SandboxRuntime for WasmSandbox {
             .build();
 
         let resolver = Arc::new(crate::AllowlistResolver::new(
-            self.options.permissions.network_allowlist.clone(),
+            &self.options.permissions.network_allowlist,
         ));
         let client = reqwest::Client::builder()
             .dns_resolver(resolver)
@@ -368,7 +368,9 @@ impl SandboxRuntime for WasmSandbox {
                 limits,
                 stdout,
                 client,
-                allowlist: self.options.permissions.network_allowlist.clone(),
+                allowlist: crate::NormalizedAllowlist::new(
+                    &self.options.permissions.network_allowlist,
+                ),
             },
         );
         store.limiter(|state| &mut state.limits);

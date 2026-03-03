@@ -1,9 +1,11 @@
 use axum::{
     Json, Router,
+    body::Body,
     extract::{Extension, Path},
-    http::{HeaderName, HeaderValue, StatusCode},
-    middleware::{from_fn, from_fn_with_state},
-    routing::{get, post},
+    http::{HeaderName, HeaderValue, Request, StatusCode},
+    middleware::{Next, from_fn, from_fn_with_state},
+    response::Response,
+    routing::get,
 };
 use sea_orm::DatabaseConnection;
 use serde::Serialize;
@@ -65,7 +67,7 @@ pub fn build_app_with_state(
     // Test endpoints - only available in test mode or with test-utils feature
     #[cfg(any(test, feature = "test-utils"))]
     let test_router = Router::new()
-        .route("/test", post(write_test).put(write_test))
+        .route("/test", axum::routing::post(write_test).put(write_test))
         .route("/actions/:action_id", get(get_action_status));
 
     #[cfg(not(any(test, feature = "test-utils")))]
@@ -75,17 +77,40 @@ pub fn build_app_with_state(
         // Diagnostics routes under /api/v1/diagnostics
         .nest("/api/v1/diagnostics", diagnostics::routes())
         // Outermost applied last: Auth -> Idempotency -> Quota
-        .layer(from_fn(quota_middleware))
-        .layer(from_fn(idempotency_middleware))
-        .layer(from_fn_with_state(db.clone(), auth_middleware));
+        .route_layer(from_fn(quota_middleware))
+        .route_layer(from_fn(idempotency_middleware))
+        .route_layer(from_fn_with_state(db.clone(), auth_middleware));
 
     (
         Router::new()
             .merge(public_router)
             .merge(protected_router)
+            .layer(from_fn(security_headers_middleware))
             .layer(Extension(state)),
         cleanup_handle,
     )
+}
+
+async fn security_headers_middleware(req: Request<Body>, next: Next) -> Response {
+    let mut response = next.run(req).await;
+    let headers = response.headers_mut();
+    headers.insert(
+        axum::http::header::STRICT_TRANSPORT_SECURITY,
+        HeaderValue::from_static("max-age=31536000; includeSubDomains"),
+    );
+    headers.insert(
+        HeaderName::from_static("x-content-type-options"),
+        HeaderValue::from_static("nosniff"),
+    );
+    headers.insert(
+        HeaderName::from_static("x-frame-options"),
+        HeaderValue::from_static("DENY"),
+    );
+    headers.insert(
+        HeaderName::from_static("content-security-policy"),
+        HeaderValue::from_static("default-src 'none'; frame-ancestors 'none'; base-uri 'none'"),
+    );
+    response
 }
 
 pub async fn readiness(Extension(state): Extension<MiddlewareState>) -> StatusCode {

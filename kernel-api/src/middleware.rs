@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use axum::{
-    body::{Body, to_bytes},
+    body::{Body, Bytes, to_bytes},
     extract::Json,
     http::{
         HeaderMap, HeaderName, HeaderValue, Method, Request, StatusCode, header::CONTENT_LENGTH,
@@ -9,6 +9,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use base64::prelude::*;
+use futures_util::Stream;
 use kernel_core::idempotency::canonicalize_request_target;
 use kernel_core::quota::{QuotaLayer, QuotaViolation};
 use redis::AsyncCommands;
@@ -16,7 +17,9 @@ use ring::digest::{SHA256, digest};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt;
+use std::pin::Pin;
 use std::sync::{Arc, Weak};
+use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, Notify};
 use tracing::{error, info, instrument, warn};
@@ -1424,6 +1427,184 @@ pub struct MiddlewareState {
     pub action_store: Arc<dyn ActionStore>,
     pub quota_store: Arc<dyn QuotaStore>,
     pub config: MiddlewareConfig,
+    pub redis_health_conn: Option<Arc<Mutex<redis::aio::ConnectionManager>>>,
+}
+
+struct ReplayCacheFinalizeState {
+    finalized: std::sync::atomic::AtomicBool,
+    store: Arc<dyn IdempotencyStore>,
+    scope_key: IdempotencyScopeKey,
+    lease: IdempotencyLease,
+    body_hash: String,
+    action_id: String,
+    status: StatusCode,
+    headers: Vec<(String, String)>,
+    idempotency_ttl: Duration,
+    collected: std::sync::Mutex<Vec<u8>>,
+    overflowed: std::sync::atomic::AtomicBool,
+}
+
+impl ReplayCacheFinalizeState {
+    fn new(
+        store: Arc<dyn IdempotencyStore>,
+        scope_key: IdempotencyScopeKey,
+        lease: IdempotencyLease,
+        body_hash: String,
+        action_id: String,
+        status: StatusCode,
+        headers: Vec<(String, String)>,
+        idempotency_ttl: Duration,
+    ) -> Self {
+        Self {
+            finalized: std::sync::atomic::AtomicBool::new(false),
+            store,
+            scope_key,
+            lease,
+            body_hash,
+            action_id,
+            status,
+            headers,
+            idempotency_ttl,
+            collected: std::sync::Mutex::new(Vec::new()),
+            overflowed: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
+
+    fn mark_finalized(&self) -> bool {
+        self.finalized
+            .compare_exchange(
+                false,
+                true,
+                std::sync::atomic::Ordering::SeqCst,
+                std::sync::atomic::Ordering::SeqCst,
+            )
+            .is_ok()
+    }
+
+    fn release_inflight(self: &Arc<Self>) {
+        if !self.mark_finalized() {
+            return;
+        }
+        let store = self.store.clone();
+        let scope_key = self.scope_key.clone();
+        let lease = self.lease.clone();
+        tokio::spawn(async move {
+            let _ = store.release_inflight(&scope_key, &lease).await;
+        });
+    }
+
+    fn complete_or_release(self: &Arc<Self>) {
+        if !self.mark_finalized() {
+            return;
+        }
+
+        if self.overflowed.load(std::sync::atomic::Ordering::SeqCst) {
+            self.release_inflight_fallback();
+            return;
+        }
+
+        let body = match self.collected.lock() {
+            Ok(buf) => buf.clone(),
+            Err(_) => {
+                self.release_inflight_fallback();
+                return;
+            }
+        };
+
+        let stored = IdempotencyRecord {
+            body_hash: self.body_hash.clone(),
+            action_id: self.action_id.clone(),
+            status: self.status,
+            headers: self.headers.clone(),
+            body,
+            expires_at: Instant::now() + self.idempotency_ttl,
+        };
+        let store = self.store.clone();
+        let scope_key = self.scope_key.clone();
+        let lease = self.lease.clone();
+        tokio::spawn(async move {
+            if store.complete(scope_key.clone(), &lease, stored).await.is_err() {
+                let _ = store.release_inflight(&scope_key, &lease).await;
+                error!("Failed to complete idempotency record");
+            }
+        });
+    }
+
+    fn release_inflight_fallback(self: &Arc<Self>) {
+        let store = self.store.clone();
+        let scope_key = self.scope_key.clone();
+        let lease = self.lease.clone();
+        tokio::spawn(async move {
+            let _ = store.release_inflight(&scope_key, &lease).await;
+        });
+    }
+}
+
+struct ReplayCacheTee<S> {
+    inner: S,
+    shared: Arc<ReplayCacheFinalizeState>,
+    max_replay_body_size: usize,
+}
+
+impl<S> ReplayCacheTee<S> {
+    fn new(inner: S, shared: Arc<ReplayCacheFinalizeState>, max_replay_body_size: usize) -> Self {
+        Self {
+            inner,
+            shared,
+            max_replay_body_size,
+        }
+    }
+}
+
+impl<S, E> Stream for ReplayCacheTee<S>
+where
+    S: Stream<Item = Result<Bytes, E>> + Unpin,
+{
+    type Item = Result<Bytes, E>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        match Pin::new(&mut self.inner).poll_next(cx) {
+            Poll::Ready(Some(Ok(chunk))) => {
+                if !self
+                    .shared
+                    .overflowed
+                    .load(std::sync::atomic::Ordering::SeqCst)
+                {
+                    match self.shared.collected.lock() {
+                        Ok(mut buf) => {
+                            if buf.len().saturating_add(chunk.len()) <= self.max_replay_body_size {
+                                buf.extend_from_slice(&chunk);
+                            } else {
+                                self.shared
+                                    .overflowed
+                                    .store(true, std::sync::atomic::Ordering::SeqCst);
+                                self.shared.release_inflight();
+                            }
+                        }
+                        Err(_) => {
+                            self.shared.release_inflight();
+                        }
+                    }
+                }
+                Poll::Ready(Some(Ok(chunk)))
+            }
+            Poll::Ready(Some(Err(e))) => {
+                self.shared.release_inflight();
+                Poll::Ready(Some(Err(e)))
+            }
+            Poll::Ready(None) => {
+                self.shared.complete_or_release();
+                Poll::Ready(None)
+            }
+            Poll::Pending => Poll::Pending,
+        }
+    }
+}
+
+impl<S> Drop for ReplayCacheTee<S> {
+    fn drop(&mut self) {
+        self.shared.release_inflight();
+    }
 }
 
 impl MiddlewareState {
@@ -1450,6 +1631,7 @@ impl MiddlewareState {
                 Arc::new(InMemoryIdempotencyStore::new()),
                 Arc::new(InMemoryActionStore::new()),
                 Arc::new(InMemoryQuotaStore::new()),
+                None,
             ));
         }
 
@@ -1463,6 +1645,7 @@ impl MiddlewareState {
                         Arc::new(RedisIdempotencyStore::new(c, manager.clone())),
                         Arc::new(RedisActionStore::new(manager.clone())),
                         Arc::new(RedisQuotaStore::new(manager.clone(), quota)),
+                        Some(Arc::new(Mutex::new(manager))),
                     ))
                 }
                 Err(e) => {
@@ -1483,6 +1666,7 @@ impl MiddlewareState {
                         Arc::new(InMemoryIdempotencyStore::new()),
                         Arc::new(InMemoryActionStore::new()),
                         Arc::new(InMemoryQuotaStore::new()),
+                        None,
                     ))
                 }
             },
@@ -1504,6 +1688,7 @@ impl MiddlewareState {
                     Arc::new(InMemoryIdempotencyStore::new()),
                     Arc::new(InMemoryActionStore::new()),
                     Arc::new(InMemoryQuotaStore::new()),
+                    None,
                 ))
             }
         }
@@ -1514,12 +1699,14 @@ impl MiddlewareState {
         idempotency_store: Arc<dyn IdempotencyStore>,
         action_store: Arc<dyn ActionStore>,
         quota_store: Arc<dyn QuotaStore>,
+        redis_health_conn: Option<Arc<Mutex<redis::aio::ConnectionManager>>>,
     ) -> Self {
         Self {
             idempotency_store,
             action_store,
             quota_store,
             config,
+            redis_health_conn,
         }
     }
 
@@ -1528,25 +1715,20 @@ impl MiddlewareState {
             return true;
         }
 
-        let client = match redis::Client::open(self.config.redis_url.clone()) {
-            Ok(client) => client,
-            Err(_) => return false,
+        let Some(redis_health_conn) = &self.redis_health_conn else {
+            return false;
         };
 
-        let mut conn = match tokio::time::timeout(
-            Duration::from_secs(2),
-            client.get_multiplexed_async_connection(),
-        )
-        .await
-        {
-            Ok(Ok(conn)) => conn,
-            _ => return false,
-        };
+        let mut conn =
+            match tokio::time::timeout(Duration::from_secs(2), redis_health_conn.lock()).await {
+                Ok(conn) => conn,
+                Err(_) => return false,
+            };
 
         matches!(
             tokio::time::timeout(
                 Duration::from_secs(2),
-                redis::cmd("PING").query_async::<String>(&mut conn)
+                redis::cmd("PING").query_async::<String>(&mut *conn)
             )
             .await,
             Ok(Ok(pong)) if pong == "PONG"
@@ -1747,7 +1929,7 @@ pub async fn idempotency_middleware(req: Request<Body>, next: Next) -> Response 
                 state.config.max_body_size
             );
             return make_error_response(
-                StatusCode::BAD_REQUEST,
+                StatusCode::PAYLOAD_TOO_LARGE,
                 "REQUEST_BODY_TOO_LARGE",
                 "request body exceeded max_body_size",
                 Some(tenant_id.as_str()),
@@ -1903,44 +2085,24 @@ pub async fn idempotency_middleware(req: Request<Body>, next: Next) -> Response 
             return Response::from_parts(parts, body);
         }
 
-        let body_bytes = match to_bytes(body, state.config.max_replay_body_size).await {
-            Ok(collected) => collected,
-            Err(_) => {
-                error!(
-                    "Response body could not be buffered for idempotency cache due to body read error"
-                );
-                let _ = store.release_inflight(&scope_key, &lease).await;
-                let mut res = Response::from_parts(parts, Body::empty());
-                let val = HeaderValue::from_static("cache-buffer-error");
-                res.headers_mut().insert("X-Idempotency-Cache-Error", val);
-                return res;
-            }
-        };
         let action_id = parts
             .headers
             .get("X-Action-Id")
             .and_then(|v| v.to_str().ok())
             .unwrap_or("")
             .to_string();
-        let stored = IdempotencyRecord {
+        let shared = Arc::new(ReplayCacheFinalizeState::new(
+            store.clone(),
+            scope_key.clone(),
+            lease.clone(),
             body_hash,
             action_id,
-            status: parts.status,
-            headers: snapshot_headers(&parts.headers),
-            body: body_bytes.to_vec(),
-            expires_at: Instant::now() + state.config.idempotency_ttl,
-        };
-        if store
-            .complete(scope_key.clone(), &lease, stored)
-            .await
-            .is_err()
-        {
-            // Release the IN_FLIGHT key immediately so concurrent waiters fail fast
-            // rather than waiting for TTL expiry.
-            let _ = store.release_inflight(&scope_key, &lease).await;
-            error!("Failed to complete idempotency record");
-        }
-        return Response::from_parts(parts, Body::from(body_bytes));
+            parts.status,
+            snapshot_headers(&parts.headers),
+            state.config.idempotency_ttl,
+        ));
+        let tee = ReplayCacheTee::new(body.into_data_stream(), shared, state.config.max_replay_body_size);
+        return Response::from_parts(parts, Body::from_stream(tee));
     }
 
     let _ = store.release_inflight(&scope_key, &lease).await;

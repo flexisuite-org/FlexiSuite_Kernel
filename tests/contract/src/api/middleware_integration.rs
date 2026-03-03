@@ -36,6 +36,7 @@ pub async fn setup_app_with_config(
             s,
             Arc::new(InMemoryActionStore::new()),
             Arc::new(InMemoryQuotaStore::new()),
+            None,
         )
     } else {
         MiddlewareState::new(config)

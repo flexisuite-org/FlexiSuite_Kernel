@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 use reqwest::dns::{Name, Resolve, Resolving};
+use std::collections::HashSet;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
@@ -72,7 +73,39 @@ pub enum CheckUrlError {
     UnsupportedScheme(String),
 }
 
-pub(crate) fn check_url(url_str: &str, allowlist: &[String]) -> Result<Url, CheckUrlError> {
+fn normalize_allowlist_host(host: &str) -> String {
+    host.trim()
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .to_ascii_lowercase()
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct NormalizedAllowlist {
+    normalized_set: Arc<HashSet<String>>,
+}
+
+impl NormalizedAllowlist {
+    pub(crate) fn new(allowlist: &[String]) -> Self {
+        let normalized_set = allowlist
+            .iter()
+            .map(|entry| normalize_allowlist_host(entry))
+            .collect::<HashSet<_>>();
+        Self {
+            normalized_set: Arc::new(normalized_set),
+        }
+    }
+
+    pub(crate) fn contains(&self, host: &str) -> bool {
+        self.normalized_set
+            .contains(&normalize_allowlist_host(host))
+    }
+}
+
+pub(crate) fn check_url(
+    url_str: &str,
+    allowlist: &NormalizedAllowlist,
+) -> Result<Url, CheckUrlError> {
     let url = Url::parse(url_str).map_err(|e| CheckUrlError::ParseError(e.to_string()))?;
 
     if url.scheme() != "http" && url.scheme() != "https" {
@@ -81,7 +114,7 @@ pub(crate) fn check_url(url_str: &str, allowlist: &[String]) -> Result<Url, Chec
 
     let host = url.host_str().ok_or(CheckUrlError::NoHost)?;
 
-    if !allowlist.iter().any(|allowed| allowed == host) {
+    if !allowlist.contains(host) {
         return Err(CheckUrlError::NotAllowed(host.to_string()));
     }
     Ok(url)
@@ -89,13 +122,13 @@ pub(crate) fn check_url(url_str: &str, allowlist: &[String]) -> Result<Url, Chec
 
 #[derive(Clone)]
 pub struct AllowlistResolver {
-    allowlist: Arc<Vec<String>>,
+    allowlist: NormalizedAllowlist,
 }
 
 impl AllowlistResolver {
-    pub fn new(allowlist: Vec<String>) -> Self {
+    pub fn new(allowlist: &[String]) -> Self {
         Self {
-            allowlist: Arc::new(allowlist),
+            allowlist: NormalizedAllowlist::new(allowlist),
         }
     }
 }
@@ -108,7 +141,7 @@ impl Resolve for AllowlistResolver {
         Box::pin(async move {
             // 1. Check allowlist (hostname)
             // We use check_url logic but repurposed since name is just host
-            if !allowlist.iter().any(|allowed| allowed == &name_str) {
+            if !allowlist.contains(&name_str) {
                 return Err(Box::new(std::io::Error::new(
                     std::io::ErrorKind::PermissionDenied,
                     format!("Network access to '{}' is not allowed", name_str),
@@ -154,7 +187,7 @@ impl Resolve for AllowlistResolver {
     }
 }
 
-fn is_safe_ip(ip: &IpAddr, host: &str, allowlist: &[String]) -> bool {
+fn is_safe_ip(ip: &IpAddr, host: &str, allowlist: &NormalizedAllowlist) -> bool {
     // If the IP is globally routable, it's safe.
     if is_global(ip) {
         return true;
@@ -177,7 +210,7 @@ fn is_safe_ip(ip: &IpAddr, host: &str, allowlist: &[String]) -> bool {
     }
 
     // Special case for localhost
-    if host == "localhost" && allowlist.contains(&"localhost".to_string()) && ip.is_loopback() {
+    if host == "localhost" && allowlist.contains("localhost") && ip.is_loopback() {
         return true;
     }
 
@@ -273,6 +306,16 @@ fn is_global(ip: &IpAddr) -> bool {
             }
             // Documentation 2001:db8::/32
             if ipv6.segments()[0] == 0x2001 && ipv6.segments()[1] == 0x0db8 {
+                return false;
+            }
+            // NAT64 Well-Known Prefix 64:ff9b::/96
+            if ipv6.segments()[0] == 0x0064
+                && ipv6.segments()[1] == 0xff9b
+                && ipv6.segments()[2] == 0
+                && ipv6.segments()[3] == 0
+                && ipv6.segments()[4] == 0
+                && ipv6.segments()[5] == 0
+            {
                 return false;
             }
 

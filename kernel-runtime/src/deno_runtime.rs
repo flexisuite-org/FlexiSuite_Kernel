@@ -74,10 +74,10 @@ struct OutputConfig {
 
 #[derive(Clone)]
 struct NetworkConfig {
-    allowlist: Vec<String>,
+    allowlist: crate::NormalizedAllowlist,
 }
 
-fn check_url(url_str: &str, allowlist: &[String]) -> Result<Url, JsErrorBox> {
+fn check_url(url_str: &str, allowlist: &crate::NormalizedAllowlist) -> Result<Url, JsErrorBox> {
     match crate::check_url(url_str, allowlist) {
         Ok(u) => Ok(u),
         Err(crate::CheckUrlError::NotAllowed(msg)) => Err(JsErrorBox::generic(format!(
@@ -329,7 +329,7 @@ impl SandboxRuntime for DenoSandbox {
                 });
 
                 let resolver = Arc::new(crate::AllowlistResolver::new(
-                    options.permissions.network_allowlist.clone(),
+                    &options.permissions.network_allowlist,
                 ));
                 let client = Client::builder()
                     .dns_resolver(resolver)
@@ -344,7 +344,9 @@ impl SandboxRuntime for DenoSandbox {
                         max_output_size: Some(options.max_output_size.unwrap_or(DEFAULT_MAX_OUTPUT_SIZE)),
                     });
                     op_state.put(NetworkConfig {
-                        allowlist: options.permissions.network_allowlist.clone(),
+                        allowlist: crate::NormalizedAllowlist::new(
+                            &options.permissions.network_allowlist,
+                        ),
                     });
                     op_state.put(client);
                 }
@@ -433,9 +435,43 @@ impl SandboxRuntime for DenoSandbox {
                     globalThis.Headers = class Headers {{
                         constructor(init) {{
                             this.map = new Map();
-                            const entries = Object.entries(init || {{}});
-                            for (const [key, value] of entries) {{
-                                this.map.set(key.toLowerCase(), String(value));
+                            const appendHeader = (name, value) => {{
+                                const key = String(name).toLowerCase();
+                                const val = String(value);
+                                if (this.map.has(key)) {{
+                                    const sep = key === "set-cookie" ? "\n" : ", ";
+                                    this.map.set(key, this.map.get(key) + sep + val);
+                                }} else {{
+                                    this.map.set(key, val);
+                                }}
+                            }};
+                            if (!init) {{
+                                return;
+                            }}
+                            if (init instanceof Headers || init instanceof Map) {{
+                                for (const [key, value] of init.entries()) {{
+                                    appendHeader(key, value);
+                                }}
+                                return;
+                            }}
+                            if (Array.isArray(init)) {{
+                                for (const pair of init) {{
+                                    if (Array.isArray(pair) && pair.length >= 2) {{
+                                        appendHeader(pair[0], pair[1]);
+                                    }}
+                                }}
+                                return;
+                            }}
+                            if (typeof init === "object" && typeof init[Symbol.iterator] === "function") {{
+                                for (const pair of init) {{
+                                    if (Array.isArray(pair) && pair.length >= 2) {{
+                                        appendHeader(pair[0], pair[1]);
+                                    }}
+                                }}
+                                return;
+                            }}
+                            for (const [key, value] of Object.entries(init)) {{
+                                appendHeader(key, value);
                             }}
                         }}
                         append(name, value) {{

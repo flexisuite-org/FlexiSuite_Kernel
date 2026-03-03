@@ -180,7 +180,12 @@ mod tests {
         };
 
         assert!(matches!(
-            verify_manifest(&manifest_bad_sig, &trusted_key, DIGEST_SHA256_ACTIVE, 100000),
+            verify_manifest(
+                &manifest_bad_sig,
+                &trusted_key,
+                DIGEST_SHA256_ACTIVE,
+                100000
+            ),
             VerificationResult::SignatureInvalid
         ));
     }
