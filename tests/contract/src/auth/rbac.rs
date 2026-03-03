@@ -195,7 +195,7 @@ async fn test_rbac_rejects_v2_token_without_kid() {
     let res = app.oneshot(req).await.unwrap();
     assert_eq!(
         res.status(),
-        StatusCode::UNAUTHORIZED,
+        StatusCode::FORBIDDEN,
         "Token without kid must be rejected (REQ-TENANT-TOKEN-V2)"
     );
 }
@@ -231,7 +231,7 @@ async fn test_rbac_rejects_v2_token_with_insufficient_parts() {
     let res = app.oneshot(req).await.unwrap();
     assert_eq!(
         res.status(),
-        StatusCode::UNAUTHORIZED,
+        StatusCode::FORBIDDEN,
         "Malformed v2 token must be rejected"
     );
 }
@@ -314,7 +314,7 @@ async fn test_rbac_fails_without_tenant_context() {
     let res = app.oneshot(req).await.unwrap();
     assert_eq!(
         res.status(),
-        StatusCode::UNAUTHORIZED,
+        StatusCode::FORBIDDEN,
         "RBAC middleware must fail without TenantContext (authentication bypass protection)"
     );
 }
@@ -347,7 +347,7 @@ async fn test_rbac_fails_without_bearer_token() {
     let res = app.oneshot(req).await.unwrap();
     assert_eq!(
         res.status(),
-        StatusCode::UNAUTHORIZED,
+        StatusCode::FORBIDDEN,
         "RBAC middleware must fail without BearerToken (authentication bypass protection)"
     );
 }

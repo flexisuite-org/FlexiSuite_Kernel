@@ -274,6 +274,10 @@ impl<'a> AuthenticatedScoped<'a> {
     pub fn user_id(&self) -> &crate::auth_context::UserId {
         &self.user_id
     }
+
+    pub(crate) fn txn(&self) -> &DatabaseTransaction {
+        &self.scoped.inner.txn
+    }
 }
 
 #[cfg(test)]

@@ -22,7 +22,7 @@
 //!
 //! ## Runtime Safety
 //!
-//! Missing dependencies are detected at runtime and return `401 UNAUTHORIZED`.
+//! Missing dependencies are detected at runtime and return `403 FORBIDDEN`.
 //! However, misconfigured routes that skip authentication entirely will bypass
 //! permission checks. Always verify middleware ordering in route configuration.
 //!
@@ -64,14 +64,14 @@ fn validate_v2_token_kid(token: &str) -> Result<(), StatusCode> {
     let parts: Vec<&str> = token.split(':').collect();
     if parts.len() != 6 {
         error!("Invalid v2 token format: expected 6 parts, got {}", parts.len());
-        return Err(StatusCode::UNAUTHORIZED);
+        return Err(StatusCode::FORBIDDEN);
     }
     
     // parts[0] = "v2", parts[1] = kid
     let kid = parts[1];
     if kid.trim().is_empty() {
         error!("v2 token missing required kid field (REQ-TENANT-TOKEN-V2)");
-        return Err(StatusCode::UNAUTHORIZED);
+        return Err(StatusCode::FORBIDDEN);
     }
     
     Ok(())
@@ -99,13 +99,13 @@ pub async fn load_permissions_middleware(
         .extensions()
         .get::<TenantContext>()
         .cloned()
-        .ok_or(StatusCode::UNAUTHORIZED)?;
+        .ok_or(StatusCode::FORBIDDEN)?;
 
     // Manually extract BearerToken to avoid 500 on missing extension
     let token_ext = req
         .extensions()
         .get::<BearerToken>()
-        .ok_or(StatusCode::UNAUTHORIZED)?;
+        .ok_or(StatusCode::FORBIDDEN)?;
     let incoming_token = &token_ext.0;
 
     // We need a DB connection to fetch permissions
@@ -122,7 +122,7 @@ pub async fn load_permissions_middleware(
     if ctx.user_id().is_none() {
         // Fail closed if user_id is missing (unauthenticated or service account not allowed here)
         warn!("User ID missing in context for RBAC protected route");
-        return Err(StatusCode::UNAUTHORIZED);
+        return Err(StatusCode::FORBIDDEN);
     }
 
     // Branching logic for tokens (Requirement 3)
@@ -132,7 +132,7 @@ pub async fn load_permissions_middleware(
         validate_v2_token_kid(incoming_token)?;
         use_incoming_as_db_token = true;
     }
-    #[cfg(debug_assertions)]
+    #[cfg(feature = "test-utils")]
     if incoming_token.starts_with("dev-token:") {
         use_incoming_as_db_token = true;
     }
@@ -189,7 +189,7 @@ pub async fn load_permissions_middleware(
                 .map_err(|_| kernel_data::DataError::TenantAuthorizationFailed(
                     "user_id missing in scoped context".to_string(),
                 ))?;
-            RBACRepository::get_user_permissions(scoped, auth_scoped.user_id()).await
+            RBACRepository::get_user_permissions(&auth_scoped).await
         })
     })
     .await;

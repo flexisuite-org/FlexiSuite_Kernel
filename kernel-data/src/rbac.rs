@@ -1,5 +1,4 @@
-use crate::connection::{RawConnection, TenantScoped};
-use crate::auth_context::UserId;
+use crate::connection::AuthenticatedScoped;
 use crate::entities::{group, group_member, group_role, permission, role};
 use crate::error::DataError;
 use sea_orm::{ColumnTrait, EntityTrait, JoinType, QueryFilter, QuerySelect, RelationTrait};
@@ -10,8 +9,7 @@ impl RBACRepository {
     // TODO(perf): Add Redis caching for this query. This is a hot path (called on every request)
     // and involves a 5-table join. Tracking issue: https://github.com/flexisuite-org/FlexiSuite_Kernel/issues/99
     pub async fn get_user_permissions(
-        scoped: &TenantScoped<RawConnection>,
-        user_id: &UserId,
+        auth_scoped: &AuthenticatedScoped<'_>,
     ) -> Result<Vec<permission::Model>, DataError> {
         // Tenant isolation is guaranteed structurally:
         //   1. The underlying transaction was opened via `with_tenant_tx`, which calls
@@ -22,9 +20,9 @@ impl RBACRepository {
         // Defense-in-depth: we additionally filter every table in the 5-table JOIN by
         // `tenant_id` so that a misconfigured RLS policy can never leak cross-tenant rows.
 
-        let tenant_id = scoped.tenant_id.as_str();
-        let user_id = user_id.as_str();
-        let db = &scoped.inner.txn;
+        let tenant_id = auth_scoped.tenant_id().as_str();
+        let user_id = auth_scoped.user_id().as_str();
+        let db = auth_scoped.txn();
 
         let permissions = permission::Entity::find()
             .filter(permission::Column::TenantId.eq(tenant_id))
