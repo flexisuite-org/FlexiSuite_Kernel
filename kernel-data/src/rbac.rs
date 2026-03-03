@@ -43,3 +43,68 @@ impl RBACRepository {
         Ok(permissions)
     }
 }
+
+#[cfg(feature = "test-utils")]
+pub async fn seed_rbac_membership_for_tests(
+    scoped: &crate::connection::TenantScoped<crate::connection::RawConnection>,
+    tenant_id: &crate::auth_context::TenantId,
+    user_id: &crate::auth_context::UserId,
+) -> Result<(), DataError> {
+    use sea_orm::{ActiveModelTrait, ActiveValue};
+    use uuid::Uuid;
+
+    let now = chrono::Utc::now().into();
+
+    let role = role::ActiveModel {
+        id: ActiveValue::Set(Uuid::now_v7()),
+        tenant_id: ActiveValue::Set(tenant_id.to_string()),
+        name: ActiveValue::Set("role-1".to_string()),
+        description: ActiveValue::Set("desc".to_string()),
+        created_at: ActiveValue::Set(now),
+        updated_at: ActiveValue::Set(now),
+    };
+    let role = role.insert(scoped.txn()).await.map_err(DataError::DbError)?;
+
+    let perm = permission::ActiveModel {
+        id: ActiveValue::Set(Uuid::now_v7()),
+        tenant_id: ActiveValue::Set(tenant_id.to_string()),
+        role_id: ActiveValue::Set(role.id),
+        resource: ActiveValue::Set("res-1".to_string()),
+        action: ActiveValue::Set("act-1".to_string()),
+        created_at: ActiveValue::Set(now),
+        updated_at: ActiveValue::Set(now),
+    };
+    perm.insert(scoped.txn()).await.map_err(DataError::DbError)?;
+
+    let group = group::ActiveModel {
+        id: ActiveValue::Set(Uuid::now_v7()),
+        tenant_id: ActiveValue::Set(tenant_id.to_string()),
+        name: ActiveValue::Set("group-1".to_string()),
+        description: ActiveValue::Set("desc".to_string()),
+        created_at: ActiveValue::Set(now),
+        updated_at: ActiveValue::Set(now),
+    };
+    let group = group.insert(scoped.txn()).await.map_err(DataError::DbError)?;
+
+    let gr = group_role::ActiveModel {
+        id: ActiveValue::Set(Uuid::now_v7()),
+        group_id: ActiveValue::Set(group.id),
+        role_id: ActiveValue::Set(role.id),
+        tenant_id: ActiveValue::Set(tenant_id.to_string()),
+        created_at: ActiveValue::Set(now),
+        updated_at: ActiveValue::Set(now),
+    };
+    gr.insert(scoped.txn()).await.map_err(DataError::DbError)?;
+
+    let gm = group_member::ActiveModel {
+        id: ActiveValue::Set(Uuid::now_v7()),
+        group_id: ActiveValue::Set(group.id),
+        user_id: ActiveValue::Set(user_id.to_string()),
+        tenant_id: ActiveValue::Set(tenant_id.to_string()),
+        created_at: ActiveValue::Set(now),
+        updated_at: ActiveValue::Set(now),
+    };
+    gm.insert(scoped.txn()).await.map_err(DataError::DbError)?;
+
+    Ok(())
+}

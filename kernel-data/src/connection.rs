@@ -59,7 +59,7 @@ impl TenantScoped<RawConnection> {
     ///
     /// This is exposed primarily for test seeding and special integration scenarios.
     #[cfg(feature = "test-utils")]
-    pub fn txn(&self) -> &DatabaseTransaction {
+    pub(crate) fn txn(&self) -> &DatabaseTransaction {
         &self.inner.txn
     }
 
@@ -378,7 +378,7 @@ mod tests {
         }
     }
 
-    #[cfg(not(any(test, feature = "test-utils")))]
+    #[cfg(not(feature = "test-utils"))]
     mod production_parsing {
         use super::*;
 

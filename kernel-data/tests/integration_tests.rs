@@ -15,10 +15,11 @@ use common::auth::TestAuth;
 use kernel_data::connection::{AuthenticatedScoped, RawConnection, TenantScoped, with_tenant_tx};
 use kernel_data::entities::entity_record;
 use kernel_data::repository::TenantRepository;
+use kernel_data::rbac::seed_rbac_membership_for_tests;
 use kernel_data::{DataError, RBACRepository};
 use sea_orm::{
-    ActiveModelTrait, ActiveValue, ConnectionTrait, Database, DatabaseConnection, DbBackend,
-    Statement, TransactionTrait,
+    ActiveValue, ConnectionTrait, Database, DatabaseConnection, DbBackend, Statement,
+    TransactionTrait,
 };
 use std::sync::OnceLock;
 use testcontainers::{RunnableImage, clients};
@@ -89,72 +90,8 @@ async fn test_rbac_integration_real_postgres() {
     with_tenant_tx(&db, &ctx, &token, |scoped| {
         let tenant_id = tenant_id.clone();
         let user_id = user_id.clone();
-        let ctx = ctx.clone();
         Box::pin(async move {
-            // Seed RBAC data
-            // 1. Role
-            let role = kernel_data::entities::role::ActiveModel {
-                id: ActiveValue::Set(Uuid::now_v7()),
-                tenant_id: ActiveValue::Set(tenant_id.to_string()),
-                name: ActiveValue::Set("role-1".to_string()),
-                description: ActiveValue::Set("desc".to_string()),
-                created_at: ActiveValue::Set(chrono::Utc::now().into()),
-                updated_at: ActiveValue::Set(chrono::Utc::now().into()),
-            };
-            let role = role
-                .insert(scoped.txn())
-                .await
-                .map_err(DataError::DbError)?;
-
-            // 2. Permission
-            let perm = kernel_data::entities::permission::ActiveModel {
-                id: ActiveValue::Set(Uuid::now_v7()),
-                tenant_id: ActiveValue::Set(tenant_id.to_string()),
-                role_id: ActiveValue::Set(role.id),
-                resource: ActiveValue::Set("res-1".to_string()),
-                action: ActiveValue::Set("act-1".to_string()),
-                created_at: ActiveValue::Set(chrono::Utc::now().into()),
-                updated_at: ActiveValue::Set(chrono::Utc::now().into()),
-            };
-            perm.insert(scoped.txn())
-                .await
-                .map_err(DataError::DbError)?;
-
-            // 3. Group
-            let group = kernel_data::entities::group::ActiveModel {
-                id: ActiveValue::Set(Uuid::now_v7()),
-                tenant_id: ActiveValue::Set(tenant_id.to_string()),
-                name: ActiveValue::Set("group-1".to_string()),
-                description: ActiveValue::Set("desc".to_string()),
-                created_at: ActiveValue::Set(chrono::Utc::now().into()),
-                updated_at: ActiveValue::Set(chrono::Utc::now().into()),
-            };
-            let group = group
-                .insert(scoped.txn())
-                .await
-                .map_err(DataError::DbError)?;
-
-            // 4. GroupRole
-            let gr = kernel_data::entities::group_role::ActiveModel {
-                id: ActiveValue::Set(Uuid::now_v7()),
-                group_id: ActiveValue::Set(group.id),
-                role_id: ActiveValue::Set(role.id),
-                tenant_id: ActiveValue::Set(tenant_id.to_string()),
-                created_at: ActiveValue::Set(chrono::Utc::now().into()),
-                updated_at: ActiveValue::Set(chrono::Utc::now().into()),
-            };
-            gr.insert(scoped.txn()).await.map_err(DataError::DbError)?;
-
-            // 5. GroupMember
-            let gm = kernel_data::entities::group_member::ActiveModel {
-                id: ActiveValue::Set(Uuid::now_v7()),
-                group_id: ActiveValue::Set(group.id),
-                user_id: ActiveValue::Set(user_id.to_string()),
-                tenant_id: ActiveValue::Set(tenant_id.to_string()),
-                created_at: ActiveValue::Set(chrono::Utc::now().into()),
-                updated_at: ActiveValue::Set(chrono::Utc::now().into()),
-            };
-            gm.insert(scoped.txn()).await.map_err(DataError::DbError)?;
+            seed_rbac_membership_for_tests(scoped, &tenant_id, &user_id).await?;
 
             // Verify
             let auth_scoped = AuthenticatedScoped::try_from_scoped(scoped)
