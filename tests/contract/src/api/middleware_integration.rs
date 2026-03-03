@@ -22,7 +22,7 @@ use serde_json::Value;
 use tower::ServiceExt;
 
 use chrono::Utc;
-use kernel_data::entities::permission;
+use kernel_data::entities::{key_record, permission};
 use sea_orm::MockExecResult;
 use uuid::Uuid;
 
@@ -42,6 +42,65 @@ pub fn mock_db_with_budget(auth_calls: usize) -> sea_orm::DatabaseConnection {
             rows_affected: 1,
         }]);
         // 2) RBACRepository::get_user_permissions
+        let perms = vec![
+            permission::Model {
+                id: Uuid::new_v4(),
+                tenant_id: "tenant-1".to_string(),
+                role_id: Uuid::new_v4(),
+                resource: "test".to_string(),
+                action: "write".to_string(),
+                created_at: now.into(),
+                updated_at: now.into(),
+            },
+            permission::Model {
+                id: Uuid::new_v4(),
+                tenant_id: "tenant-1".to_string(),
+                role_id: Uuid::new_v4(),
+                resource: "action".to_string(),
+                action: "read".to_string(),
+                created_at: now.into(),
+                updated_at: now.into(),
+            },
+            permission::Model {
+                id: Uuid::new_v4(),
+                tenant_id: "tenant-1".to_string(),
+                role_id: Uuid::new_v4(),
+                resource: "diagnostics".to_string(),
+                action: "read".to_string(),
+                created_at: now.into(),
+                updated_at: now.into(),
+            },
+        ];
+        db = db.append_query_results([perms]);
+    }
+
+    db.into_connection()
+}
+
+/// Companion helper for Bearer v4/public tests that trigger V4->V2 bridge path.
+/// Query sequence: active HMAC key lookup -> authorize_tenant -> permissions lookup.
+pub fn mock_db_with_bridge_budget(auth_calls: usize) -> sea_orm::DatabaseConnection {
+    let mut db = MockDatabase::new(DatabaseBackend::Postgres);
+
+    for _ in 0..auth_calls {
+        let now = Utc::now();
+        db = db.append_query_results([vec![key_record::Model {
+            kid: "hmac-key-1".to_string(),
+            key_type: key_record::KeyType::Hmac,
+            algorithm: "HS256".to_string(),
+            secret_bytes: Some(vec![0u8; 32]),
+            public_bytes: None,
+            state: key_record::KeyState::Active,
+            created_at: now.into(),
+            activated_at: Some(now.into()),
+            retired_at: None,
+            revoked_at: None,
+            expires_at: None,
+        }]]);
+        db = db.append_exec_results([MockExecResult {
+            last_insert_id: 0,
+            rows_affected: 1,
+        }]);
         let perms = vec![
             permission::Model {
                 id: Uuid::new_v4(),

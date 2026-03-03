@@ -73,7 +73,7 @@ pub fn build_app_with_state(
         .layer(from_fn_with_state(db.clone(), auth_middleware));
 
     // Middleware chain (outermost -> innermost):
-    // Auth -> Idempotency -> Quota -> Permissions
+    // Auth -> LoadPermissions -> RequirePermission -> Quota -> Idempotency
 
     let require_perm = |p: &'static str| from_fn(move |req, next| require_permission(p, req, next));
 
@@ -83,29 +83,31 @@ pub fn build_app_with_state(
             "/test",
             post(write_test)
                 .put(write_test)
+                .layer(from_fn(idempotency_middleware))
+                .layer(from_fn(quota_middleware))
                 .layer(require_perm("test:write")),
         )
         .route(
             "/actions/:action_id",
-            get(get_action_status).layer(require_perm("action:read")),
+            get(get_action_status)
+                .layer(from_fn(idempotency_middleware))
+                .layer(from_fn(quota_middleware))
+                .layer(require_perm("action:read")),
         )
         // Diagnostics routes under /api/v1/diagnostics
-        // Note: diagnostics routes implement their own policy checks, but we add a base permission check here as requested.
-        .nest(
-            "/api/v1/diagnostics",
-            diagnostics::routes().layer(require_perm("diagnostics:read")),
-        )
+        .nest("/api/v1/diagnostics", diagnostics::routes())
         // Outermost applied last
         .layer(from_fn(load_permissions_middleware))
-        .layer(from_fn(quota_middleware))
-        .layer(from_fn(idempotency_middleware))
         .layer(from_fn_with_state(db.clone(), auth_middleware));
 
     #[cfg(feature = "test-utils")]
     {
         protected_router = protected_router.route(
             "/test/protected",
-            get(|| async { "Access Granted" }).layer(require_perm("test:read")),
+            get(|| async { "Access Granted" })
+                .layer(from_fn(idempotency_middleware))
+                .layer(from_fn(quota_middleware))
+                .layer(require_perm("test:read")),
         );
     }
 

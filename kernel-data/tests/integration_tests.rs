@@ -75,6 +75,7 @@ async fn setup_test_db() -> (DatabaseConnection, PostgresNode) {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+#[ignore] // Requires Docker
 async fn test_rbac_integration_real_postgres() {
     let (db, _node) = setup_test_db().await;
     TestAuth::init_keys(&db).await.expect("Failed to init keys");

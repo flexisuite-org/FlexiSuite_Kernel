@@ -383,4 +383,21 @@ mod tests {
         assert_eq!(parts[4], tenant_id.as_str(), "tenant_id must match input");
         assert!(!parts[5].is_empty(), "signature must not be empty");
     }
+
+    #[tokio::test]
+    async fn test_generate_tenant_token_rejects_non_system_cross_tenant_request() {
+        let mock_db = MockDatabase::new(DatabaseBackend::Postgres).into_connection();
+        let ctx = TenantContext::new(
+            TenantId::new("tenant_001").expect("tenant_id should be valid"),
+            None,
+        )
+        .with_db(Arc::new(mock_db));
+        let other_tenant_id = TenantId::new("tenant_002").expect("tenant_id should be valid");
+
+        let result = KeyManager::generate_tenant_token(&ctx, &other_tenant_id).await;
+        assert!(
+            matches!(result, Err(KeyManagerError::Unauthorized(_))),
+            "non-system context must be rejected for cross-tenant token generation"
+        );
+    }
 }

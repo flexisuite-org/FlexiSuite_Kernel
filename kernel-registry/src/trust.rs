@@ -107,12 +107,18 @@ pub mod tests {
     #[derive(Clone)]
     pub struct MockTrustProvider {
         keys: HashMap<String, TrustedKey>,
+        trust_root_version: String,
     }
 
     impl MockTrustProvider {
         pub fn new() -> Self {
+            Self::with_version("v1")
+        }
+
+        pub fn with_version(version: impl Into<String>) -> Self {
             Self {
                 keys: HashMap::new(),
+                trust_root_version: version.into(),
             }
         }
 
@@ -130,7 +136,7 @@ pub mod tests {
         }
 
         fn trust_root_version(&self) -> &str {
-            "v1"
+            &self.trust_root_version
         }
     }
 }

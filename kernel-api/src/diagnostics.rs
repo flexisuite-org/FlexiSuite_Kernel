@@ -1,15 +1,10 @@
-#![allow(clippy::manual_inspect)]
-#![allow(clippy::collapsible_if)]
-#![allow(clippy::manual_map)]
-#![allow(clippy::collapsible_else_if)]
-#![allow(clippy::implicit_saturating_sub)]
-#![allow(clippy::needless_borrows_for_generic_args)]
 use axum::{
     Router,
     extract::{Extension, Json, Query},
     http::StatusCode,
+    middleware::from_fn,
     response::IntoResponse,
-    routing::{get, post},
+    routing::{get, post, put},
 };
 use chrono::Utc;
 use kernel_core::auth::{KeyManager, KeyManagerError, TenantContext};
@@ -22,6 +17,7 @@ use kernel_data::{
 };
 use sea_orm::ActiveValue;
 use serde::{Deserialize, Serialize};
+use crate::middleware::{idempotency_middleware, quota_middleware, require_permission};
 use uuid::Uuid;
 
 /// Maximum allowed length for user-supplied string fields (error_code, trace_id, etc.)
@@ -68,10 +64,41 @@ enum DiagnosticPolicyResponse {
 
 pub fn routes() -> Router {
     Router::new()
-        .route("/report", post(report_diagnostic))
-        .route("/query", get(query_diagnostic))
-        .route("/health", get(get_health))
-        .route("/policy", get(get_policy).put(update_policy))
+        .route(
+            "/report",
+            post(report_diagnostic)
+                .layer(from_fn(idempotency_middleware))
+                .layer(from_fn(quota_middleware))
+                .layer(from_fn(|req, next| require_permission("diagnostics:write", req, next))),
+        )
+        .route(
+            "/query",
+            get(query_diagnostic)
+                .layer(from_fn(idempotency_middleware))
+                .layer(from_fn(quota_middleware))
+                .layer(from_fn(|req, next| require_permission("diagnostics:read", req, next))),
+        )
+        .route(
+            "/health",
+            get(get_health)
+                .layer(from_fn(idempotency_middleware))
+                .layer(from_fn(quota_middleware))
+                .layer(from_fn(|req, next| require_permission("diagnostics:read", req, next))),
+        )
+        .route(
+            "/policy",
+            get(get_policy)
+                .layer(from_fn(idempotency_middleware))
+                .layer(from_fn(quota_middleware))
+                .layer(from_fn(|req, next| require_permission("diagnostics:read", req, next))),
+        )
+        .route(
+            "/policy",
+            put(update_policy)
+                .layer(from_fn(idempotency_middleware))
+                .layer(from_fn(quota_middleware))
+                .layer(from_fn(|req, next| require_permission("diagnostics:write", req, next))),
+        )
 }
 
 async fn generate_token_or_500(ctx: &TenantContext) -> Result<String, StatusCode> {
@@ -96,10 +123,10 @@ async fn report_diagnostic(
     if let Err(status) = validate_string_length(&payload.error_code, "error_code", MAX_STRING_LEN) {
         return status.into_response();
     }
-    if let Some(suggestion) = payload.suggestion.as_ref() {
-        if let Err(status) = validate_string_length(suggestion, "suggestion", MAX_STRING_LEN) {
-            return status.into_response();
-        }
+    if let Some(suggestion) = payload.suggestion.as_ref()
+        && let Err(status) = validate_string_length(suggestion, "suggestion", MAX_STRING_LEN)
+    {
+        return status.into_response();
     }
     if let Err(status) = validate_string_length(
         &payload.context.dom_snapshot,
@@ -116,11 +143,10 @@ async fn report_diagnostic(
         PIISanitizer::sanitize_value(metrics);
     }
     payload.error_code = PIISanitizer::sanitize_text(&payload.error_code);
-    payload.suggestion = if let Some(suggestion) = payload.suggestion.take() {
-        Some(PIISanitizer::sanitize_text(&suggestion))
-    } else {
-        None
-    };
+    payload.suggestion = payload
+        .suggestion
+        .take()
+        .map(|suggestion| PIISanitizer::sanitize_text(&suggestion));
 
     let trace_id = Uuid::now_v7();
     let token = match generate_token_or_500(&ctx).await {

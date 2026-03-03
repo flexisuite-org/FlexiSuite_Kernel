@@ -55,10 +55,10 @@ async fn main() {
     // Start the KID revocation listener (REQ-KEY-REVOCATION-SLO: p95 ≤ 60s).
     // MiddlewareConfig::default() already reads REDIS_URL, so we reuse config.redis_url
     // rather than reading the environment variable a second time.
-    let _kid_revocation_handle = match redis::Client::open(config.redis_url.clone()) {
+    let kid_revocation_handle = match redis::Client::open(config.redis_url.clone()) {
         Ok(redis_client) => {
             tracing::info!("Starting KID revocation listener (Redis pub/sub + 30s polling)");
-            Some(kernel_api::auth::start_kid_revocation_listener(redis_client))
+            kernel_api::auth::start_kid_revocation_listener(redis_client)
         }
         Err(e) => {
             tracing::error!(
@@ -86,8 +86,26 @@ async fn main() {
         eprintln!("Failed to bind to {addr}: {e}");
         std::process::exit(1);
     });
-    axum::serve(listener, app).await.unwrap_or_else(|e| {
-        eprintln!("Server error: {e}");
-        std::process::exit(1);
-    });
+    let mut kid_revocation_handle = kid_revocation_handle;
+    tokio::select! {
+        revocation_result = &mut kid_revocation_handle => {
+            match revocation_result {
+                Ok(()) => {
+                    eprintln!("KID revocation listener exited unexpectedly");
+                }
+                Err(e) => {
+                    eprintln!("KID revocation listener task failed: {e}");
+                }
+            }
+            std::process::exit(1);
+        }
+        server_result = axum::serve(listener, app) => {
+            if let Err(e) = server_result {
+                eprintln!("Server error: {e}");
+                kid_revocation_handle.abort();
+                std::process::exit(1);
+            }
+            kid_revocation_handle.abort();
+        }
+    }
 }

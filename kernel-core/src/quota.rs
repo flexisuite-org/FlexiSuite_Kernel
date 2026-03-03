@@ -31,6 +31,10 @@ impl QuotaViolation {
                 // Spec: 1-30s clip for system protection
                 self.retry_after_s.clamp(1, 30)
             }
+            QuotaLayer::CircuitBreaker => {
+                // Circuit-breaker backoff must never be 0s.
+                self.retry_after_s.max(1)
+            }
             _ => {
                 // Guard: Cap at 1 year (31,536,000s) to prevent overflow/abuse
                 self.retry_after_s.min(31_536_000)
