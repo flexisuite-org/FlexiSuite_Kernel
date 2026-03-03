@@ -1,23 +1,28 @@
+#[cfg(feature = "dev-auth")]
 use async_trait::async_trait;
-#[cfg(debug_assertions)]
+#[cfg(feature = "dev-auth")]
 use axum::body::to_bytes;
-#[cfg(debug_assertions)]
+#[cfg(feature = "dev-auth")]
 use axum::http::HeaderValue;
 use axum::{
     body::Body,
     http::{Request, StatusCode},
 };
 use kernel_api::middleware::{
+    IdempotencyStore, InMemoryActionStore, InMemoryQuotaStore, MiddlewareConfig, MiddlewareState,
+};
+#[cfg(feature = "dev-auth")]
+use kernel_api::middleware::{
     IdempotencyAcquireResult, IdempotencyEntry, IdempotencyLease, IdempotencyRecord,
-    IdempotencyScopeKey, IdempotencyStore, IdempotencyStoreError, InMemoryActionStore,
-    InMemoryQuotaStore, MiddlewareConfig, MiddlewareState,
+    IdempotencyScopeKey, IdempotencyStoreError,
 };
 use std::sync::Arc;
+#[cfg(feature = "dev-auth")]
 use tokio::sync::Notify;
 
 use sea_orm::{DatabaseBackend, MockDatabase};
 
-#[cfg(debug_assertions)]
+#[cfg(feature = "dev-auth")]
 use serde_json::Value;
 use tower::ServiceExt;
 
@@ -194,13 +199,13 @@ pub async fn setup_app_with_config_and_db(
     app
 }
 
-#[cfg(debug_assertions)]
+#[cfg(feature = "dev-auth")]
 struct NotifyingStore {
     inner: Arc<dyn IdempotencyStore>,
     notify: Arc<Notify>,
 }
 
-#[cfg(debug_assertions)]
+#[cfg(feature = "dev-auth")]
 #[async_trait]
 impl IdempotencyStore for NotifyingStore {
     async fn get(
@@ -244,13 +249,13 @@ impl IdempotencyStore for NotifyingStore {
 fn build_idempotent_post(key: &str, body: &str) -> Request<Body> {
     let mut builder = Request::builder().method("POST").uri("/test");
 
-    #[cfg(debug_assertions)]
+    #[cfg(feature = "dev-auth")]
     {
         builder = builder.header("X-Tenant-Id", "tenant-1");
         builder = builder.header("X-User-Id", "user-1");
     }
 
-    #[cfg(not(debug_assertions))]
+    #[cfg(not(feature = "dev-auth"))]
     {
         builder = builder.header("Authorization", "Bearer invalid");
     }
@@ -296,7 +301,7 @@ async fn test_auth_logic_401_403() {
     let res = app.clone().oneshot(req).await.unwrap();
     assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
 
-    #[cfg(debug_assertions)]
+    #[cfg(feature = "dev-auth")]
     {
         // 3. Malformed dev tenant header -> 403
         let req = Request::builder()
@@ -334,13 +339,13 @@ async fn test_rbac_fail_closed_with_empty_permissions_fixture() {
         .method("POST")
         .header("Idempotency-Key", "rbac-empty-perms-key");
 
-    #[cfg(debug_assertions)]
+    #[cfg(feature = "dev-auth")]
     {
         builder = builder.header("X-Tenant-Id", "tenant-1");
         builder = builder.header("X-User-Id", "user-1");
     }
 
-    #[cfg(not(debug_assertions))]
+    #[cfg(not(feature = "dev-auth"))]
     {
         builder = builder.header("Authorization", "Bearer invalid");
     }
@@ -348,15 +353,15 @@ async fn test_rbac_fail_closed_with_empty_permissions_fixture() {
     let req = builder.body(Body::empty()).unwrap();
     let res = app.clone().oneshot(req).await.unwrap();
 
-    #[cfg(debug_assertions)]
+    #[cfg(feature = "dev-auth")]
     assert_eq!(res.status(), StatusCode::FORBIDDEN);
 
-    #[cfg(not(debug_assertions))]
+    #[cfg(not(feature = "dev-auth"))]
     assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
 }
 
 #[tokio::test]
-#[cfg(debug_assertions)]
+#[cfg(feature = "dev-auth")]
 async fn test_idempotency_conflict_scope_and_action_lookup() {
     let app = setup_app().await;
 
@@ -397,7 +402,7 @@ async fn test_idempotency_conflict_scope_and_action_lookup() {
     let mut builder = Request::builder()
         .uri(format!("/actions/{first_action_id}"))
         .method("GET");
-    #[cfg(debug_assertions)]
+    #[cfg(feature = "dev-auth")]
     {
         builder = builder.header("X-Tenant-Id", "tenant-1");
         builder = builder.header("X-User-Id", "user-1");
@@ -413,7 +418,7 @@ async fn test_idempotency_conflict_scope_and_action_lookup() {
 }
 
 #[tokio::test]
-#[cfg(not(debug_assertions))]
+#[cfg(not(feature = "dev-auth"))]
 async fn test_idempotency_conflict_scope_and_action_lookup() {
     let app = setup_app().await;
     let req = build_idempotent_post("key-1", "payload-a");
@@ -429,12 +434,12 @@ async fn test_idempotency_key_validation() {
     let req = build_idempotent_post(&too_long, "payload");
     let res = app.clone().oneshot(req).await.unwrap();
 
-    #[cfg(debug_assertions)]
+    #[cfg(feature = "dev-auth")]
     {
         assert_eq!(res.status(), StatusCode::BAD_REQUEST);
     }
 
-    #[cfg(not(debug_assertions))]
+    #[cfg(not(feature = "dev-auth"))]
     {
         assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
     }
@@ -445,12 +450,12 @@ async fn test_quota_evaluation_priority_and_clipping() {
     let app = setup_app().await;
 
     let mut builder = Request::builder().uri("/test").method("POST");
-    #[cfg(debug_assertions)]
+    #[cfg(feature = "dev-auth")]
     {
         builder = builder.header("X-Tenant-Id", "tenant-1");
         builder = builder.header("X-User-Id", "user-1");
     }
-    #[cfg(not(debug_assertions))]
+    #[cfg(not(feature = "dev-auth"))]
     {
         builder = builder.header("Authorization", "Bearer invalid");
     }
@@ -473,26 +478,26 @@ async fn test_quota_evaluation_priority_and_clipping() {
     // When test-utils is enabled, the mock quota middleware returns 503 SERVICE_UNAVAILABLE
     // because the X-Mock-Quota-System header triggers a simulated quota violation.
     // Without test-utils, the mock quota headers are ignored and the request succeeds with 201.
-    #[cfg(all(debug_assertions, feature = "test-utils"))]
+    #[cfg(all(feature = "dev-auth", feature = "test-utils"))]
     {
         assert_eq!(res.status(), StatusCode::SERVICE_UNAVAILABLE);
         let retry_after = res.headers().get("Retry-After").unwrap().to_str().unwrap();
         assert_eq!(retry_after, "30");
     }
 
-    #[cfg(all(debug_assertions, not(feature = "test-utils")))]
+    #[cfg(all(feature = "dev-auth", not(feature = "test-utils")))]
     {
         assert_eq!(res.status(), StatusCode::CREATED);
     }
 
-    #[cfg(not(debug_assertions))]
+    #[cfg(not(feature = "dev-auth"))]
     {
         assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
     }
 }
 
 #[tokio::test]
-#[cfg(debug_assertions)]
+#[cfg(feature = "dev-auth")]
 async fn test_idempotency_inflight_concurrency() {
     let notify = Arc::new(Notify::new());
     let store = Arc::new(NotifyingStore {
@@ -514,7 +519,9 @@ async fn test_idempotency_inflight_concurrency() {
         let notify = notify.clone();
         async move {
             // Wait until t1 has entered the middleware and acquired the in-flight lock
-            notify.notified().await;
+            tokio::time::timeout(std::time::Duration::from_secs(5), notify.notified())
+                .await
+                .expect("timed out waiting for t1 to acquire idempotency lock");
             let req = build_idempotent_post("key-concurrent", "payload-c");
             app.oneshot(req).await.unwrap()
         }
