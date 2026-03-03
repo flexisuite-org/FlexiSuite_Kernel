@@ -118,7 +118,17 @@ impl Resolve for AllowlistResolver {
 
             // 2. Resolve
             // Using port 0 as we only need IPs
-            let addrs = tokio::net::lookup_host((name_str.as_str(), 0)).await?;
+            let addrs = tokio::time::timeout(
+                Duration::from_secs(3),
+                tokio::net::lookup_host((name_str.as_str(), 0)),
+            )
+            .await
+            .map_err(|_| {
+                Box::new(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    format!("DNS lookup timed out for '{}'", name_str),
+                )) as Box<dyn std::error::Error + Send + Sync>
+            })??;
 
             // 3. Validate IPs
             let addrs: Vec<SocketAddr> = addrs.collect();
@@ -155,11 +165,15 @@ fn is_safe_ip(ip: &IpAddr, host: &str, allowlist: &[String]) -> bool {
     // 2. The allowlist explicitly contains "localhost" and the host is "localhost".
     // 3. The allowlist explicitly contains the IP literal? (already covered by 1 if host matches).
 
-    // Check if host string is exactly this IP
-    if host == ip.to_string() {
-        // If host is IP literal, check_url already verified it is in allowlist.
-        // So we are good.
-        return true;
+    // Check if host string is this IP literal (supports bracketed IPv6 host forms).
+    let host_ip = host
+        .strip_prefix('[')
+        .and_then(|v| v.strip_suffix(']'))
+        .unwrap_or(host);
+    if let Ok(parsed_host_ip) = host_ip.parse::<IpAddr>() {
+        if parsed_host_ip == *ip {
+            return true;
+        }
     }
 
     // Special case for localhost

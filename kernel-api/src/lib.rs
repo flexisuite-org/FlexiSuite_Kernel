@@ -88,8 +88,12 @@ pub fn build_app_with_state(
     )
 }
 
-pub async fn readiness(Extension(_state): Extension<MiddlewareState>) -> StatusCode {
-    StatusCode::OK
+pub async fn readiness(Extension(state): Extension<MiddlewareState>) -> StatusCode {
+    if state.is_ready().await {
+        StatusCode::OK
+    } else {
+        StatusCode::SERVICE_UNAVAILABLE
+    }
 }
 
 pub async fn write_test(

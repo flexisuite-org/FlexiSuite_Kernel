@@ -23,7 +23,7 @@ kernel-data = { path = "../kernel-data" }
 # TODO(security): Pinned to =0.1.43 to avoid upstream regression in 0.1.44 (10MB bloat due to included test-macros).
 # Tracking: https://github.com/tokio-rs/tracing/issues/3455
 # Internal Tracking: https://github.com/flexisuite-org/FlexiSuite_Kernel/issues/25
-tracing = "=0.1.43"
+tracing = "=0.1.44"
 rusty_paseto = { version = "=0.8.0", features = ["v4_public"] }
 chrono = { version = "0.4", features = ["serde"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

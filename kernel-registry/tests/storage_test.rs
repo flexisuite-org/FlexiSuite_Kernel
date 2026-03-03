@@ -93,7 +93,6 @@ async fn test_save_and_get_manifest() {
     let registry = RegistryStorage::new(store, &test_tenant_ctx(), test_signing_public_key());
 
     let mut manifest = test_manifest("app_test", "1.0.0");
-    manifest.security.manifest_signature = "sig_...".to_string();
     manifest.security.manifest_signature_kid = "key1".to_string();
     sign_manifest(&mut manifest);
 

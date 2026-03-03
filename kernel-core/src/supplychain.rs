@@ -87,13 +87,17 @@ pub struct TrustedKey {
 }
 
 pub fn signature_scheme_for_digest(digest: &str) -> Option<&'static str> {
-    if digest.starts_with("sha256-") {
-        Some("ed25519-sha256")
-    } else if digest.starts_with("sha384-") {
-        Some("ed25519-sha384")
-    } else {
-        None
+    fn valid_hex_payload(payload: &str, expected_len: usize) -> bool {
+        payload.len() == expected_len && payload.as_bytes().iter().all(u8::is_ascii_hexdigit)
     }
+
+    if let Some(payload) = digest.strip_prefix("sha256-") {
+        return valid_hex_payload(payload, 64).then_some("ed25519-sha256");
+    }
+    if let Some(payload) = digest.strip_prefix("sha384-") {
+        return valid_hex_payload(payload, 96).then_some("ed25519-sha384");
+    }
+    None
 }
 
 pub fn manifest_signing_payload(manifest: &Manifest, scheme: &str) -> Vec<u8> {
@@ -105,6 +109,14 @@ pub fn manifest_signing_payload(manifest: &Manifest, scheme: &str) -> Vec<u8> {
 }
 
 fn verify_signature(payload: &[u8], signature_hex: &str, public_key: &[u8]) -> bool {
+    const ED25519_SIG_LEN: usize = 64;
+    const SIGNATURE_HEX_LEN: usize = ED25519_SIG_LEN * 2;
+    const PUBKEY_LEN: usize = 32;
+
+    if signature_hex.len() != SIGNATURE_HEX_LEN || public_key.len() != PUBKEY_LEN {
+        return false;
+    }
+
     let signature = match hex::decode(signature_hex) {
         Ok(sig) => sig,
         Err(_) => return false,

@@ -10,8 +10,16 @@ mod tests {
         SigningKey::from_bytes(&[7u8; 32])
     }
 
+    const DIGEST_SHA256_REVOKED: &str =
+        "sha256-1111111111111111111111111111111111111111111111111111111111111111";
+    const DIGEST_SHA256_ACTIVE: &str =
+        "sha256-2222222222222222222222222222222222222222222222222222222222222222";
+    const DIGEST_SHA384_ACTIVE: &str = "sha384-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const DIGEST_SHA384_SCOPE: &str = "sha384-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
     fn sign_manifest(manifest: &Manifest, signing_key: &SigningKey) -> String {
-        let scheme = signature_scheme_for_digest(&manifest.digest).unwrap_or("ed25519-unknown");
+        let scheme = signature_scheme_for_digest(&manifest.digest)
+            .expect("unsupported digest format in test manifest");
         let sig = signing_key.sign(&manifest_signing_payload(manifest, scheme));
         hex::encode(sig.to_bytes())
     }
@@ -23,7 +31,7 @@ mod tests {
 
         let manifest_revoked = Manifest {
             id: "pkg-a".to_string(),
-            digest: "sha256-123".to_string(),
+            digest: DIGEST_SHA256_REVOKED.to_string(),
             signature: String::new(),
             kid: "revoked".to_string(),
         };
@@ -34,7 +42,7 @@ mod tests {
 
         let manifest_ok = Manifest {
             id: "pkg-b".to_string(),
-            digest: "sha256-456".to_string(),
+            digest: DIGEST_SHA256_ACTIVE.to_string(),
             signature: String::new(),
             kid: "active".to_string(),
         };
@@ -82,7 +90,7 @@ mod tests {
         };
 
         assert!(matches!(
-            verify_manifest(&manifest_revoked, &key_revoked, "sha256-123", now),
+            verify_manifest(&manifest_revoked, &key_revoked, DIGEST_SHA256_REVOKED, now),
             VerificationResult::KeyRevoked
         ));
 
@@ -92,13 +100,13 @@ mod tests {
             VerificationResult::DigestMismatch
         ));
         assert!(matches!(
-            verify_manifest(&manifest_ok, &key_active, "sha256-456", now),
+            verify_manifest(&manifest_ok, &key_active, DIGEST_SHA256_ACTIVE, now),
             VerificationResult::Ok
         ));
 
         let manifest_sha384 = Manifest {
             id: "pkg-c".to_string(),
-            digest: "sha384-abc".to_string(),
+            digest: DIGEST_SHA384_ACTIVE.to_string(),
             signature: String::new(),
             kid: "active".to_string(),
         };
@@ -109,7 +117,7 @@ mod tests {
 
         // Verifying dash prefix support
         assert!(matches!(
-            verify_manifest(&manifest_sha384, &key_active, "sha384-abc", now),
+            verify_manifest(&manifest_sha384, &key_active, DIGEST_SHA384_ACTIVE, now),
             VerificationResult::Ok
         ));
 
@@ -121,27 +129,59 @@ mod tests {
             retired_at: None,
         };
         assert!(matches!(
-            verify_manifest(&manifest_ok, &key_wrong, "sha256-456", now),
+            verify_manifest(&manifest_ok, &key_wrong, DIGEST_SHA256_ACTIVE, now),
             VerificationResult::KeyMismatch
         ));
 
         // Test Retired logic
         // 1. In Window -> OK
         assert!(matches!(
-            verify_manifest(&manifest_ok, &key_retired_ok, "sha256-456", now),
+            verify_manifest(&manifest_ok, &key_retired_ok, DIGEST_SHA256_ACTIVE, now),
             VerificationResult::Ok
         ));
 
         // 2. Out Window -> Fail
         assert!(matches!(
-            verify_manifest(&manifest_ok, &key_retired_fail, "sha256-456", now),
+            verify_manifest(&manifest_ok, &key_retired_fail, DIGEST_SHA256_ACTIVE, now),
             VerificationResult::KeyRetiredOutOfWindow
         ));
 
         // 3. Next -> OK
         assert!(matches!(
-            verify_manifest(&manifest_ok, &key_next, "sha256-456", now),
+            verify_manifest(&manifest_ok, &key_next, DIGEST_SHA256_ACTIVE, now),
             VerificationResult::Ok
+        ));
+    }
+
+    #[test]
+    fn test_manifest_signature_invalid_path() {
+        let signing_key = signing_key();
+        let public_key = signing_key.verifying_key().to_bytes().to_vec();
+
+        let manifest_ok = Manifest {
+            id: "pkg-sig-invalid".to_string(),
+            digest: DIGEST_SHA256_ACTIVE.to_string(),
+            signature: String::new(),
+            kid: "active".to_string(),
+        };
+        let manifest_ok = Manifest {
+            signature: sign_manifest(&manifest_ok, &signing_key),
+            ..manifest_ok
+        };
+
+        let mut manifest_bad_sig = manifest_ok.clone();
+        manifest_bad_sig.signature = "00".repeat(64);
+
+        let trusted_key = TrustedKey {
+            kid: "active".to_string(),
+            public_key,
+            status: KeyStatus::Active,
+            retired_at: None,
+        };
+
+        assert!(matches!(
+            verify_manifest(&manifest_bad_sig, &trusted_key, DIGEST_SHA256_ACTIVE, 100000),
+            VerificationResult::SignatureInvalid
         ));
     }
 
@@ -150,13 +190,13 @@ mod tests {
         let ctx = BreakGlassContext {
             enabled: true,
             scope_tenant_id: Some("tenant_A".to_string()),
-            scope_digest: Some("sha384-xyz".to_string()),
+            scope_digest: Some(DIGEST_SHA384_SCOPE.to_string()),
             expiry_ts: 100, // timestamp
         };
 
         // Case 1: Matching Scope -> ALLOW
         assert!(matches!(
-            verify_break_glass(&ctx, "tenant_A", "sha384-xyz", 50),
+            verify_break_glass(&ctx, "tenant_A", DIGEST_SHA384_SCOPE, 50),
             VerificationResult::Ok
         ));
 
@@ -168,20 +208,20 @@ mod tests {
             expiry_ts: ctx.expiry_ts,
         };
         assert!(matches!(
-            verify_break_glass(&ctx_disabled, "tenant_A", "sha384-xyz", 50),
+            verify_break_glass(&ctx_disabled, "tenant_A", DIGEST_SHA384_SCOPE, 50),
             VerificationResult::BreakGlassDisabled
         ));
 
         // Case 2: Mismatch Scope -> BLOCK
         assert!(matches!(
-            verify_break_glass(&ctx, "tenant_B", "sha384-xyz", 50),
+            verify_break_glass(&ctx, "tenant_B", DIGEST_SHA384_SCOPE, 50),
             VerificationResult::BreakGlassScopeMismatch
         ));
 
         // Case 3: Expired strictness
         // Expiry = 100. Now = 100 -> Expired.
         assert!(matches!(
-            verify_break_glass(&ctx, "tenant_A", "sha384-xyz", 100),
+            verify_break_glass(&ctx, "tenant_A", DIGEST_SHA384_SCOPE, 100),
             VerificationResult::BreakGlassExpired
         ));
 
@@ -189,11 +229,11 @@ mod tests {
         let ctx_global = BreakGlassContext {
             enabled: true,
             scope_tenant_id: None, // Missing
-            scope_digest: Some("sha384-xyz".to_string()),
+            scope_digest: Some(DIGEST_SHA384_SCOPE.to_string()),
             expiry_ts: 200,
         };
         assert!(matches!(
-            verify_break_glass(&ctx_global, "tenant_A", "sha384-xyz", 50),
+            verify_break_glass(&ctx_global, "tenant_A", DIGEST_SHA384_SCOPE, 50),
             VerificationResult::BreakGlassScopeMissing
         ));
     }

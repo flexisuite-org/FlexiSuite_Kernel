@@ -257,6 +257,13 @@ impl RegistryStorage {
     #[instrument(skip(self, data), fields(tenant = %self.tenant_id, artifact = %key))]
     pub async fn save_artifact(&self, key: &str, data: Bytes) -> Result<String, RegistryError> {
         Self::validate_key(key)?;
+        if data.len() > ARTIFACT_MAX_BYTES {
+            return Err(RegistryError::ArtifactTooLarge {
+                max: ARTIFACT_MAX_BYTES,
+                actual: data.len(),
+            });
+        }
+
         let mut hasher = Sha384::new();
         hasher.update(&data);
         let digest = hex::encode(hasher.finalize());

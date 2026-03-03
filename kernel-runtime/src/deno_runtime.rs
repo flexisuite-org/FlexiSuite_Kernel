@@ -6,7 +6,6 @@ use futures_util::StreamExt;
 #[cfg(unix)]
 use libc::{clock_gettime, pthread_getcpuclockid, pthread_self, timespec};
 use reqwest::{Client, Method};
-use std::collections::HashMap;
 use std::io::{Error, ErrorKind};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -92,7 +91,7 @@ fn check_url(url_str: &str, allowlist: &[String]) -> Result<Url, JsErrorBox> {
 #[derive(serde::Deserialize)]
 struct FetchOptions {
     method: Option<String>,
-    headers: Option<HashMap<String, String>>,
+    headers: Option<Vec<(String, String)>>,
     body: Option<String>,
 }
 
@@ -100,7 +99,7 @@ struct FetchOptions {
 struct FetchResponse {
     status: u16,
     status_text: String,
-    headers: HashMap<String, String>,
+    headers: Vec<(String, String)>,
     body: String,
 }
 
@@ -157,27 +156,9 @@ pub async fn op_fetch(
         .unwrap_or("")
         .to_string();
 
-    let mut headers: HashMap<String, String> = HashMap::new();
+    let mut headers: Vec<(String, String)> = Vec::new();
     for (k, v) in response.headers() {
-        let key = k.to_string();
-        let val = v.to_str().unwrap_or("").to_string();
-
-        use std::fmt::Write;
-        if let Some(existing) = headers.get_mut(&key) {
-            // Special handling for Set-Cookie: use newline separator (or just append?)
-            // Deno/Browsers often expose Set-Cookie differently, but for a simple fetch polyfill returning Headers object,
-            // we should probably try to preserve them. But HashMap<String, String> is limiting.
-            // We'll use a comma for standard headers (RFC 7230) and a newline for Set-Cookie as a heuristic
-            // so consumers might parse it if they really need to.
-            let sep = if key.eq_ignore_ascii_case("set-cookie") {
-                "\n"
-            } else {
-                ", "
-            };
-            write!(existing, "{}{}", sep, val).ok();
-        } else {
-            headers.insert(key, val);
-        }
+        headers.push((k.to_string(), v.to_str().unwrap_or("").to_string()));
     }
 
     // Stream body with limit
@@ -478,13 +459,13 @@ impl SandboxRuntime for DenoSandbox {
                         [Symbol.iterator]() {{ return this.map.entries(); }}
                     }};
                     globalThis.fetch = async function(url, options) {{
-                        // Convert Headers instance to plain object
-                        if (options && options.headers instanceof Headers) {{
-                            const plainHeaders = {{}};
-                            options.headers.forEach((v, k) => {{
-                                plainHeaders[k] = v;
-                            }});
-                            options = {{ ...options, headers: plainHeaders }};
+                        // Preserve repeated headers by converting to tuple entries.
+                        if (options && options.headers) {{
+                            if (options.headers instanceof Headers) {{
+                                options = {{ ...options, headers: Array.from(options.headers.entries()) }};
+                            }} else if (typeof options.headers === "object" && !Array.isArray(options.headers)) {{
+                                options = {{ ...options, headers: Object.entries(options.headers).map(([k, v]) => [k, String(v)]) }};
+                            }}
                         }}
                         const response = await Deno.core.ops.op_fetch(url, options);
                         return {{

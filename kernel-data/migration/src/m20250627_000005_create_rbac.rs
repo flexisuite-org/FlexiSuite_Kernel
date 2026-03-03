@@ -19,7 +19,8 @@ impl MigrationTrait for Migration {
                 created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                 updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                 PRIMARY KEY (id),
-                UNIQUE (tenant_id, name)
+                UNIQUE (tenant_id, name),
+                CONSTRAINT uq_roles_tenant_id_id UNIQUE (tenant_id, id)
             );
             "#,
         )
@@ -70,6 +71,7 @@ impl MigrationTrait for Migration {
                 member_id UUID NOT NULL,   -- references users.id or groups.id
                 created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                 PRIMARY KEY (id),
+                CONSTRAINT ck_role_members_member_type CHECK (member_type IN ('user', 'group')),
                 UNIQUE (tenant_id, role_id, member_type, member_id)
             );
             "#,
@@ -143,7 +145,7 @@ impl MigrationTrait for Migration {
             r#"
             ALTER TABLE flexi.permissions
                 ADD CONSTRAINT fk_permissions_role_id
-                FOREIGN KEY (role_id) REFERENCES flexi.roles(id) ON DELETE CASCADE;
+                FOREIGN KEY (tenant_id, role_id) REFERENCES flexi.roles(tenant_id, id) ON DELETE CASCADE;
             "#,
         )
         .await?;
@@ -152,7 +154,7 @@ impl MigrationTrait for Migration {
             r#"
             ALTER TABLE flexi.role_members
                 ADD CONSTRAINT fk_role_members_role_id
-                FOREIGN KEY (role_id) REFERENCES flexi.roles(id) ON DELETE CASCADE;
+                FOREIGN KEY (tenant_id, role_id) REFERENCES flexi.roles(tenant_id, id) ON DELETE CASCADE;
             "#,
         )
         .await?;

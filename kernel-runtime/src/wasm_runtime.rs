@@ -317,7 +317,7 @@ impl SandboxRuntime for WasmSandbox {
 
                         // Check non-negative length for out buffer
                         if out_max_len < 0 {
-                            return Ok(ERR_RESPONSE_TOO_LARGE);
+                            return Ok(ERR_INVALID_LEN);
                         }
                         if json_bytes.len() > out_max_len as usize {
                             return Ok(ERR_RESPONSE_TOO_LARGE);
