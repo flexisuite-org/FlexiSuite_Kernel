@@ -319,7 +319,19 @@ impl SandboxRuntime for WasmSandbox {
                         if out_max_len < 0 {
                             return Ok(ERR_INVALID_LEN);
                         }
-                        if json_bytes.len() > out_max_len as usize {
+                        if out_ptr < 0 {
+                            return Ok(ERR_INVALID_LEN);
+                        }
+                        let out_len = out_max_len as usize;
+                        let out_start = out_ptr as usize;
+                        let out_end = match out_start.checked_add(out_len) {
+                            Some(end) => end,
+                            None => return Ok(ERR_INVALID_LEN),
+                        };
+                        if out_end > mem.data_size(&caller) {
+                            return Ok(ERR_INVALID_LEN);
+                        }
+                        if json_bytes.len() > out_len {
                             return Ok(ERR_RESPONSE_TOO_LARGE);
                         }
 

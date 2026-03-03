@@ -1597,6 +1597,7 @@ where
                 self.shared
                     .overflowed
                     .store(true, std::sync::atomic::Ordering::SeqCst);
+                self.shared.release_inflight();
                 Poll::Ready(Some(Err(e)))
             }
             Poll::Ready(None) => {
@@ -1609,9 +1610,7 @@ where
 }
 
 impl<S> Drop for ReplayCacheTee<S> {
-    fn drop(&mut self) {
-        self.shared.release_inflight();
-    }
+    fn drop(&mut self) {}
 }
 
 impl MiddlewareState {
