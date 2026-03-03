@@ -131,6 +131,7 @@ static PASETO_KEYSET: OnceLock<PasetoKeyset> = OnceLock::new();
 /// Kids added here are treated as revoked in addition to those in `PASETO_KEYSET.revoked_kids`.
 /// Updated at runtime by [`start_kid_revocation_listener`] without restarting the process.
 const MAX_DYNAMIC_REVOKED_KIDS: usize = 10_000;
+const MAX_KID_BYTES: usize = 128;
 
 #[derive(Debug)]
 struct BoundedRevokedKids {
@@ -213,11 +214,41 @@ fn insert_dynamic_revoked_kid(raw_kid: &str, source: &'static str) {
         return;
     }
 
-    let kid = raw_kid.trim().to_string();
-    if kid.is_empty() {
+    if raw_kid.as_bytes().len() > MAX_KID_BYTES {
+        tracing::warn!(
+            source = source,
+            raw_len = raw_kid.as_bytes().len(),
+            max_len = MAX_KID_BYTES,
+            "KID revocation listener: payload too large; ignored"
+        );
+        return;
+    }
+
+    let trimmed = raw_kid.trim();
+    if trimmed.is_empty() {
         tracing::warn!(source = source, "KID revocation listener: empty payload ignored");
         return;
     }
+    if trimmed.as_bytes().len() > MAX_KID_BYTES {
+        tracing::warn!(
+            source = source,
+            kid_len = trimmed.as_bytes().len(),
+            max_len = MAX_KID_BYTES,
+            "KID revocation listener: KID too large after trim; ignored"
+        );
+        return;
+    }
+    if !trimmed
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+    {
+        tracing::warn!(
+            source = source,
+            "KID revocation listener: invalid KID charset; ignored"
+        );
+        return;
+    }
+    let kid = trimmed.to_string();
 
     let mut guard = revoked_kids_override()
         .write()
@@ -1113,6 +1144,31 @@ mod tests {
             assert!(verify_paseto_v4_public_from_env_token(&token).is_ok());
 
             insert_dynamic_revoked_kid("   ", "test-malformed-payload");
+            assert!(verify_paseto_v4_public_from_env_token(&token).is_ok());
+        });
+    }
+
+    #[test]
+    fn test_dynamic_revocation_overlay_rejects_invalid_kid_charset() {
+        with_env_test_lock(|| {
+            let private_key = setup_auth_runtime_test();
+            let token = generate_test_paseto_token(private_key, "active");
+            assert!(verify_paseto_v4_public_from_env_token(&token).is_ok());
+
+            insert_dynamic_revoked_kid("active\nbinary", "test-invalid-charset");
+            assert!(verify_paseto_v4_public_from_env_token(&token).is_ok());
+        });
+    }
+
+    #[test]
+    fn test_dynamic_revocation_overlay_rejects_oversized_kid() {
+        with_env_test_lock(|| {
+            let private_key = setup_auth_runtime_test();
+            let token = generate_test_paseto_token(private_key, "active");
+            assert!(verify_paseto_v4_public_from_env_token(&token).is_ok());
+
+            let oversized = "a".repeat(MAX_KID_BYTES + 1);
+            insert_dynamic_revoked_kid(&oversized, "test-oversized-kid");
             assert!(verify_paseto_v4_public_from_env_token(&token).is_ok());
         });
     }

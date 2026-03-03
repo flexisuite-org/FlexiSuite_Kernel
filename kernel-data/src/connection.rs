@@ -380,6 +380,7 @@ mod tests {
     #[cfg(feature = "test-utils")]
     mod test_utils_parsing {
         use super::*;
+        use base64::Engine as _;
         use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 
         #[test]
