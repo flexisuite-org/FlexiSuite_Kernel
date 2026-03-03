@@ -1582,18 +1582,21 @@ where
                                 self.shared
                                     .overflowed
                                     .store(true, std::sync::atomic::Ordering::SeqCst);
-                                self.shared.release_inflight();
                             }
                         }
                         Err(_) => {
-                            self.shared.release_inflight();
+                            self.shared
+                                .overflowed
+                                .store(true, std::sync::atomic::Ordering::SeqCst);
                         }
                     }
                 }
                 Poll::Ready(Some(Ok(chunk)))
             }
             Poll::Ready(Some(Err(e))) => {
-                self.shared.release_inflight();
+                self.shared
+                    .overflowed
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
                 Poll::Ready(Some(Err(e)))
             }
             Poll::Ready(None) => {

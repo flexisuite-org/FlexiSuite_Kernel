@@ -333,6 +333,7 @@ impl SandboxRuntime for DenoSandbox {
                 ));
                 let client = Client::builder()
                     .dns_resolver(resolver)
+                    .redirect(reqwest::redirect::Policy::none())
                     .timeout(Duration::from_secs(30))
                     .build()
                     .map_err(|e| SandboxError::InitError(e.to_string()))?;

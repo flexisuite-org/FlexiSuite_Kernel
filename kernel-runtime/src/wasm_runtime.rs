@@ -355,8 +355,20 @@ impl SandboxRuntime for WasmSandbox {
         let resolver = Arc::new(crate::AllowlistResolver::new(
             &self.options.permissions.network_allowlist,
         ));
+        let redirect_allowlist =
+            crate::NormalizedAllowlist::new(&self.options.permissions.network_allowlist);
         let client = reqwest::Client::builder()
             .dns_resolver(resolver)
+            .redirect(reqwest::redirect::Policy::custom(move |attempt| {
+                if attempt.previous().len() >= 10 {
+                    return attempt.stop();
+                }
+                if crate::check_url(attempt.url().as_str(), &redirect_allowlist).is_ok() {
+                    attempt.follow()
+                } else {
+                    attempt.stop()
+                }
+            }))
             .timeout(Duration::from_secs(30))
             .build()
             .map_err(|e| SandboxError::InitError(e.to_string()))?;

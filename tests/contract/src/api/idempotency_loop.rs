@@ -7,7 +7,11 @@ use axum::{
     routing::post,
 };
 use kernel_api::auth::{TenantContext, TenantId, UserId};
-use kernel_api::middleware::{MiddlewareConfig, MiddlewareState, idempotency_middleware};
+use kernel_api::middleware::{
+    IdempotencyEntry, IdempotencyScopeKey, IdempotencyStore, InMemoryActionStore,
+    InMemoryIdempotencyStore, InMemoryQuotaStore, MiddlewareConfig, MiddlewareState,
+    idempotency_middleware,
+};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
@@ -112,9 +116,14 @@ async fn test_idempotency_cache_overflow_preserves_response_and_disables_replay(
         require_redis: false,
         ..Default::default()
     };
-    let state = MiddlewareState::new(config)
-        .await
-        .expect("middleware state");
+    let idempotency_store = Arc::new(InMemoryIdempotencyStore::new());
+    let state = MiddlewareState::with_store(
+        config,
+        idempotency_store.clone(),
+        Arc::new(InMemoryActionStore::new()),
+        Arc::new(InMemoryQuotaStore::new()),
+        None,
+    );
 
     let counter = Arc::new(AtomicUsize::new(0));
     let app = Router::new()
@@ -173,8 +182,31 @@ async fn test_idempotency_cache_overflow_preserves_response_and_disables_replay(
     assert!(body1.starts_with("run-1:"), "body1={body1}");
     assert!(body1.len() > 32, "body must exceed replay limit");
 
-    // Allow async release_inflight task to finish before the next request.
-    tokio::time::sleep(Duration::from_millis(20)).await;
+    let scope_key = IdempotencyScopeKey {
+        tenant_id: TenantId::new("tenant-1").expect("tenant id"),
+        method: "POST".to_string(),
+        canonical_target: "/".to_string(),
+        idempotency_key: "cache-overflow-key".to_string(),
+    };
+    tokio::time::timeout(Duration::from_millis(500), async {
+        loop {
+            match idempotency_store
+                .get(&scope_key)
+                .await
+                .expect("idempotency store get should succeed")
+            {
+                None => break,
+                Some(IdempotencyEntry::InFlight { .. }) => {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+                Some(IdempotencyEntry::Completed(_)) => {
+                    panic!("cache overflow path must not write completed record");
+                }
+            }
+        }
+    })
+    .await
+    .expect("inflight lease should be released within timeout");
 
     let res2 = app.clone().oneshot(make_req(tenant_ctx)).await.unwrap();
     assert_eq!(res2.status(), StatusCode::CREATED);
@@ -185,4 +217,9 @@ async fn test_idempotency_cache_overflow_preserves_response_and_disables_replay(
     let body2 = to_bytes(res2.into_body(), usize::MAX).await.unwrap();
     let body2 = String::from_utf8(body2.to_vec()).expect("utf8 body2");
     assert!(body2.starts_with("run-2:"), "body2={body2}");
+    assert_eq!(
+        counter.load(Ordering::SeqCst),
+        2,
+        "handler invocation count must be exactly 2"
+    );
 }
