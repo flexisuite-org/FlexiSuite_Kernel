@@ -1,4 +1,4 @@
-use crate::{RuntimeOptions, SandboxError, SandboxRuntime};
+use crate::{MAX_FETCH_BODY_BYTES, RuntimeOptions, SandboxError, SandboxRuntime};
 use async_trait::async_trait;
 use futures_util::StreamExt;
 use serde::Deserialize;
@@ -19,16 +19,30 @@ pub struct WasmSandbox {
 }
 
 const DEFAULT_MAX_STDOUT: usize = 1 << 20; // 1MB default hard cap
-const MAX_FETCH_BODY_BYTES: usize = 10 * 1024 * 1024; // 10MB
 
 // Error codes for flexi_fetch
+// Table:
+// -1  ERR_NO_MEMORY_EXPORT   -> guest memory export is missing
+// -2  ERR_READ_MEM           -> failed to read guest memory
+// -3  ERR_UTF8               -> UTF-8 decode failed
+// -4  ERR_CHECK_URL          -> URL policy validation failed
+// -5  (reserved)             -> historical gap, intentionally unused
+// -6  ERR_REQUEST_FAIL       -> HTTP request failed
+// -7  ERR_READ_BODY_FAIL     -> failed reading HTTP response body
+// -8  (reserved)             -> historical gap, intentionally unused
+// -9  ERR_WRITE_FAIL         -> failed writing response to guest memory
+// -10 ERR_INVALID_LEN        -> invalid pointer/length pair from guest
+// -11 ERR_PARSE_METHOD       -> invalid HTTP method
+// -12 ERR_PARSE_HEADERS      -> invalid headers JSON format
+// -13 ERR_RESPONSE_TOO_LARGE -> response exceeded MAX_FETCH_BODY_BYTES
+// -14 ERR_RESPONSE_UTF8      -> response body is not valid UTF-8
 const ERR_NO_MEMORY_EXPORT: i32 = -1;
 const ERR_READ_MEM: i32 = -2;
 const ERR_UTF8: i32 = -3;
 const ERR_CHECK_URL: i32 = -4;
-const ERR_REQUEST_FAIL: i32 = -6; // Skip -5 (unused)
+const ERR_REQUEST_FAIL: i32 = -6;
 const ERR_READ_BODY_FAIL: i32 = -7;
-const ERR_WRITE_FAIL: i32 = -9; // Skip -8
+const ERR_WRITE_FAIL: i32 = -9;
 const ERR_INVALID_LEN: i32 = -10;
 const ERR_PARSE_METHOD: i32 = -11;
 const ERR_PARSE_HEADERS: i32 = -12;
@@ -193,7 +207,9 @@ impl SandboxRuntime for WasmSandbox {
                                 return Err(ERR_INVALID_LEN);
                             }
                             // Check memory bounds before allocation
-                            let end = (ptr as usize).checked_add(len as usize).ok_or(ERR_INVALID_LEN)?;
+                            let end = (ptr as usize)
+                                .checked_add(len as usize)
+                                .ok_or(ERR_INVALID_LEN)?;
                             if end > mem.data_size(&caller) {
                                 return Err(ERR_READ_MEM);
                             }

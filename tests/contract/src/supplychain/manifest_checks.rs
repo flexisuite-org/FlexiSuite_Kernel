@@ -2,31 +2,17 @@
 mod tests {
     use ed25519_dalek::{Signer, SigningKey};
     use kernel_core::supplychain::{
-        BreakGlassContext, KeyStatus, Manifest, TrustedKey, VerificationResult, verify_break_glass,
-        verify_manifest,
+        BreakGlassContext, KeyStatus, Manifest, TrustedKey, VerificationResult,
+        manifest_signing_payload, signature_scheme_for_digest, verify_break_glass, verify_manifest,
     };
 
     fn signing_key() -> SigningKey {
         SigningKey::from_bytes(&[7u8; 32])
     }
 
-    fn manifest_signing_payload(manifest: &Manifest) -> Vec<u8> {
-        let scheme = if manifest.digest.starts_with("sha256-") {
-            "ed25519-sha256"
-        } else if manifest.digest.starts_with("sha384-") {
-            "ed25519-sha384"
-        } else {
-            "ed25519-unknown"
-        };
-        format!(
-            "flexisuite-manifest:v1:{scheme}:{}:{}:{}",
-            manifest.id, manifest.kid, manifest.digest
-        )
-        .into_bytes()
-    }
-
     fn sign_manifest(manifest: &Manifest, signing_key: &SigningKey) -> String {
-        let sig = signing_key.sign(&manifest_signing_payload(manifest));
+        let scheme = signature_scheme_for_digest(&manifest.digest).unwrap_or("ed25519-unknown");
+        let sig = signing_key.sign(&manifest_signing_payload(manifest, scheme));
         hex::encode(sig.to_bytes())
     }
 

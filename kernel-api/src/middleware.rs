@@ -9,7 +9,6 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use base64::prelude::*;
-use http_body_util::BodyExt;
 use kernel_core::idempotency::canonicalize_request_target;
 use kernel_core::quota::{QuotaLayer, QuotaViolation};
 use redis::AsyncCommands;
@@ -43,13 +42,19 @@ impl BearerToken {
 impl fmt::Debug for BearerToken {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         // Redact the token in debug output for security
-        if self.0.len() > 8 {
-            write!(
-                f,
-                "BearerToken(\"{}...{}\")",
-                &self.0[..4],
-                &self.0[self.0.len() - 4..]
-            )
+        let char_count = self.0.chars().count();
+        if char_count > 8 {
+            let prefix: String = self.0.chars().take(4).collect();
+            let suffix: String = self
+                .0
+                .chars()
+                .rev()
+                .take(4)
+                .collect::<String>()
+                .chars()
+                .rev()
+                .collect();
+            write!(f, "BearerToken(\"{}...{}\")", prefix, suffix)
         } else {
             write!(f, "BearerToken(<redacted>)")
         }
@@ -1547,6 +1552,32 @@ fn sanitize_redis_error(error_text: &str, redis_url: &str) -> String {
     error_text.replace(redis_url, &redact_redis_url(redis_url))
 }
 
+fn make_error_response(
+    status: StatusCode,
+    code: &'static str,
+    message: &'static str,
+    tenant_id: Option<&str>,
+    action_id: Option<&str>,
+    request_id: Option<&str>,
+) -> Response {
+    let mut response = (
+        status,
+        Json(serde_json::json!({
+            "error": message,
+            "code": code,
+            "tenant_id": tenant_id,
+            "action_id": action_id,
+        })),
+    )
+        .into_response();
+    if let Some(req_id) = request_id.and_then(|s| HeaderValue::from_str(s).ok()) {
+        response
+            .headers_mut()
+            .insert(HeaderName::from_static("x-request-id"), req_id);
+    }
+    response
+}
+
 pub async fn record_action(
     state: &MiddlewareState,
     tenant_id: kernel_core::auth::TenantId,
@@ -1568,36 +1599,7 @@ pub async fn get_action(
 }
 
 #[instrument(skip_all, fields(tenant_id, method, path))]
-pub async fn idempotency_middleware(
-    req: Request<Body>,
-    next: Next,
-) -> Response {
-    fn make_error_response(
-        status: StatusCode,
-        code: &'static str,
-        message: &'static str,
-        tenant_id: Option<&str>,
-        action_id: Option<&str>,
-        request_id: Option<&str>,
-    ) -> Response {
-        let mut response = (
-            status,
-            Json(serde_json::json!({
-                "error": message,
-                "code": code,
-                "tenant_id": tenant_id,
-                "action_id": action_id,
-            })),
-        )
-            .into_response();
-        if let Some(req_id) = request_id.and_then(|s| HeaderValue::from_str(s).ok()) {
-            response
-                .headers_mut()
-                .insert(HeaderName::from_static("x-request-id"), req_id);
-        }
-        response
-    }
-
+pub async fn idempotency_middleware(req: Request<Body>, next: Next) -> Response {
     let (parts, body) = req.into_parts();
     let method = parts.method.clone();
     let request_id = parts
@@ -1735,7 +1737,14 @@ pub async fn idempotency_middleware(
                 attempts = attempts,
                 "Exceeded max attempts waiting for in-flight idempotent request"
             );
-            let mut res = StatusCode::SERVICE_UNAVAILABLE.into_response();
+            let mut res = make_error_response(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "INFLIGHT_TIMEOUT",
+                "service unavailable due to in-flight timeout",
+                Some(tenant_id.as_str()),
+                None,
+                request_id.as_deref(),
+            );
             let retry_after = state
                 .config
                 .inflight_wait_timeout
@@ -1811,7 +1820,14 @@ pub async fn idempotency_middleware(
                             timeout_ms = state.config.inflight_wait_timeout.as_millis() as u64,
                             "Timed out waiting for in-flight idempotent request"
                         );
-                        let mut res = StatusCode::SERVICE_UNAVAILABLE.into_response();
+                        let mut res = make_error_response(
+                            StatusCode::SERVICE_UNAVAILABLE,
+                            "INFLIGHT_TIMEOUT",
+                            "service unavailable due to in-flight timeout",
+                            Some(tenant_id.as_str()),
+                            None,
+                            request_id.as_deref(),
+                        );
                         let retry_after = state
                             .config
                             .inflight_wait_timeout
@@ -1853,8 +1869,8 @@ pub async fn idempotency_middleware(
             return Response::from_parts(parts, body);
         }
 
-        let body_bytes = match body.collect().await {
-            Ok(collected) => collected.to_bytes(),
+        let body_bytes = match to_bytes(body, state.config.max_replay_body_size).await {
+            Ok(collected) => collected,
             Err(_) => {
                 error!(
                     "Response body could not be buffered for idempotency cache due to body read error"
@@ -1866,14 +1882,6 @@ pub async fn idempotency_middleware(
                 return res;
             }
         };
-        if body_bytes.len() > state.config.max_replay_body_size {
-            info!(
-                "Skipping idempotency replay cache due to response body > {} bytes",
-                state.config.max_replay_body_size
-            );
-            let _ = store.release_inflight(&scope_key, &lease).await;
-            return Response::from_parts(parts, Body::from(body_bytes));
-        }
         let action_id = parts
             .headers
             .get("X-Action-Id")
@@ -1967,23 +1975,35 @@ fn build_replay_response(record: &IdempotencyRecord) -> Response {
             HeaderName::from_bytes(name.as_bytes()),
             HeaderValue::from_str(val),
         ) {
-            res.headers_mut().insert(header_name, header_value);
+            res.headers_mut().append(header_name, header_value);
         }
     }
     if let Ok(value) = HeaderValue::from_str("true") {
-        res.headers_mut().insert("X-Idempotency-Replay", value);
+        res.headers_mut().append("X-Idempotency-Replay", value);
     }
     res
 }
 
 pub async fn quota_middleware(req: Request<Body>, next: Next) -> Result<Response, Response> {
     let (parts, body) = req.into_parts();
+    let request_id = parts
+        .headers
+        .get("x-request-id")
+        .and_then(|v| v.to_str().ok())
+        .map(ToOwned::to_owned);
 
     let tenant_ctx = match parts.extensions.get::<TenantContext>() {
         Some(ctx) => ctx,
         None => {
             warn!("Quota middleware missing TenantContext");
-            return Err(StatusCode::UNAUTHORIZED.into_response());
+            return Err(make_error_response(
+                StatusCode::UNAUTHORIZED,
+                "TENANT_CONTEXT_MISSING",
+                "tenant context is missing",
+                None,
+                None,
+                request_id.as_deref(),
+            ));
         }
     };
 
@@ -1991,7 +2011,14 @@ pub async fn quota_middleware(req: Request<Body>, next: Next) -> Result<Response
         Some(s) => s,
         None => {
             error!("MiddlewareState missing");
-            return Err(StatusCode::INTERNAL_SERVER_ERROR.into_response());
+            return Err(make_error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "MIDDLEWARE_STATE_MISSING",
+                "middleware state is missing",
+                Some(tenant_ctx.tenant_id().as_str()),
+                None,
+                request_id.as_deref(),
+            ));
         }
     };
 
@@ -2003,7 +2030,11 @@ pub async fn quota_middleware(req: Request<Body>, next: Next) -> Result<Response
                 retry_after_s: 100,
             };
             warn!("System Hard Limit exceeded (Mock)");
-            return Err(violation_to_response(&violation));
+            return Err(violation_to_response(
+                &violation,
+                Some(tenant_ctx.tenant_id().as_str()),
+                request_id.as_deref(),
+            ));
         }
 
         if parts.headers.contains_key("X-Mock-Quota-Tenant") {
@@ -2012,7 +2043,11 @@ pub async fn quota_middleware(req: Request<Body>, next: Next) -> Result<Response
                 retry_after_s: 5,
             };
             warn!("Tenant Budget exceeded (Mock)");
-            return Err(violation_to_response(&violation));
+            return Err(violation_to_response(
+                &violation,
+                Some(tenant_ctx.tenant_id().as_str()),
+                request_id.as_deref(),
+            ));
         }
 
         if parts.headers.contains_key("X-Mock-Quota-Api") {
@@ -2021,7 +2056,11 @@ pub async fn quota_middleware(req: Request<Body>, next: Next) -> Result<Response
                 retry_after_s: 60,
             };
             warn!("API Rate Limit exceeded (Mock)");
-            return Err(violation_to_response(&violation));
+            return Err(violation_to_response(
+                &violation,
+                Some(tenant_ctx.tenant_id().as_str()),
+                request_id.as_deref(),
+            ));
         }
     }
 
@@ -2037,7 +2076,11 @@ pub async fn quota_middleware(req: Request<Body>, next: Next) -> Result<Response
         )
         .await
     {
-        return Err(violation_to_response(&v));
+        return Err(violation_to_response(
+            &v,
+            Some(tenant_ctx.tenant_id().as_str()),
+            request_id.as_deref(),
+        ));
     }
 
     Ok(next.run(Request::from_parts(parts, body)).await)
@@ -2059,13 +2102,19 @@ pub fn violation_to_status(v: &QuotaViolation) -> StatusCode {
     }
 }
 
-pub fn violation_to_response(v: &QuotaViolation) -> Response {
+pub fn violation_to_response(
+    v: &QuotaViolation,
+    tenant_id: Option<&str>,
+    request_id: Option<&str>,
+) -> Response {
     let status = violation_to_status(v);
-    let message = match status {
-        StatusCode::TOO_MANY_REQUESTS => "Rate limit exceeded",
-        _ => "Quota limit exceeded",
+    let (code, message) = match v.layer {
+        QuotaLayer::SystemHardLimit => ("QUOTA_SYSTEM_HARD_LIMIT", "quota limit exceeded"),
+        QuotaLayer::CircuitBreaker => ("QUOTA_CIRCUIT_BREAKER", "service unavailable"),
+        QuotaLayer::TenantBudget => ("QUOTA_TENANT_BUDGET", "rate limit exceeded"),
+        QuotaLayer::ApiRateLimit => ("QUOTA_API_RATE_LIMIT", "rate limit exceeded"),
     };
-    let mut res = (status, message).into_response();
+    let mut res = make_error_response(status, code, message, tenant_id, None, request_id);
 
     // Inject headers from violation
     let headers = res.headers_mut();

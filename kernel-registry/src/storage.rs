@@ -1,15 +1,18 @@
 use crate::error::RegistryError;
 use crate::model::{Dependencies, DistManifest, Kind, Route};
 use bytes::Bytes;
+use futures_util::StreamExt;
 use kernel_core::auth::TenantContext;
-use object_store::ObjectStore;
 use object_store::path::Path;
+use object_store::{ObjectStore, PutMode, PutOptions};
 use ring::signature::{ED25519, UnparsedPublicKey};
 use serde::Serialize;
 use sha2::{Digest, Sha384};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use tracing::{error, info, instrument, warn};
+
+const ARTIFACT_MAX_BYTES: usize = 100 * 1024 * 1024;
 
 pub struct RegistryStorage {
     store: Arc<dyn ObjectStore>,
@@ -28,6 +31,9 @@ pub struct RegistryStorage {
 /// or ordering-affecting schema changes) can silently change computed digests.
 /// Treat such serde-shape changes as breaking: update stored manifests, add
 /// migration steps, and add digest regression tests.
+///
+/// Nested JSON object fields are canonicalized in `normalize_value`, which
+/// recursively sorts object keys lexicographically before serialization.
 struct ManifestDigestPayload<'a> {
     schema_version: &'a str,
     id: &'a str,
@@ -96,7 +102,7 @@ impl RegistryStorage {
         Path::from(format!("{}artifacts/{}", self.prefix, key))
     }
 
-    fn manifest_path(&self, id: &str, version: &str) -> Path {
+    pub fn manifest_path(&self, id: &str, version: &str) -> Path {
         Path::from(format!(
             "{}manifests/{}/{}/manifest.json",
             self.prefix, id, version
@@ -111,6 +117,10 @@ impl RegistryStorage {
     /// renames, or ordering-affecting schema edits) must be treated as breaking:
     /// update stored manifests, add migration steps, and add digest regression
     /// tests.
+    ///
+    /// Canonicalization contract: nested object values are normalized by
+    /// `normalize_value`, including lexicographic key sorting for all
+    /// `serde_json::Value::Object` nodes.
     fn manifest_payload_digest(manifest: &DistManifest) -> Result<String, RegistryError> {
         let payload_bytes = Self::manifest_payload_bytes(manifest)?;
         let mut hasher = Sha384::new();
@@ -132,7 +142,7 @@ impl RegistryStorage {
             configuration: &manifest.configuration,
         };
 
-        // Normalize numeric values to ensure digest stability (1.0 vs 1)
+        // Normalize values to ensure digest stability (numeric canonicalization + sorted object keys).
         let payload_value = serde_json::to_value(&payload)?;
         let normalized = Self::normalize_value(payload_value);
         serde_json::to_vec(&normalized).map_err(RegistryError::from)
@@ -145,7 +155,17 @@ impl RegistryStorage {
         )
     }
 
-    pub fn signature_payload_for_signing(manifest: &DistManifest) -> Result<Vec<u8>, RegistryError> {
+    pub fn signature_payload_for_signing(
+        manifest: &DistManifest,
+    ) -> Result<Vec<u8>, RegistryError> {
+        if manifest.id.contains(':')
+            || manifest.version.contains(':')
+            || manifest.security.manifest_signature_kid.contains(':')
+        {
+            return Err(RegistryError::InvalidManifest(
+                "id/version/manifest_signature_kid must not contain ':'".to_string(),
+            ));
+        }
         let digest = Self::manifest_payload_digest(manifest)?;
         Ok(Self::manifest_signature_payload(manifest, &digest).into_bytes())
     }
@@ -155,10 +175,13 @@ impl RegistryStorage {
         manifest: &DistManifest,
         computed_digest: &str,
     ) -> Result<(), RegistryError> {
-        if self.manifest_verifier_public_key.is_empty() {
+        if self.manifest_verifier_public_key.len() != 32 {
             return Err(RegistryError::IntegrityCheckFailed {
-                expected: "configured manifest verification key".to_string(),
-                actual: "missing manifest verification key".to_string(),
+                expected: "32-byte Ed25519 public key".to_string(),
+                actual: format!(
+                    "public key length {} bytes",
+                    self.manifest_verifier_public_key.len()
+                ),
             });
         }
 
@@ -166,11 +189,16 @@ impl RegistryStorage {
             .security
             .manifest_signature
             .strip_prefix("ed25519:")
-            .unwrap_or(&manifest.security.manifest_signature);
-        let signature = hex::decode(signature_hex).map_err(|_| RegistryError::IntegrityCheckFailed {
-            expected: "hex-encoded ed25519 signature".to_string(),
-            actual: "invalid manifest signature encoding".to_string(),
-        })?;
+            .ok_or_else(|| {
+                RegistryError::InvalidManifest(
+                    "security.manifest_signature must start with 'ed25519:'".to_string(),
+                )
+            })?;
+        let signature =
+            hex::decode(signature_hex).map_err(|_| RegistryError::IntegrityCheckFailed {
+                expected: "hex-encoded ed25519 signature".to_string(),
+                actual: "invalid manifest signature encoding".to_string(),
+            })?;
 
         let payload = Self::manifest_signature_payload(manifest, computed_digest);
         UnparsedPublicKey::new(&ED25519, &self.manifest_verifier_public_key)
@@ -184,11 +212,14 @@ impl RegistryStorage {
     fn normalize_value(v: serde_json::Value) -> serde_json::Value {
         use serde_json::Value;
         match v {
-            Value::Object(map) => Value::Object(
-                map.into_iter()
+            Value::Object(map) => {
+                let mut entries: Vec<(String, Value)> = map
+                    .into_iter()
                     .map(|(k, v)| (k, Self::normalize_value(v)))
-                    .collect(),
-            ),
+                    .collect();
+                entries.sort_by(|(a, _), (b, _)| a.cmp(b));
+                Value::Object(entries.into_iter().collect())
+            }
             Value::Array(vec) => Value::Array(vec.into_iter().map(Self::normalize_value).collect()),
             Value::Number(n) => {
                 if let Some(i) = n.as_i64() {
@@ -259,8 +290,19 @@ impl RegistryStorage {
                 RegistryError::ObjectStore(e)
             }
         })?;
-
-        let data = result.bytes().await?;
+        let mut data = Vec::new();
+        let mut stream = result.into_stream();
+        while let Some(chunk_result) = stream.next().await {
+            let chunk = chunk_result?;
+            if data.len().saturating_add(chunk.len()) > ARTIFACT_MAX_BYTES {
+                return Err(RegistryError::ArtifactTooLarge {
+                    max: ARTIFACT_MAX_BYTES,
+                    actual: data.len().saturating_add(chunk.len()),
+                });
+            }
+            data.extend_from_slice(&chunk);
+        }
+        let data = Bytes::from(data);
 
         if let Some(expected) = expected_digest {
             let mut hasher = Sha384::new();
@@ -288,6 +330,12 @@ impl RegistryStorage {
     ) -> Result<(String, DistManifest), RegistryError> {
         Self::validate_key(&manifest.id)?;
         Self::validate_key(&manifest.version)?;
+        if manifest.id.contains(':') || manifest.version.contains(':') {
+            warn!("Manifest rejected: id/version contains colon");
+            return Err(RegistryError::InvalidManifest(
+                "id/version must not contain ':'".to_string(),
+            ));
+        }
         if manifest.security.manifest_signature.trim().is_empty() {
             warn!("Manifest rejected: empty signature");
             return Err(RegistryError::InvalidManifest(
@@ -298,6 +346,12 @@ impl RegistryStorage {
             warn!("Manifest rejected: empty signature kid");
             return Err(RegistryError::InvalidManifest(
                 "security.manifest_signature_kid must not be empty".to_string(),
+            ));
+        }
+        if manifest.security.manifest_signature_kid.contains(':') {
+            warn!("Manifest rejected: signature kid contains colon");
+            return Err(RegistryError::InvalidManifest(
+                "security.manifest_signature_kid must not contain ':'".to_string(),
             ));
         }
         if manifest.security.trust_root_version.trim().is_empty() {
@@ -317,9 +371,31 @@ impl RegistryStorage {
         let path = self.manifest_path(&manifest.id, &manifest.version);
         let data = serde_json::to_vec(&persisted)?;
 
-        if let Err(e) = self.store.put(&path, data.into()).await {
-            error!("Failed to save manifest: {}", e);
-            return Err(RegistryError::ObjectStore(e));
+        let put_result = self
+            .store
+            .put_opts(
+                &path,
+                data.into(),
+                PutOptions {
+                    mode: PutMode::Create,
+                    ..Default::default()
+                },
+            )
+            .await;
+        if let Err(e) = put_result {
+            return match e {
+                object_store::Error::AlreadyExists { .. } => {
+                    warn!("Manifest already exists and cannot be overwritten");
+                    Err(RegistryError::ManifestAlreadyExists(format!(
+                        "{}/{}",
+                        manifest.id, manifest.version
+                    )))
+                }
+                _ => {
+                    error!("Failed to save manifest: {}", e);
+                    Err(RegistryError::ObjectStore(e))
+                }
+            };
         }
 
         info!(digest = %computed_digest, "Manifest saved successfully");

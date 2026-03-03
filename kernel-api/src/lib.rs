@@ -88,22 +88,7 @@ pub fn build_app_with_state(
     )
 }
 
-/// Readiness probe that checks critical dependencies
-pub async fn readiness(Extension(state): Extension<MiddlewareState>) -> StatusCode {
-    // Check that middleware state is properly initialized
-    // The state is considered ready if it was successfully created
-    // Redis connectivity is checked during state creation (new_with_redis)
-    // If we got this far, the state is ready
-    
-    // Additional check: verify we have valid stores
-    use std::sync::Arc;
-    
-    // Try to do a simple check - if stores are present, they're ready
-    // In production, you might want to add a `ping()` method to the store traits
-    let _ = &state.idempotency_store;
-    let _ = &state.action_store;
-    let _ = &state.quota_store;
-    
+pub async fn readiness(Extension(_state): Extension<MiddlewareState>) -> StatusCode {
     StatusCode::OK
 }
 

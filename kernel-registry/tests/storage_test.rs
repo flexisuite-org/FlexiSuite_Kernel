@@ -1,11 +1,10 @@
+use ed25519_dalek::{Signer, SigningKey};
 use kernel_core::auth::{TenantContext, TenantId};
 use kernel_registry::error::RegistryError;
 use kernel_registry::model::{Dependencies, DistManifest, Kind, Route, Security};
 use kernel_registry::storage::RegistryStorage;
 use object_store::ObjectStore;
 use object_store::memory::InMemory;
-use object_store::path::Path;
-use ed25519_dalek::{Signer, SigningKey};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -29,7 +28,7 @@ fn sign_manifest(manifest: &mut DistManifest) {
 }
 
 fn test_manifest(id: &str, version: &str) -> DistManifest {
-    let mut manifest = DistManifest {
+    DistManifest {
         schema_version: "1.0".to_string(),
         id: id.to_string(),
         version: version.into(),
@@ -52,9 +51,7 @@ fn test_manifest(id: &str, version: &str) -> DistManifest {
             manifest_signature_kid: "kid_default".to_string(),
             trust_root_version: "v1".to_string(),
         },
-    };
-    sign_manifest(&mut manifest);
-    manifest
+    }
 }
 
 #[tokio::test]
@@ -248,12 +245,7 @@ async fn test_get_manifest_detects_tampered_stored_json() {
     let mut tampered = persisted.clone();
     tampered.name = "Tampered Name".to_string();
     let tampered_bytes = serde_json::to_vec(&tampered).unwrap();
-    let tampered_path = Path::from(format!(
-        "tenants/{}/manifests/{}/{}/manifest.json",
-        tenant_ctx.tenant_id().as_str(),
-        manifest.id,
-        manifest.version
-    ));
+    let tampered_path = registry.manifest_path(&manifest.id, &manifest.version);
     store
         .put(&tampered_path, tampered_bytes.into())
         .await
@@ -407,6 +399,7 @@ async fn test_save_manifest_rejects_whitespace_security_fields() {
     }
 
     let mut manifest = test_manifest("app_whitespace_kid", "1.0.0");
+    manifest.security.manifest_signature = "sig".to_string();
     manifest.security.manifest_signature_kid = "   ".to_string();
     let result = registry.save_manifest(&manifest).await;
     match result {
@@ -417,6 +410,7 @@ async fn test_save_manifest_rejects_whitespace_security_fields() {
     }
 
     let mut manifest = test_manifest("app_whitespace_trust", "1.0.0");
+    manifest.security.manifest_signature = "sig".to_string();
     manifest.security.trust_root_version = "   ".to_string();
     let result = registry.save_manifest(&manifest).await;
     match result {

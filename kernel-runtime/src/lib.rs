@@ -9,6 +9,8 @@ use url::Url;
 pub mod deno_runtime;
 pub mod wasm_runtime;
 
+pub const MAX_FETCH_BODY_BYTES: usize = 10 * 1024 * 1024; // 10MB
+
 #[derive(Debug, Error)]
 pub enum SandboxError {
     #[error("Execution timeout")]

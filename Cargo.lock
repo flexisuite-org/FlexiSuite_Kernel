@@ -3255,6 +3255,7 @@ version = "0.1.0"
 dependencies = [
  "bytes",
  "ed25519-dalek",
+ "futures-util",
  "hex",
  "kernel-core",
  "object_store",

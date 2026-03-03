@@ -1,4 +1,4 @@
-use crate::{RuntimeOptions, SandboxError, SandboxRuntime};
+use crate::{MAX_FETCH_BODY_BYTES, RuntimeOptions, SandboxError, SandboxRuntime};
 use async_trait::async_trait;
 use deno_core::{JsRuntime, OpState, RuntimeOptions as DenoOptions, op2, v8};
 use deno_error::JsErrorBox;
@@ -21,7 +21,6 @@ pub struct DenoSandbox {
 }
 
 const DEFAULT_MAX_OUTPUT_SIZE: usize = 1 << 20; // 1MB default hard cap
-const MAX_FETCH_BODY_BYTES: usize = 10 * 1024 * 1024; // 10MB
 const MIN_DENO_HEAP_LIMIT: usize = 16 * 1024 * 1024; // avoid V8 process-abort range for tiny heaps
 
 impl DenoSandbox {
@@ -170,7 +169,11 @@ pub async fn op_fetch(
             // we should probably try to preserve them. But HashMap<String, String> is limiting.
             // We'll use a comma for standard headers (RFC 7230) and a newline for Set-Cookie as a heuristic
             // so consumers might parse it if they really need to.
-            let sep = if key.eq_ignore_ascii_case("set-cookie") { "\n" } else { ", " };
+            let sep = if key.eq_ignore_ascii_case("set-cookie") {
+                "\n"
+            } else {
+                ", "
+            };
             write!(existing, "{}{}", sep, val).ok();
         } else {
             headers.insert(key, val);
@@ -458,7 +461,8 @@ impl SandboxRuntime for DenoSandbox {
                             const k = name.toLowerCase();
                             const v = String(value);
                             if (this.map.has(k)) {{
-                                this.map.set(k, this.map.get(k) + ", " + v);
+                                const sep = k === "set-cookie" ? "\n" : ", ";
+                                this.map.set(k, this.map.get(k) + sep + v);
                             }} else {{
                                 this.map.set(k, v);
                             }}

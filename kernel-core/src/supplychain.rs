@@ -7,7 +7,7 @@ compile_error!("The 'test-utils' feature is not allowed in release builds");
 #[cfg(feature = "test-utils")]
 pub mod test_utils {
     use super::*;
-    
+
     /// Test helper to create a manifest with dummy data
     pub fn create_test_manifest() -> Manifest {
         Manifest {
@@ -17,7 +17,7 @@ pub mod test_utils {
             kid: "test-key-001".to_string(),
         }
     }
-    
+
     /// Test helper to create a trusted key
     pub fn create_test_trusted_key() -> TrustedKey {
         TrustedKey {
@@ -27,13 +27,16 @@ pub mod test_utils {
             retired_at: None,
         }
     }
-    
+
     /// Test helper to create a break glass context
     pub fn create_test_break_glass_context() -> BreakGlassContext {
         BreakGlassContext {
             enabled: true,
             scope_tenant_id: Some("test-tenant".to_string()),
-            scope_digest: Some("sha256-0000000000000000000000000000000000000000000000000000000000000000".to_string()),
+            scope_digest: Some(
+                "sha256-0000000000000000000000000000000000000000000000000000000000000000"
+                    .to_string(),
+            ),
             expiry_ts: 9999999999u64,
         }
     }
@@ -83,7 +86,7 @@ pub struct TrustedKey {
     pub retired_at: Option<u64>,
 }
 
-fn signature_scheme_for_digest(digest: &str) -> Option<&'static str> {
+pub fn signature_scheme_for_digest(digest: &str) -> Option<&'static str> {
     if digest.starts_with("sha256-") {
         Some("ed25519-sha256")
     } else if digest.starts_with("sha384-") {
@@ -93,7 +96,7 @@ fn signature_scheme_for_digest(digest: &str) -> Option<&'static str> {
     }
 }
 
-fn manifest_signing_payload(manifest: &Manifest, scheme: &str) -> Vec<u8> {
+pub fn manifest_signing_payload(manifest: &Manifest, scheme: &str) -> Vec<u8> {
     format!(
         "flexisuite-manifest:v1:{scheme}:{}:{}:{}",
         manifest.id, manifest.kid, manifest.digest
@@ -111,7 +114,9 @@ fn verify_signature(payload: &[u8], signature_hex: &str, public_key: &[u8]) -> b
         .is_ok()
 }
 
-/// Mock verification with time-aware context
+/// Verifies a manifest signature using Ed25519 (`ring::signature::ED25519`)
+/// via [`verify_signature`], with fail-closed checks for digest/key validity and
+/// time-aware retired-key acceptance window enforcement.
 pub fn verify_manifest(
     manifest: &Manifest,
     trusted_key: &TrustedKey,

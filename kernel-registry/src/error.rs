@@ -17,6 +17,12 @@ pub enum RegistryError {
     #[error("Artifact not found: {0}")]
     ArtifactNotFound(String),
 
+    #[error("Artifact exceeds maximum allowed size: {actual} bytes (max {max} bytes)")]
+    ArtifactTooLarge { max: usize, actual: usize },
+
+    #[error("Manifest already exists: {0}")]
+    ManifestAlreadyExists(String),
+
     #[error("Invalid path: {0}")]
     InvalidPath(String),
 

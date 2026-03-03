@@ -64,12 +64,13 @@ impl MigrationTrait for Migration {
             r#"
             CREATE TABLE IF NOT EXISTS flexi.role_members (
                 id UUID NOT NULL DEFAULT gen_random_uuid(),
+                tenant_id TEXT NOT NULL,
                 role_id UUID NOT NULL,
                 member_type TEXT NOT NULL, -- 'user' or 'group'
                 member_id UUID NOT NULL,   -- references users.id or groups.id
                 created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                 PRIMARY KEY (id),
-                UNIQUE (role_id, member_type, member_id)
+                UNIQUE (tenant_id, role_id, member_type, member_id)
             );
             "#,
         )
@@ -78,11 +79,13 @@ impl MigrationTrait for Migration {
         // 5. Enable RLS for all tables
         for table in &["roles", "groups", "permissions", "role_members"] {
             db.execute_unprepared(&format!(
-                "ALTER TABLE flexi.{} ENABLE ROW LEVEL SECURITY;", table
+                "ALTER TABLE flexi.{} ENABLE ROW LEVEL SECURITY;",
+                table
             ))
             .await?;
             db.execute_unprepared(&format!(
-                "ALTER TABLE flexi.{} FORCE ROW LEVEL SECURITY;", table
+                "ALTER TABLE flexi.{} FORCE ROW LEVEL SECURITY;",
+                table
             ))
             .await?;
         }
@@ -123,20 +126,14 @@ impl MigrationTrait for Migration {
         )
         .await?;
 
-        // 9. Create RLS policies for role_members (joining through roles table)
+        // 9. Create RLS policies for role_members
         db.execute_unprepared(
             r#"
             DROP POLICY IF EXISTS role_members_tenant_isolation ON flexi.role_members;
             CREATE POLICY role_members_tenant_isolation ON flexi.role_members
                 FOR ALL
                 TO PUBLIC
-                USING (
-                    EXISTS (
-                        SELECT 1 FROM flexi.roles r
-                        WHERE r.id = role_members.role_id
-                        AND r.tenant_id = flexi.authorized_tenant_id()
-                    )
-                );
+                USING (tenant_id = flexi.authorized_tenant_id());
             "#,
         )
         .await?;
@@ -190,6 +187,13 @@ impl MigrationTrait for Migration {
             "#,
         )
         .await?;
+        db.execute_unprepared(
+            r#"
+            CREATE INDEX IF NOT EXISTS idx_role_members_tenant_id 
+                ON flexi.role_members (tenant_id);
+            "#,
+        )
+        .await?;
 
         Ok(())
     }
@@ -198,13 +202,15 @@ impl MigrationTrait for Migration {
         let db = crate::MigrationConnection::new(manager.get_connection());
 
         // Drop indexes first
-        db.execute_unprepared("DROP INDEX IF EXISTS idx_role_members_role_id;")
+        db.execute_unprepared("DROP INDEX IF EXISTS flexi.idx_role_members_tenant_id;")
             .await?;
-        db.execute_unprepared("DROP INDEX IF EXISTS idx_permissions_tenant_id_role_id;")
+        db.execute_unprepared("DROP INDEX IF EXISTS flexi.idx_role_members_role_id;")
             .await?;
-        db.execute_unprepared("DROP INDEX IF EXISTS idx_groups_tenant_id;")
+        db.execute_unprepared("DROP INDEX IF EXISTS flexi.idx_permissions_tenant_id_role_id;")
             .await?;
-        db.execute_unprepared("DROP INDEX IF EXISTS idx_roles_tenant_id;")
+        db.execute_unprepared("DROP INDEX IF EXISTS flexi.idx_groups_tenant_id;")
+            .await?;
+        db.execute_unprepared("DROP INDEX IF EXISTS flexi.idx_roles_tenant_id;")
             .await?;
 
         // Drop foreign key constraints
