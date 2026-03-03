@@ -1523,7 +1523,11 @@ impl ReplayCacheFinalizeState {
         let scope_key = self.scope_key.clone();
         let lease = self.lease.clone();
         tokio::spawn(async move {
-            if store.complete(scope_key.clone(), &lease, stored).await.is_err() {
+            if store
+                .complete(scope_key.clone(), &lease, stored)
+                .await
+                .is_err()
+            {
                 let _ = store.release_inflight(&scope_key, &lease).await;
                 error!("Failed to complete idempotency record");
             }
@@ -2101,7 +2105,11 @@ pub async fn idempotency_middleware(req: Request<Body>, next: Next) -> Response 
             snapshot_headers(&parts.headers),
             state.config.idempotency_ttl,
         ));
-        let tee = ReplayCacheTee::new(body.into_data_stream(), shared, state.config.max_replay_body_size);
+        let tee = ReplayCacheTee::new(
+            body.into_data_stream(),
+            shared,
+            state.config.max_replay_body_size,
+        );
         return Response::from_parts(parts, Body::from_stream(tee));
     }
 
