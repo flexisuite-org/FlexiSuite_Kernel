@@ -1,9 +1,3 @@
-#![allow(clippy::manual_inspect)]
-#![allow(clippy::collapsible_if)]
-#![allow(clippy::manual_map)]
-#![allow(clippy::collapsible_else_if)]
-#![allow(clippy::implicit_saturating_sub)]
-#![allow(clippy::needless_borrows_for_generic_args)]
 #[cfg(all(not(test), not(debug_assertions), feature = "test-utils"))]
 compile_error!(
     "feature \"test-utils\" must not be enabled in release builds; remove it from production dependencies or CI"
@@ -20,7 +14,7 @@ use chrono::DateTime;
 use rusty_paseto::prelude::*;
 use sea_orm::DatabaseConnection;
 use serde::Deserialize;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -135,9 +129,13 @@ static PASETO_KEYSET: OnceLock<PasetoKeyset> = OnceLock::new();
 ///
 /// Kids added here are treated as revoked in addition to those in `PASETO_KEYSET.revoked_kids`.
 /// Updated at runtime by [`start_kid_revocation_listener`] without restarting the process.
+const MAX_DYNAMIC_REVOKED_KIDS: usize = 10_000;
+
 #[derive(Debug)]
 struct BoundedRevokedKids {
     kids: HashSet<String>,
+    order: VecDeque<String>,
+    max_entries: usize,
 }
 
 #[derive(Debug)]
@@ -147,9 +145,11 @@ enum RevokedKidInsertOutcome {
 }
 
 impl BoundedRevokedKids {
-    fn new() -> Self {
+    fn new(max_entries: usize) -> Self {
         Self {
             kids: HashSet::new(),
+            order: VecDeque::new(),
+            max_entries,
         }
     }
 
@@ -162,20 +162,30 @@ impl BoundedRevokedKids {
             return RevokedKidInsertOutcome::AlreadyPresent;
         }
 
+        while self.kids.len() >= self.max_entries {
+            if let Some(oldest) = self.order.pop_front() {
+                self.kids.remove(&oldest);
+            } else {
+                break;
+            }
+        }
         self.kids.insert(kid.clone());
+        self.order.push_back(kid);
         RevokedKidInsertOutcome::Inserted
     }
 
     #[cfg(test)]
     fn clear(&mut self) {
         self.kids.clear();
+        self.order.clear();
     }
 }
 
 static REVOKED_KIDS_OVERRIDE: OnceLock<std::sync::RwLock<BoundedRevokedKids>> = OnceLock::new();
 
 fn revoked_kids_override() -> &'static std::sync::RwLock<BoundedRevokedKids> {
-    REVOKED_KIDS_OVERRIDE.get_or_init(|| std::sync::RwLock::new(BoundedRevokedKids::new()))
+    REVOKED_KIDS_OVERRIDE
+        .get_or_init(|| std::sync::RwLock::new(BoundedRevokedKids::new(MAX_DYNAMIC_REVOKED_KIDS)))
 }
 
 fn insert_dynamic_revoked_kid(raw_kid: &str, source: &'static str) {
@@ -237,12 +247,12 @@ impl PasetoKeyset {
         };
 
         // Only insert generic key if active_kid is default ("active") AND key is provided
-        if let Some(key) = default_public_key {
-            if keyset.active_kid == "active" {
-                keyset
-                    .public_keys
-                    .insert(keyset.active_kid.clone(), key.to_vec());
-            }
+        if let Some(key) = default_public_key
+            && keyset.active_kid == "active"
+        {
+            keyset
+                .public_keys
+                .insert(keyset.active_kid.clone(), key.to_vec());
         }
 
         keyset.load_per_kid_public_keys_from_env()?;
@@ -292,12 +302,12 @@ impl PasetoKeyset {
             .chain(self.retired_kids.iter().map(String::as_str))
         {
             let normalized = normalize_kid_for_env(kid);
-            if let Some(existing) = normalized_owner.insert(normalized.clone(), kid) {
-                if existing != kid {
-                    return Err(format!(
-                        "kid normalization collision: '{existing}' and '{kid}' map to FLEXI_PASETO_V4_PUBLIC_KEY_B64URL_{normalized}"
-                    ));
-                }
+            if let Some(existing) = normalized_owner.insert(normalized.clone(), kid)
+                && existing != kid
+            {
+                return Err(format!(
+                    "kid normalization collision: '{existing}' and '{kid}' map to FLEXI_PASETO_V4_PUBLIC_KEY_B64URL_{normalized}"
+                ));
             }
         }
 
@@ -445,13 +455,11 @@ fn init_auth_config_with_decoded_public_key_and_keyset(
 fn verify_paseto_v4_public_from_env_token(token: &str) -> Result<TenantContext, AuthError> {
     let keyset = PASETO_KEYSET.get().ok_or(AuthError::Unauthorized)?;
 
-    let (kid, footer_raw) = extract_footer_kid(token).map_err(|e| {
+    let (kid, footer_raw) = extract_footer_kid(token).inspect_err(|_e| {
         tracing::warn!("PASETO footer missing or invalid");
-        e
     })?;
-    keyset.validate_token_kid(&kid).map_err(|e| {
+    keyset.validate_token_kid(&kid).inspect_err(|_e| {
         tracing::warn!(kid = %kid, "PASETO kid rejected");
-        e
     })?;
     // Dynamic revocation overlay: check kids revoked at runtime via Redis pub/sub.
     // This check runs after the static keyset check so statically-configured revocations
@@ -468,9 +476,8 @@ fn verify_paseto_v4_public_from_env_token(token: &str) -> Result<TenantContext, 
         tracing::warn!(kid = %kid, "No public key configured for kid");
         AuthError::Unauthorized
     })?;
-    verify_paseto_v4_public_token(token, key_for_kid, Some(&footer_raw)).map_err(|e| {
+    verify_paseto_v4_public_token(token, key_for_kid, Some(&footer_raw)).inspect_err(|_e| {
         tracing::warn!("PASETO signature or claim validation failed");
-        e
     })
 }
 
@@ -1001,6 +1008,29 @@ mod tests {
     fn test_keyset_for_revoked_kids_populates_revoked_kids() {
         let keyset = keyset_for_revoked_kids(&["revoked"]);
         assert!(keyset.revoked_kids.contains("revoked"));
+    }
+
+    #[test]
+    fn test_bounded_revoked_kids_evicts_oldest_when_full() {
+        let mut bounded = BoundedRevokedKids::new(2);
+        assert!(matches!(
+            bounded.insert("kid-1".to_string()),
+            RevokedKidInsertOutcome::Inserted
+        ));
+        assert!(matches!(
+            bounded.insert("kid-2".to_string()),
+            RevokedKidInsertOutcome::Inserted
+        ));
+        assert!(bounded.contains("kid-1"));
+        assert!(bounded.contains("kid-2"));
+
+        assert!(matches!(
+            bounded.insert("kid-3".to_string()),
+            RevokedKidInsertOutcome::Inserted
+        ));
+        assert!(!bounded.contains("kid-1"));
+        assert!(bounded.contains("kid-2"));
+        assert!(bounded.contains("kid-3"));
     }
 
     #[test]

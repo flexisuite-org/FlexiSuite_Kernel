@@ -400,4 +400,29 @@ mod tests {
             "non-system context must be rejected for cross-tenant token generation"
         );
     }
+
+    #[tokio::test]
+    async fn test_generate_tenant_token_allows_non_system_same_tenant_request() {
+        let mock_active_key = Model {
+            kid: "hmac-key-same-tenant".to_string(),
+            key_type: KeyType::Hmac,
+            algorithm: "HS256".to_string(),
+            secret_bytes: Some(vec![0x22; 32]),
+            public_bytes: None,
+            state: KeyState::Active,
+            created_at: Utc::now().into(),
+            activated_at: Some(Utc::now().into()),
+            retired_at: None,
+            revoked_at: None,
+            expires_at: None,
+        };
+        let mock_db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results(vec![vec![mock_active_key]])
+            .into_connection();
+        let tenant_id = TenantId::new("tenant_001").expect("tenant_id should be valid");
+        let ctx = TenantContext::new(tenant_id.clone(), None).with_db(Arc::new(mock_db));
+
+        let token = KeyManager::generate_tenant_token(&ctx, &tenant_id).await;
+        assert!(token.is_ok(), "same-tenant non-system token request must succeed");
+    }
 }

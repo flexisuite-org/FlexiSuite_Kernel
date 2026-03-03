@@ -79,6 +79,12 @@ impl TrustProvider for FileTrustProvider {
         };
 
         let mut public_key = [0u8; 32];
+        if key.alg != "Ed25519" {
+            return Err(RegistryError::TrustRootError(format!(
+                "Unsupported algorithm for key {}: {}",
+                key.kid, key.alg
+            )));
+        }
         hex::decode_to_slice(&key.public_key, &mut public_key).map_err(|e| {
             RegistryError::TrustRootError(format!("Invalid hex in public key {}: {}", key.kid, e))
         })?;

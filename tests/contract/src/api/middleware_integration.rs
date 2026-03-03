@@ -29,8 +29,8 @@ use uuid::Uuid;
 /// Creates a mock database with the specified number of authorization budget entries.
 ///
 /// Note: The mock permissions are hardcoded with `tenant_id = "tenant-1"`.
-/// Tests using this mock MUST set the `X-Tenant-Id` header to "tenant-1" in debug builds
-/// for the RBAC checks to work correctly.
+/// Tests using this mock MUST set both `X-Tenant-Id = tenant-1` and `X-User-Id`
+/// in debug builds for protected RBAC checks to work correctly.
 pub fn mock_db_with_budget(auth_calls: usize) -> sea_orm::DatabaseConnection {
     let mut db = MockDatabase::new(DatabaseBackend::Postgres);
 
@@ -74,6 +74,19 @@ pub fn mock_db_with_budget(auth_calls: usize) -> sea_orm::DatabaseConnection {
         db = db.append_query_results([perms]);
     }
 
+    db.into_connection()
+}
+
+pub fn mock_db_with_empty_permissions(auth_calls: usize) -> sea_orm::DatabaseConnection {
+    let mut db = MockDatabase::new(DatabaseBackend::Postgres);
+    for _ in 0..auth_calls {
+        db = db.append_exec_results([MockExecResult {
+            last_insert_id: 0,
+            rows_affected: 1,
+        }]);
+        let perms_empty = Vec::<permission::Model>::new();
+        db = db.append_query_results([perms_empty]);
+    }
     db.into_connection()
 }
 
@@ -310,6 +323,36 @@ async fn test_auth_logic_401_403() {
         let res = app.clone().oneshot(req).await.unwrap();
         assert_eq!(res.status(), StatusCode::CREATED);
     }
+}
+
+#[tokio::test]
+async fn test_rbac_fail_closed_with_empty_permissions_fixture() {
+    let app = setup_app_with_db(mock_db_with_empty_permissions(1)).await;
+
+    let mut builder = Request::builder()
+        .uri("/test")
+        .method("POST")
+        .header("Idempotency-Key", "rbac-empty-perms-key");
+
+    #[cfg(debug_assertions)]
+    {
+        builder = builder.header("X-Tenant-Id", "tenant-1");
+        builder = builder.header("X-User-Id", "user-1");
+    }
+
+    #[cfg(not(debug_assertions))]
+    {
+        builder = builder.header("Authorization", "Bearer invalid");
+    }
+
+    let req = builder.body(Body::empty()).unwrap();
+    let res = app.clone().oneshot(req).await.unwrap();
+
+    #[cfg(debug_assertions)]
+    assert_eq!(res.status(), StatusCode::FORBIDDEN);
+
+    #[cfg(not(debug_assertions))]
+    assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
 }
 
 #[tokio::test]
