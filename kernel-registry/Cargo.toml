@@ -16,8 +16,10 @@ bytes = "1.5"
 kernel-core = { path = "../kernel-core" }
 tracing = "=0.1.44"
 
+[features]
+test-utils = ["kernel-core/test-utils"]
+
 [dev-dependencies]
 tokio = { version = "1", features = ["full"] }
 tempfile = "3"
-ed25519-dalek = { workspace = true, features = ["pem"] }
-rand = "0.8"
+kernel-core = { path = "../kernel-core", features = ["test-utils"] }

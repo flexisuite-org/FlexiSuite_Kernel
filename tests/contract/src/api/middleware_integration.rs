@@ -1,33 +1,185 @@
+#[cfg(feature = "dev-auth")]
 use async_trait::async_trait;
-#[cfg(debug_assertions)]
+#[cfg(feature = "dev-auth")]
 use axum::body::to_bytes;
-#[cfg(debug_assertions)]
+#[cfg(feature = "dev-auth")]
 use axum::http::HeaderValue;
 use axum::{
     body::Body,
     http::{Request, StatusCode},
 };
 use kernel_api::middleware::{
+    IdempotencyStore, InMemoryActionStore, InMemoryQuotaStore, MiddlewareConfig, MiddlewareState,
+};
+#[cfg(feature = "dev-auth")]
+use kernel_api::middleware::{
     IdempotencyAcquireResult, IdempotencyEntry, IdempotencyLease, IdempotencyRecord,
-    IdempotencyScopeKey, IdempotencyStore, IdempotencyStoreError, InMemoryActionStore,
-    InMemoryQuotaStore, MiddlewareConfig, MiddlewareState,
+    IdempotencyScopeKey, IdempotencyStoreError,
 };
 use std::sync::Arc;
+#[cfg(feature = "dev-auth")]
 use tokio::sync::Notify;
 
 use sea_orm::{DatabaseBackend, MockDatabase};
 
-#[cfg(debug_assertions)]
+#[cfg(feature = "dev-auth")]
 use serde_json::Value;
 use tower::ServiceExt;
 
+use chrono::Utc;
+use kernel_data::entities::{key_record, permission};
+use sea_orm::MockExecResult;
+use uuid::Uuid;
+
+/// Creates a mock database with the specified number of authorization budget entries.
+///
+/// Note: The mock permissions are hardcoded with `tenant_id = "tenant-1"`.
+/// Tests using this mock MUST set both `X-Tenant-Id = tenant-1` and `X-User-Id`
+/// in debug builds for protected RBAC checks to work correctly.
+pub fn mock_db_with_budget(auth_calls: usize) -> sea_orm::DatabaseConnection {
+    let mut db = MockDatabase::new(DatabaseBackend::Postgres);
+
+    for _ in 0..auth_calls {
+        let now = Utc::now();
+        // 1) flexi.authorize_tenant
+        db = db.append_exec_results([MockExecResult {
+            last_insert_id: 0,
+            rows_affected: 1,
+        }]);
+        // 2) RBACRepository::get_user_permissions
+        let perms = vec![
+            permission::Model {
+                id: Uuid::new_v4(),
+                tenant_id: "tenant-1".to_string(),
+                role_id: Uuid::new_v4(),
+                resource: "test".to_string(),
+                action: "write".to_string(),
+                created_at: now.into(),
+                updated_at: now.into(),
+            },
+            permission::Model {
+                id: Uuid::new_v4(),
+                tenant_id: "tenant-1".to_string(),
+                role_id: Uuid::new_v4(),
+                resource: "action".to_string(),
+                action: "read".to_string(),
+                created_at: now.into(),
+                updated_at: now.into(),
+            },
+            permission::Model {
+                id: Uuid::new_v4(),
+                tenant_id: "tenant-1".to_string(),
+                role_id: Uuid::new_v4(),
+                resource: "diagnostics".to_string(),
+                action: "read".to_string(),
+                created_at: now.into(),
+                updated_at: now.into(),
+            },
+        ];
+        db = db.append_query_results([perms]);
+    }
+
+    db.into_connection()
+}
+
+pub fn mock_db_with_empty_permissions(auth_calls: usize) -> sea_orm::DatabaseConnection {
+    let mut db = MockDatabase::new(DatabaseBackend::Postgres);
+    for _ in 0..auth_calls {
+        db = db.append_exec_results([MockExecResult {
+            last_insert_id: 0,
+            rows_affected: 1,
+        }]);
+        let perms_empty = Vec::<permission::Model>::new();
+        db = db.append_query_results([perms_empty]);
+    }
+    db.into_connection()
+}
+
+/// Companion helper for Bearer v4/public tests that trigger V4->V2 bridge path.
+/// Query sequence: active HMAC key lookup -> authorize_tenant -> permissions lookup.
+pub fn mock_db_with_bridge_budget(auth_calls: usize) -> sea_orm::DatabaseConnection {
+    let mut db = MockDatabase::new(DatabaseBackend::Postgres);
+
+    for _ in 0..auth_calls {
+        let now = Utc::now();
+        db = db.append_query_results([vec![key_record::Model {
+            kid: "hmac-key-1".to_string(),
+            key_type: key_record::KeyType::Hmac,
+            algorithm: "HS256".to_string(),
+            secret_bytes: Some(vec![0u8; 32]),
+            public_bytes: None,
+            state: key_record::KeyState::Active,
+            created_at: now.into(),
+            activated_at: Some(now.into()),
+            retired_at: None,
+            revoked_at: None,
+            expires_at: None,
+        }]]);
+        db = db.append_exec_results([MockExecResult {
+            last_insert_id: 0,
+            rows_affected: 1,
+        }]);
+        let perms = vec![
+            permission::Model {
+                id: Uuid::new_v4(),
+                tenant_id: "tenant-1".to_string(),
+                role_id: Uuid::new_v4(),
+                resource: "test".to_string(),
+                action: "write".to_string(),
+                created_at: now.into(),
+                updated_at: now.into(),
+            },
+            permission::Model {
+                id: Uuid::new_v4(),
+                tenant_id: "tenant-1".to_string(),
+                role_id: Uuid::new_v4(),
+                resource: "action".to_string(),
+                action: "read".to_string(),
+                created_at: now.into(),
+                updated_at: now.into(),
+            },
+            permission::Model {
+                id: Uuid::new_v4(),
+                tenant_id: "tenant-1".to_string(),
+                role_id: Uuid::new_v4(),
+                resource: "diagnostics".to_string(),
+                action: "read".to_string(),
+                created_at: now.into(),
+                updated_at: now.into(),
+            },
+        ];
+        db = db.append_query_results([perms]);
+    }
+
+    db.into_connection()
+}
+
+fn default_mock_db() -> sea_orm::DatabaseConnection {
+    // Default mock that allows up to 20 successful authorizations and permission checks.
+    // This covers most integration tests that expect success.
+    // Tests expecting failure or specific DB behavior should use setup_app_with_db.
+    mock_db_with_budget(20)
+}
+
 pub async fn setup_app() -> axum::Router {
-    setup_app_with_config(MiddlewareConfig::default(), None).await
+    setup_app_with_db(default_mock_db()).await
+}
+
+pub async fn setup_app_with_db(db: sea_orm::DatabaseConnection) -> axum::Router {
+    setup_app_with_config_and_db(MiddlewareConfig::default(), None, db).await
 }
 
 pub async fn setup_app_with_config(
+    config: MiddlewareConfig,
+    store: Option<Arc<dyn IdempotencyStore>>,
+) -> axum::Router {
+    setup_app_with_config_and_db(config, store, default_mock_db()).await
+}
+
+pub async fn setup_app_with_config_and_db(
     mut config: MiddlewareConfig,
     store: Option<Arc<dyn IdempotencyStore>>,
+    db: sea_orm::DatabaseConnection,
 ) -> axum::Router {
     config.require_redis = false;
     let state = if let Some(s) = store {
@@ -43,19 +195,17 @@ pub async fn setup_app_with_config(
             .expect("middleware state")
     };
 
-    let db = MockDatabase::new(DatabaseBackend::Postgres).into_connection();
-
     let (app, _cleanup) = kernel_api::build_app_with_state(state, db.into());
     app
 }
 
-#[cfg(debug_assertions)]
+#[cfg(feature = "dev-auth")]
 struct NotifyingStore {
     inner: Arc<dyn IdempotencyStore>,
     notify: Arc<Notify>,
 }
 
-#[cfg(debug_assertions)]
+#[cfg(feature = "dev-auth")]
 #[async_trait]
 impl IdempotencyStore for NotifyingStore {
     async fn get(
@@ -94,21 +244,18 @@ impl IdempotencyStore for NotifyingStore {
     async fn cleanup(&self) {
         self.inner.cleanup().await
     }
-
-    async fn ping(&self) -> Result<kernel_api::middleware::PingStatus, IdempotencyStoreError> {
-        self.inner.ping().await
-    }
 }
 
 fn build_idempotent_post(key: &str, body: &str) -> Request<Body> {
     let mut builder = Request::builder().method("POST").uri("/test");
 
-    #[cfg(debug_assertions)]
+    #[cfg(feature = "dev-auth")]
     {
         builder = builder.header("X-Tenant-Id", "tenant-1");
+        builder = builder.header("X-User-Id", "user-1");
     }
 
-    #[cfg(not(debug_assertions))]
+    #[cfg(not(feature = "dev-auth"))]
     {
         builder = builder.header("Authorization", "Bearer invalid");
     }
@@ -154,7 +301,7 @@ async fn test_auth_logic_401_403() {
     let res = app.clone().oneshot(req).await.unwrap();
     assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
 
-    #[cfg(debug_assertions)]
+    #[cfg(feature = "dev-auth")]
     {
         // 3. Malformed dev tenant header -> 403
         let req = Request::builder()
@@ -173,7 +320,8 @@ async fn test_auth_logic_401_403() {
         let req = Request::builder()
             .uri("/test")
             .method("POST")
-            .header("X-Tenant-Id", "tenant-dev")
+            .header("X-Tenant-Id", "tenant-1") // matched with mock db
+            .header("X-User-Id", "user-1")
             .header("Idempotency-Key", "auth-test-key")
             .body(Body::empty())
             .unwrap();
@@ -183,7 +331,37 @@ async fn test_auth_logic_401_403() {
 }
 
 #[tokio::test]
-#[cfg(debug_assertions)]
+async fn test_rbac_fail_closed_with_empty_permissions_fixture() {
+    let app = setup_app_with_db(mock_db_with_empty_permissions(1)).await;
+
+    let mut builder = Request::builder()
+        .uri("/test")
+        .method("POST")
+        .header("Idempotency-Key", "rbac-empty-perms-key");
+
+    #[cfg(feature = "dev-auth")]
+    {
+        builder = builder.header("X-Tenant-Id", "tenant-1");
+        builder = builder.header("X-User-Id", "user-1");
+    }
+
+    #[cfg(not(feature = "dev-auth"))]
+    {
+        builder = builder.header("Authorization", "Bearer invalid");
+    }
+
+    let req = builder.body(Body::empty()).unwrap();
+    let res = app.clone().oneshot(req).await.unwrap();
+
+    #[cfg(feature = "dev-auth")]
+    assert_eq!(res.status(), StatusCode::FORBIDDEN);
+
+    #[cfg(not(feature = "dev-auth"))]
+    assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+#[cfg(feature = "dev-auth")]
 async fn test_idempotency_conflict_scope_and_action_lookup() {
     let app = setup_app().await;
 
@@ -224,9 +402,10 @@ async fn test_idempotency_conflict_scope_and_action_lookup() {
     let mut builder = Request::builder()
         .uri(format!("/actions/{first_action_id}"))
         .method("GET");
-    #[cfg(debug_assertions)]
+    #[cfg(feature = "dev-auth")]
     {
         builder = builder.header("X-Tenant-Id", "tenant-1");
+        builder = builder.header("X-User-Id", "user-1");
     }
     let req = builder.body(Body::empty()).unwrap();
     let res = app.clone().oneshot(req).await.unwrap();
@@ -239,7 +418,7 @@ async fn test_idempotency_conflict_scope_and_action_lookup() {
 }
 
 #[tokio::test]
-#[cfg(not(debug_assertions))]
+#[cfg(not(feature = "dev-auth"))]
 async fn test_idempotency_conflict_scope_and_action_lookup() {
     let app = setup_app().await;
     let req = build_idempotent_post("key-1", "payload-a");
@@ -255,12 +434,12 @@ async fn test_idempotency_key_validation() {
     let req = build_idempotent_post(&too_long, "payload");
     let res = app.clone().oneshot(req).await.unwrap();
 
-    #[cfg(debug_assertions)]
+    #[cfg(feature = "dev-auth")]
     {
         assert_eq!(res.status(), StatusCode::BAD_REQUEST);
     }
 
-    #[cfg(not(debug_assertions))]
+    #[cfg(not(feature = "dev-auth"))]
     {
         assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
     }
@@ -271,38 +450,54 @@ async fn test_quota_evaluation_priority_and_clipping() {
     let app = setup_app().await;
 
     let mut builder = Request::builder().uri("/test").method("POST");
-    #[cfg(debug_assertions)]
+    #[cfg(feature = "dev-auth")]
     {
         builder = builder.header("X-Tenant-Id", "tenant-1");
+        builder = builder.header("X-User-Id", "user-1");
     }
-    #[cfg(not(debug_assertions))]
+    #[cfg(not(feature = "dev-auth"))]
     {
         builder = builder.header("Authorization", "Bearer invalid");
     }
 
+    // Use a unique idempotency key to ensure this test always triggers fresh quota evaluation.
+    // The key includes the feature flag to ensure isolation between test-utils and non-test-utils runs.
+    #[cfg(feature = "test-utils")]
+    let idempotency_key = "quota-test-key-test-utils";
+    #[cfg(not(feature = "test-utils"))]
+    let idempotency_key = "quota-test-key-no-test-utils";
+
     let req = builder
         .header("X-Mock-Quota-System", "true")
         .header("X-Mock-Quota-Tenant", "true")
-        .header("Idempotency-Key", "quota-test-key")
+        .header("Idempotency-Key", idempotency_key)
         .body(Body::empty())
         .unwrap();
     let res = app.clone().oneshot(req).await.unwrap();
 
-    #[cfg(debug_assertions)]
+    // When test-utils is enabled, the mock quota middleware returns 503 SERVICE_UNAVAILABLE
+    // because the X-Mock-Quota-System header triggers a simulated quota violation.
+    // Without test-utils, the mock quota headers are ignored and the request succeeds with 201.
+    #[cfg(all(feature = "dev-auth", feature = "test-utils"))]
     {
         assert_eq!(res.status(), StatusCode::SERVICE_UNAVAILABLE);
         let retry_after = res.headers().get("Retry-After").unwrap().to_str().unwrap();
         assert_eq!(retry_after, "30");
     }
 
-    #[cfg(not(debug_assertions))]
+    #[cfg(all(feature = "dev-auth", not(feature = "test-utils")))]
+    {
+        assert_eq!(res.status(), StatusCode::CREATED);
+    }
+
+    #[cfg(not(feature = "dev-auth"))]
     {
         assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
     }
 }
 
 #[tokio::test]
-#[cfg(debug_assertions)]
+#[cfg(feature = "dev-auth")]
 async fn test_idempotency_inflight_concurrency() {
     let notify = Arc::new(Notify::new());
     let store = Arc::new(NotifyingStore {
@@ -324,7 +519,9 @@ async fn test_idempotency_inflight_concurrency() {
         let notify = notify.clone();
         async move {
             // Wait until t1 has entered the middleware and acquired the in-flight lock
-            notify.notified().await;
+            tokio::time::timeout(std::time::Duration::from_secs(5), notify.notified())
+                .await
+                .expect("timed out waiting for t1 to acquire idempotency lock");
             let req = build_idempotent_post("key-concurrent", "payload-c");
             app.oneshot(req).await.unwrap()
         }

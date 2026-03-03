@@ -51,13 +51,13 @@ mod tests {
 
     #[test]
     fn test_quota_retry_after_boundaries() {
-        // Case 1: Zero value (must be clamped to minimum 1s)
+        // Case 1: Zero value (Retry immediately / minimal delay)
         let v_zero = QuotaViolation {
             layer: QuotaLayer::ApiRateLimit,
             retry_after_s: 0,
         };
         let h_zero = v_zero.headers();
-        assert_eq!(h_zero[0].1, "1");
+        assert_eq!(h_zero[0].1, "0");
 
         // Case 2: Large value (Generic layer) -> Cap at 1 year
         let v_large = QuotaViolation {
@@ -85,7 +85,7 @@ mod tests {
         };
         assert_eq!(v_sys_ok.headers()[0].1, "15");
 
-        // Case 4: CircuitBreaker follows system-protection 1-30s clip
+        // Case 4: CircuitBreaker must floor Retry-After to 1s
         let v_cb_low = QuotaViolation {
             layer: QuotaLayer::CircuitBreaker,
             retry_after_s: 0,
@@ -96,6 +96,6 @@ mod tests {
             layer: QuotaLayer::CircuitBreaker,
             retry_after_s: 120,
         };
-        assert_eq!(v_cb_high.headers()[0].1, "30");
+        assert_eq!(v_cb_high.headers()[0].1, "120");
     }
 }

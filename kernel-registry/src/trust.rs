@@ -26,10 +26,10 @@ pub struct TrustRootKey {
 
 pub trait TrustProvider: Send + Sync {
     fn get_key(&self, kid: &str) -> Result<TrustedKey, RegistryError>;
+    fn trust_root_version(&self) -> &str;
 }
 
 pub struct FileTrustProvider {
-    path: PathBuf,
     trust_root: Arc<TrustRoot>,
 }
 
@@ -47,7 +47,6 @@ impl FileTrustProvider {
         })?;
 
         Ok(Self {
-            path,
             trust_root: Arc::new(root),
         })
     }
@@ -79,31 +78,53 @@ impl TrustProvider for FileTrustProvider {
             }
         };
 
+        let mut public_key = [0u8; 32];
+        if key.alg != "Ed25519" {
+            return Err(RegistryError::TrustRootError(format!(
+                "Unsupported algorithm for key {}: {}",
+                key.kid, key.alg
+            )));
+        }
+        hex::decode_to_slice(&key.public_key, &mut public_key).map_err(|e| {
+            RegistryError::TrustRootError(format!("Invalid hex in public key {}: {}", key.kid, e))
+        })?;
+
         Ok(TrustedKey {
             kid: key.kid.clone(),
             alg: key.alg.clone(),
-            public_key: key.public_key.clone(),
             status,
             retired_at: key.retired_at,
             not_before: key.not_before,
             not_after: key.not_after,
+            public_key,
         })
+    }
+
+    fn trust_root_version(&self) -> &str {
+        &self.trust_root.version
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-utils"))]
 pub mod tests {
     use super::*;
     use std::collections::HashMap;
 
+    #[derive(Clone)]
     pub struct MockTrustProvider {
         keys: HashMap<String, TrustedKey>,
+        trust_root_version: String,
     }
 
     impl MockTrustProvider {
         pub fn new() -> Self {
+            Self::with_version("v1")
+        }
+
+        pub fn with_version(version: impl Into<String>) -> Self {
             Self {
                 keys: HashMap::new(),
+                trust_root_version: version.into(),
             }
         }
 
@@ -118,6 +139,10 @@ pub mod tests {
                 .get(kid)
                 .cloned()
                 .ok_or_else(|| RegistryError::TrustRootError(format!("Key not found: {}", kid)))
+        }
+
+        fn trust_root_version(&self) -> &str {
+            &self.trust_root_version
         }
     }
 }

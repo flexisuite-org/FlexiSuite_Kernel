@@ -12,10 +12,11 @@ use kernel_data::auth_context::{TenantContext, TenantId, UserId};
 mod common;
 use common::admin::TestAdminTenantContext;
 use common::auth::TestAuth;
-use kernel_data::DataError;
-use kernel_data::connection::{RawConnection, TenantScoped, with_tenant_tx};
+use kernel_data::connection::{AuthenticatedScoped, RawConnection, TenantScoped, with_tenant_tx};
 use kernel_data::entities::entity_record;
 use kernel_data::repository::TenantRepository;
+use kernel_data::rbac::seed_rbac_membership_for_tests;
+use kernel_data::{DataError, RBACRepository};
 use sea_orm::{
     ActiveValue, ConnectionTrait, Database, DatabaseConnection, DbBackend, Statement,
     TransactionTrait,
@@ -71,6 +72,41 @@ async fn setup_test_db() -> (DatabaseConnection, PostgresNode) {
         .await
         .expect("Failed to reconnect to DB");
     (db, node)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore] // Requires Docker
+async fn test_rbac_integration_real_postgres() {
+    let (db, _node) = setup_test_db().await;
+    TestAuth::init_keys(&db).await.expect("Failed to init keys");
+
+    let tenant_id = TenantId::new("tenant-rbac").unwrap();
+    let user_id = UserId::new("user-rbac").unwrap();
+    let ctx = TenantContext::new(tenant_id.clone(), Some(user_id.clone()));
+
+    let token = TestAuth::generate_tenant_token(&db, &tenant_id)
+        .await
+        .expect("gen token");
+
+    with_tenant_tx(&db, &ctx, &token, |scoped| {
+        let tenant_id = tenant_id.clone();
+        let user_id = user_id.clone();
+        Box::pin(async move {
+            seed_rbac_membership_for_tests(scoped, &tenant_id, &user_id).await?;
+
+            // Verify
+            let auth_scoped = AuthenticatedScoped::try_from_scoped(scoped)
+                .expect("user_id must be present in RBAC test context");
+            let perms = RBACRepository::get_user_permissions(&auth_scoped).await?;
+            assert_eq!(perms.len(), 1);
+            assert_eq!(perms[0].resource, "res-1");
+            assert_eq!(perms[0].action, "act-1");
+
+            Ok(())
+        })
+    })
+    .await
+    .expect("RBAC test failed");
 }
 
 #[tokio::test(flavor = "multi_thread")]

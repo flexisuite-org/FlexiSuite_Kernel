@@ -42,7 +42,7 @@ impl KeyManager {
     /// Rotates keys for all supported types.
     pub async fn rotate_keys(ctx: &TenantContext) -> Result<(), KeyManagerError> {
         Self::ensure_system(ctx)?;
-        let db = ctx.db().map_err(|e| sea_orm::DbErr::Custom(e))?;
+        let db = ctx.db().map_err(sea_orm::DbErr::Custom)?;
         let key_types = vec![(KeyType::Hmac, "HS256"), (KeyType::PasetoPublic, "Ed25519")];
 
         for (k_type, alg) in key_types {
@@ -84,10 +84,7 @@ impl KeyManager {
 
         if let Some(active) = active_key {
             // Check if rotation is needed (e.g., > 30 days)
-            let rotation_base = active
-                .activated_at
-                .clone()
-                .unwrap_or(active.created_at.clone());
+            let rotation_base = active.activated_at.unwrap_or(active.created_at);
             let rotation_threshold = rotation_base + Duration::days(30);
             if now >= rotation_threshold {
                 // Rotate!
@@ -228,7 +225,7 @@ impl KeyManager {
         ctx: &TenantContext,
         key_type: KeyType,
     ) -> Result<Model, KeyManagerError> {
-        let db = ctx.db().map_err(|e| sea_orm::DbErr::Custom(e))?;
+        let db = ctx.db().map_err(sea_orm::DbErr::Custom)?;
         let key = KeyRecord::find()
             .filter(key_record::Column::KeyType.eq(key_type.clone()))
             .filter(key_record::Column::State.eq(KeyState::Active))
@@ -241,7 +238,7 @@ impl KeyManager {
     /// Gets a specific key by KID (for verification).
     pub async fn get_key(ctx: &TenantContext, kid: &str) -> Result<Model, KeyManagerError> {
         Self::ensure_system(ctx)?;
-        let db = ctx.db().map_err(|e| sea_orm::DbErr::Custom(e))?;
+        let db = ctx.db().map_err(sea_orm::DbErr::Custom)?;
         KeyRecord::find_by_id(kid)
             .one(db)
             .await?
@@ -251,7 +248,7 @@ impl KeyManager {
     /// Revokes a key immediately.
     pub async fn revoke_key(ctx: &TenantContext, kid: &str) -> Result<(), KeyManagerError> {
         Self::ensure_system(ctx)?;
-        let db = ctx.db().map_err(|e| sea_orm::DbErr::Custom(e))?;
+        let db = ctx.db().map_err(sea_orm::DbErr::Custom)?;
         let txn = db.begin().await?;
         let key = KeyRecord::find_by_id(kid)
             .lock_exclusive()
@@ -341,5 +338,105 @@ impl KeyManager {
             tenant_id.as_str(),
             sig
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use kernel_data::auth_context::SystemTenantContext;
+    use sea_orm::{DatabaseBackend, MockDatabase};
+    use std::sync::Arc;
+
+    #[tokio::test]
+    async fn test_generate_tenant_token_has_v2_format_with_kid() {
+        let mocked_kid = "hmac-key-mocked-01";
+        let mock_active_key = Model {
+            kid: mocked_kid.to_string(),
+            key_type: KeyType::Hmac,
+            algorithm: "HS256".to_string(),
+            secret_bytes: Some(vec![0x11; 32]),
+            public_bytes: None,
+            state: KeyState::Active,
+            created_at: Utc::now().into(),
+            activated_at: Some(Utc::now().into()),
+            retired_at: None,
+            revoked_at: None,
+            expires_at: None,
+        };
+        let mock_db = MockDatabase::new(DatabaseBackend::Postgres)
+            // Mock KeyManager::get_active_key_internal -> KeyRecord::find().one(db)
+            .append_query_results(vec![vec![mock_active_key]])
+            .into_connection();
+        let ctx = TenantContext::from(SystemTenantContext).with_db(Arc::new(mock_db));
+        let tenant_id = TenantId::new("tenant_001").expect("tenant_id should be valid");
+
+        let token = KeyManager::generate_tenant_token(&ctx, &tenant_id)
+            .await
+            .expect("token generation should succeed");
+        let parts: Vec<&str> = token.split(':').collect();
+        assert_eq!(parts.len(), 6, "v2 token must have 6 colon-separated parts");
+        assert_eq!(parts[0], "v2", "version must be v2");
+        assert_eq!(parts[1], mocked_kid, "kid must match active key from mocked DB");
+        assert!(
+            parts[2].parse::<u64>().is_ok(),
+            "timestamp must be valid epoch seconds"
+        );
+        assert!(
+            uuid::Uuid::parse_str(parts[3]).is_ok(),
+            "nonce must be a valid UUID"
+        );
+        assert_eq!(parts[4], tenant_id.as_str(), "tenant_id must match input");
+        assert_eq!(
+            parts[5].len(),
+            64,
+            "signature must be 64 hex chars (HMAC-SHA256)"
+        );
+        assert!(
+            parts[5].chars().all(|c| c.is_ascii_hexdigit()),
+            "signature must be hex-encoded"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_generate_tenant_token_rejects_non_system_cross_tenant_request() {
+        let mock_db = MockDatabase::new(DatabaseBackend::Postgres).into_connection();
+        let ctx = TenantContext::new(
+            TenantId::new("tenant_001").expect("tenant_id should be valid"),
+            None,
+        )
+        .with_db(Arc::new(mock_db));
+        let other_tenant_id = TenantId::new("tenant_002").expect("tenant_id should be valid");
+
+        let result = KeyManager::generate_tenant_token(&ctx, &other_tenant_id).await;
+        assert!(
+            matches!(result, Err(KeyManagerError::Unauthorized(_))),
+            "non-system context must be rejected for cross-tenant token generation"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_generate_tenant_token_allows_non_system_same_tenant_request() {
+        let mock_active_key = Model {
+            kid: "hmac-key-same-tenant".to_string(),
+            key_type: KeyType::Hmac,
+            algorithm: "HS256".to_string(),
+            secret_bytes: Some(vec![0x22; 32]),
+            public_bytes: None,
+            state: KeyState::Active,
+            created_at: Utc::now().into(),
+            activated_at: Some(Utc::now().into()),
+            retired_at: None,
+            revoked_at: None,
+            expires_at: None,
+        };
+        let mock_db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results(vec![vec![mock_active_key]])
+            .into_connection();
+        let tenant_id = TenantId::new("tenant_001").expect("tenant_id should be valid");
+        let ctx = TenantContext::new(tenant_id.clone(), None).with_db(Arc::new(mock_db));
+
+        let token = KeyManager::generate_tenant_token(&ctx, &tenant_id).await;
+        assert!(token.is_ok(), "same-tenant non-system token request must succeed");
     }
 }
