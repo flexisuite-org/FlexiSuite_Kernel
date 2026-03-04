@@ -3293,6 +3293,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "base64 0.22.1",
  "deno_core",
  "deno_error",
  "futures-util",

@@ -1,5 +1,6 @@
 use crate::{MAX_FETCH_BODY_BYTES, RuntimeOptions, SandboxError, SandboxRuntime};
 use async_trait::async_trait;
+use base64::Engine as _;
 use futures_util::StreamExt;
 use serde::Deserialize;
 use std::sync::Arc;
@@ -35,7 +36,6 @@ const DEFAULT_MAX_STDOUT: usize = 1 << 20; // 1MB default hard cap
 // -11 ERR_PARSE_METHOD       -> invalid HTTP method
 // -12 ERR_PARSE_HEADERS      -> invalid headers JSON format
 // -13 ERR_RESPONSE_TOO_LARGE -> response exceeded MAX_FETCH_BODY_BYTES
-// -14 ERR_RESPONSE_UTF8      -> response body is not valid UTF-8
 const ERR_NO_MEMORY_EXPORT: i32 = -1;
 const ERR_READ_MEM: i32 = -2;
 const ERR_UTF8: i32 = -3;
@@ -47,7 +47,6 @@ const ERR_INVALID_LEN: i32 = -10;
 const ERR_PARSE_METHOD: i32 = -11;
 const ERR_PARSE_HEADERS: i32 = -12;
 const ERR_RESPONSE_TOO_LARGE: i32 = -13;
-const ERR_RESPONSE_UTF8: i32 = -14;
 
 impl Drop for WasmSandbox {
     fn drop(&mut self) {
@@ -311,15 +310,20 @@ impl SandboxRuntime for WasmSandbox {
                             body_bytes.extend_from_slice(&chunk);
                         }
 
-                        let body = match String::from_utf8(body_bytes) {
-                            Ok(s) => s,
-                            Err(_) => return Ok(ERR_RESPONSE_UTF8),
+                        let body_base64 =
+                            base64::engine::general_purpose::STANDARD.encode(&body_bytes);
+                        let body_text = String::from_utf8(body_bytes).ok();
+                        let json_resp = match body_text {
+                            Some(body) => serde_json::json!({
+                                "status": status,
+                                "body": body,
+                                "body_base64": body_base64
+                            }),
+                            None => serde_json::json!({
+                                "status": status,
+                                "body_base64": body_base64
+                            }),
                         };
-
-                        let json_resp = serde_json::json!({
-                            "status": status,
-                            "body": body
-                        });
                         let json_str = json_resp.to_string();
                         let json_bytes = json_str.as_bytes();
 

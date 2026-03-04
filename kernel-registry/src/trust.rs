@@ -7,6 +7,8 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::{error, info, warn};
 
+const CLOCK_DRIFT_TOLERANCE_SECONDS: u64 = 30;
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct TrustRoot {
     pub version: String,
@@ -107,7 +109,7 @@ impl TrustProvider for FileTrustProvider {
         })?;
 
         if let Some(not_before) = key.not_before
-            && now < not_before
+            && now.saturating_add(CLOCK_DRIFT_TOLERANCE_SECONDS) < not_before
         {
             warn!(
                 kid = %key.kid,
@@ -122,7 +124,7 @@ impl TrustProvider for FileTrustProvider {
             });
         }
         if let Some(not_after) = key.not_after
-            && now > not_after
+            && now > not_after.saturating_add(CLOCK_DRIFT_TOLERANCE_SECONDS)
         {
             warn!(
                 kid = %key.kid,
@@ -192,5 +194,82 @@ pub mod tests {
         fn trust_root_version(&self) -> &str {
             &self.trust_root_version
         }
+    }
+
+    #[cfg(test)]
+    fn write_trust_root_file(
+        not_before: Option<u64>,
+        not_after: Option<u64>,
+    ) -> tempfile::NamedTempFile {
+        let file = tempfile::NamedTempFile::new().expect("create temp trust root");
+        let trust_root = serde_json::json!({
+            "version": "v1",
+            "generated_at": "2026-03-04T00:00:00Z",
+            "keys": [
+                {
+                    "kid": "kid-test",
+                    "alg": "Ed25519",
+                    "public_key": "0000000000000000000000000000000000000000000000000000000000000000",
+                    "status": "active",
+                    "retired_at": null,
+                    "not_before": not_before,
+                    "not_after": not_after
+                }
+            ]
+        });
+        std::fs::write(
+            file.path(),
+            serde_json::to_vec(&trust_root).expect("serialize trust root"),
+        )
+        .expect("write trust root");
+        file
+    }
+
+    #[cfg(test)]
+    #[test]
+    fn file_trust_provider_accepts_not_before_within_clock_skew() {
+        let now = 1_700_000_000u64;
+        let file = write_trust_root_file(Some(now + CLOCK_DRIFT_TOLERANCE_SECONDS), None);
+        let provider = FileTrustProvider::new(file.path().to_path_buf()).expect("load provider");
+        let key = provider
+            .get_key_at("kid-test", now)
+            .expect("key should be accepted");
+        assert_eq!(key.kid, "kid-test");
+    }
+
+    #[cfg(test)]
+    #[test]
+    fn file_trust_provider_rejects_not_before_beyond_clock_skew() {
+        let now = 1_700_000_000u64;
+        let file = write_trust_root_file(Some(now + CLOCK_DRIFT_TOLERANCE_SECONDS + 1), None);
+        let provider = FileTrustProvider::new(file.path().to_path_buf()).expect("load provider");
+        let err = provider
+            .get_key_at("kid-test", now)
+            .expect_err("key should be rejected");
+        assert!(matches!(err, RegistryError::KeyNotYetValid { .. }));
+    }
+
+    #[cfg(test)]
+    #[test]
+    fn file_trust_provider_accepts_not_after_within_clock_skew() {
+        let now = 1_700_000_000u64;
+        let file = write_trust_root_file(None, Some(now - CLOCK_DRIFT_TOLERANCE_SECONDS));
+        let provider = FileTrustProvider::new(file.path().to_path_buf()).expect("load provider");
+        let key = provider
+            .get_key_at("kid-test", now)
+            .expect("key should be accepted");
+        assert_eq!(key.kid, "kid-test");
+    }
+
+    #[cfg(test)]
+    #[test]
+    fn file_trust_provider_rejects_not_after_beyond_clock_skew() {
+        let now = 1_700_000_000u64;
+        let file = write_trust_root_file(None, Some(now - CLOCK_DRIFT_TOLERANCE_SECONDS - 1));
+        let provider = FileTrustProvider::new(file.path().to_path_buf()).expect("load provider");
+        let err = provider
+            .get_key_at("kid-test", now)
+            .expect_err("key should be rejected");
+        assert!(matches!(err, RegistryError::KeyExpired { .. }));
     }
 }

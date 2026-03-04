@@ -100,7 +100,7 @@ struct FetchResponse {
     status: u16,
     status_text: String,
     headers: Vec<(String, String)>,
-    body: String,
+    body_bytes: Vec<u8>,
 }
 
 #[op2]
@@ -175,13 +175,11 @@ pub async fn op_fetch(
         body.extend_from_slice(&chunk);
     }
 
-    let body_str = String::from_utf8(body).map_err(|e| JsErrorBox::generic(e.to_string()))?;
-
     Ok(FetchResponse {
         status,
         status_text,
         headers,
-        body: body_str,
+        body_bytes: body,
     })
 }
 
@@ -512,6 +510,8 @@ impl SandboxRuntime for DenoSandbox {
                             }}
                         }}
                         const response = await Deno.core.ops.op_fetch(url, options);
+                        const bodyBytes = Uint8Array.from(response.body_bytes);
+                        const textDecoder = new TextDecoder();
                         return {{
                             ok: response.status >= 200 && response.status < 300,
                             status: response.status,
@@ -522,12 +522,9 @@ impl SandboxRuntime for DenoSandbox {
                             type: 'basic', // stub
                             bodyUsed: false, // stub
                             clone: function() {{ return {{ ...this }}; }}, // naive clone stub
-                            arrayBuffer: async () => {{
-                                const encoder = new TextEncoder();
-                                return encoder.encode(response.body).buffer;
-                            }},
-                            text: async () => response.body,
-                            json: async () => JSON.parse(response.body),
+                            arrayBuffer: async () => bodyBytes.slice().buffer,
+                            text: async () => textDecoder.decode(bodyBytes),
+                            json: async () => JSON.parse(textDecoder.decode(bodyBytes)),
                         }};
                     }};
                     "#,
