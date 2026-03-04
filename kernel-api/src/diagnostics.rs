@@ -1,3 +1,4 @@
+use crate::middleware::{idempotency_middleware, quota_middleware, require_permission};
 use axum::{
     Router,
     extract::{Extension, Json, Query},
@@ -17,7 +18,6 @@ use kernel_data::{
 };
 use sea_orm::ActiveValue;
 use serde::{Deserialize, Serialize};
-use crate::middleware::{idempotency_middleware, quota_middleware, require_permission};
 use uuid::Uuid;
 
 /// Maximum allowed length for user-supplied string fields (error_code, trace_id, etc.)
@@ -69,35 +69,45 @@ pub fn routes() -> Router {
             post(report_diagnostic)
                 .layer(from_fn(idempotency_middleware))
                 .layer(from_fn(quota_middleware))
-                .layer(from_fn(|req, next| require_permission("diagnostics:write", req, next))),
+                .layer(from_fn(|req, next| {
+                    require_permission("diagnostics:write", req, next)
+                })),
         )
         .route(
             "/query",
             get(query_diagnostic)
                 .layer(from_fn(idempotency_middleware))
                 .layer(from_fn(quota_middleware))
-                .layer(from_fn(|req, next| require_permission("diagnostics:read", req, next))),
+                .layer(from_fn(|req, next| {
+                    require_permission("diagnostics:read", req, next)
+                })),
         )
         .route(
             "/health",
             get(get_health)
                 .layer(from_fn(idempotency_middleware))
                 .layer(from_fn(quota_middleware))
-                .layer(from_fn(|req, next| require_permission("diagnostics:read", req, next))),
+                .layer(from_fn(|req, next| {
+                    require_permission("diagnostics:read", req, next)
+                })),
         )
         .route(
             "/policy",
             get(get_policy)
                 .layer(from_fn(idempotency_middleware))
                 .layer(from_fn(quota_middleware))
-                .layer(from_fn(|req, next| require_permission("diagnostics:read", req, next))),
+                .layer(from_fn(|req, next| {
+                    require_permission("diagnostics:read", req, next)
+                })),
         )
         .route(
             "/policy",
             put(update_policy)
                 .layer(from_fn(idempotency_middleware))
                 .layer(from_fn(quota_middleware))
-                .layer(from_fn(|req, next| require_permission("diagnostics:write", req, next))),
+                .layer(from_fn(|req, next| {
+                    require_permission("diagnostics:write", req, next)
+                })),
         )
 }
 
@@ -291,6 +301,11 @@ async fn get_health(Extension(ctx): Extension<TenantContext>) -> impl IntoRespon
                 .into_response()
         }
     }
+}
+
+/// Unauthenticated liveness endpoint for probes.
+pub async fn healthz_probe() -> impl IntoResponse {
+    (StatusCode::OK, Json(serde_json::json!({"status": "ok"}))).into_response()
 }
 
 async fn get_policy(Extension(ctx): Extension<TenantContext>) -> impl IntoResponse {

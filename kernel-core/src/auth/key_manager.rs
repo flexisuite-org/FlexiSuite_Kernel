@@ -377,7 +377,10 @@ mod tests {
         let parts: Vec<&str> = token.split(':').collect();
         assert_eq!(parts.len(), 6, "v2 token must have 6 colon-separated parts");
         assert_eq!(parts[0], "v2", "version must be v2");
-        assert_eq!(parts[1], mocked_kid, "kid must match active key from mocked DB");
+        assert_eq!(
+            parts[1], mocked_kid,
+            "kid must match active key from mocked DB"
+        );
         assert!(
             parts[2].parse::<u64>().is_ok(),
             "timestamp must be valid epoch seconds"
@@ -437,6 +440,9 @@ mod tests {
         let ctx = TenantContext::new(tenant_id.clone(), None).with_db(Arc::new(mock_db));
 
         let token = KeyManager::generate_tenant_token(&ctx, &tenant_id).await;
-        assert!(token.is_ok(), "same-tenant non-system token request must succeed");
+        assert!(
+            token.is_ok(),
+            "same-tenant non-system token request must succeed"
+        );
     }
 }

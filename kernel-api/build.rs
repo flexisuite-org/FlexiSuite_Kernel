@@ -4,9 +4,10 @@ fn main() {
     let release_like = std::env::var("DEBUG")
         .map(|v| v == "false")
         .unwrap_or(false)
-        || std::env::var("OPT_LEVEL").map(|v| v != "0").unwrap_or(false);
-    if release_like && std::env::var("CARGO_FEATURE_TEST_UTILS").is_ok()
-    {
+        || std::env::var("OPT_LEVEL")
+            .map(|v| v != "0")
+            .unwrap_or(false);
+    if release_like && std::env::var("CARGO_FEATURE_TEST_UTILS").is_ok() {
         panic!("test-utils must not be enabled in release builds—it bypasses authentication.");
     }
     println!("cargo:rerun-if-env-changed=PROFILE");

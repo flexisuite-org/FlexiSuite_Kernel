@@ -1,14 +1,18 @@
-use crate::{RuntimeOptions, SandboxError, SandboxRuntime};
+use crate::{MAX_FETCH_BODY_BYTES, RuntimeOptions, SandboxError, SandboxRuntime};
 use async_trait::async_trait;
 use deno_core::{JsRuntime, OpState, RuntimeOptions as DenoOptions, op2, v8};
+use deno_error::JsErrorBox;
+use futures_util::StreamExt;
 #[cfg(unix)]
 use libc::{clock_gettime, pthread_getcpuclockid, pthread_self, timespec};
+use reqwest::{Client, Method};
 use std::io::{Error, ErrorKind};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::JoinHandle;
 use std::time::Duration;
 use tokio::sync::Semaphore;
+use url::Url;
 
 pub struct DenoSandbox {
     options: RuntimeOptions,
@@ -68,6 +72,117 @@ struct OutputConfig {
     max_output_size: Option<usize>,
 }
 
+#[derive(Clone)]
+struct NetworkConfig {
+    allowlist: crate::NormalizedAllowlist,
+}
+
+fn check_url(url_str: &str, allowlist: &crate::NormalizedAllowlist) -> Result<Url, JsErrorBox> {
+    match crate::check_url(url_str, allowlist) {
+        Ok(u) => Ok(u),
+        Err(crate::CheckUrlError::NotAllowed(msg)) => Err(JsErrorBox::generic(format!(
+            "Network access to '{}' is not allowed",
+            msg
+        ))),
+        Err(e) => Err(JsErrorBox::new("InvalidInput", e.to_string())),
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct FetchOptions {
+    method: Option<String>,
+    headers: Option<Vec<(String, String)>>,
+    body: Option<String>,
+}
+
+#[derive(serde::Serialize)]
+struct FetchResponse {
+    status: u16,
+    status_text: String,
+    headers: Vec<(String, String)>,
+    body_bytes: Vec<u8>,
+}
+
+#[op2]
+#[serde]
+pub async fn op_fetch(
+    state: std::rc::Rc<std::cell::RefCell<OpState>>,
+    #[string] url_str: String,
+    #[serde] options: Option<FetchOptions>,
+) -> Result<FetchResponse, JsErrorBox> {
+    let (client, allowlist) = {
+        let state = state.borrow();
+        (
+            state.borrow::<Client>().clone(),
+            state.borrow::<NetworkConfig>().allowlist.clone(),
+        )
+    };
+
+    // Initial URL check to catch IP literals and early failures
+    let url = check_url(&url_str, &allowlist)?;
+
+    let method = if let Some(ref opts) = options {
+        opts.method
+            .as_deref()
+            .unwrap_or("GET")
+            .parse::<Method>()
+            .map_err(|e| JsErrorBox::new("InvalidInput", e.to_string()))?
+    } else {
+        Method::GET
+    };
+
+    let mut builder = client.request(method, url);
+
+    if let Some(opts) = options {
+        if let Some(headers) = opts.headers {
+            for (k, v) in headers {
+                builder = builder.header(k, v);
+            }
+        }
+        if let Some(body) = opts.body {
+            builder = builder.body(body);
+        }
+    }
+
+    let response = builder
+        .send()
+        .await
+        .map_err(|e| JsErrorBox::generic(e.to_string()))?;
+
+    let status = response.status().as_u16();
+    let status_text = response
+        .status()
+        .canonical_reason()
+        .unwrap_or("")
+        .to_string();
+
+    let mut headers: Vec<(String, String)> = Vec::new();
+    for (k, v) in response.headers() {
+        headers.push((k.to_string(), v.to_str().unwrap_or("").to_string()));
+    }
+
+    // Stream body with limit
+    let mut body = Vec::new();
+    let mut stream = response.bytes_stream();
+    while let Some(chunk_res) = stream.next().await {
+        let chunk = chunk_res.map_err(|e| JsErrorBox::generic(e.to_string()))?;
+        if body.len() + chunk.len() > MAX_FETCH_BODY_BYTES {
+            return Err(JsErrorBox::generic(format!(
+                "Fetch response body exceeded limit of {} bytes",
+                MAX_FETCH_BODY_BYTES
+            )));
+        }
+        body.extend_from_slice(&chunk);
+    }
+
+    Ok(FetchResponse {
+        status,
+        status_text,
+        headers,
+        body_bytes: body,
+    })
+}
+
 #[op2(fast)]
 pub fn op_set_output(state: &mut OpState, #[string] json: String) -> Result<(), Error> {
     if let Some(max_output_size) = state
@@ -99,7 +214,7 @@ pub fn op_set_output(state: &mut OpState, #[string] json: String) -> Result<(), 
     Ok(())
 }
 
-deno_core::extension!(sandbox_ext, ops = [op_set_output],);
+deno_core::extension!(sandbox_ext, ops = [op_set_output, op_fetch],);
 
 #[cfg(unix)]
 fn current_thread_cpu_clock_id() -> Result<libc::clockid_t, SandboxError> {
@@ -134,15 +249,13 @@ fn thread_cpu_time(clock_id: libc::clockid_t) -> Result<Duration, SandboxError> 
             "thread CPU clock returned negative timestamp".to_string(),
         ));
     }
-
-    // POSIX requirement: tv_nsec must be [0, 999_999_999].
+    // POSIX requires tv_nsec to be within [0, 999_999_999]. Validate defensively.
     if ts.tv_nsec >= 1_000_000_000 {
         return Err(SandboxError::RuntimeError(format!(
             "thread CPU clock returned invalid nanoseconds: {}",
             ts.tv_nsec
         )));
     }
-
     Ok(Duration::from_secs(ts.tv_sec as u64)
         .saturating_add(Duration::from_nanos(ts.tv_nsec as u64)))
 }
@@ -171,12 +284,6 @@ impl SandboxRuntime for DenoSandbox {
                     "Deno CPU time limiting is unsupported on this platform".to_string(),
                 ));
             }
-        }
-
-        if !self.options.permissions.network_allowlist.is_empty() {
-            return Err(SandboxError::PermissionDenied(
-                "permissions.network_allowlist is not enforced yet".to_string(),
-            ));
         }
 
         let exec_permit = self
@@ -225,9 +332,30 @@ impl SandboxRuntime for DenoSandbox {
                     create_params: Some(create_params),
                     ..Default::default()
                 });
-                js_runtime.op_state().borrow_mut().put(OutputConfig {
-                    max_output_size: Some(options.max_output_size.unwrap_or(DEFAULT_MAX_OUTPUT_SIZE)),
-                });
+
+                let resolver = Arc::new(crate::AllowlistResolver::new(
+                    &options.permissions.network_allowlist,
+                ));
+                let client = Client::builder()
+                    .dns_resolver(resolver)
+                    .redirect(reqwest::redirect::Policy::none())
+                    .timeout(Duration::from_secs(30))
+                    .build()
+                    .map_err(|e| SandboxError::InitError(e.to_string()))?;
+
+                {
+                    let op_state_rc = js_runtime.op_state();
+                    let mut op_state = op_state_rc.borrow_mut();
+                    op_state.put(OutputConfig {
+                        max_output_size: Some(options.max_output_size.unwrap_or(DEFAULT_MAX_OUTPUT_SIZE)),
+                    });
+                    op_state.put(NetworkConfig {
+                        allowlist: crate::NormalizedAllowlist::new(
+                            &options.permissions.network_allowlist,
+                        ),
+                    });
+                    op_state.put(client);
+                }
 
                 let isolate_handle = js_runtime.v8_isolate().thread_safe_handle();
                 let wall_clock_limit = options.wall_clock_limit;
@@ -305,7 +433,103 @@ impl SandboxRuntime for DenoSandbox {
 
                 let input_json = serde_json::to_string(&input)
                     .map_err(|e| SandboxError::RuntimeError(format!("failed to serialize input: {e}")))?;
-                let setup_code = format!("globalThis.INPUT = {};", input_json);
+                let setup_code = format!(
+                    r#"
+                    globalThis.INPUT = {};
+                    // Minimal polyfill for Headers
+                    // Note: This is a subset implementation.
+                    globalThis.Headers = class Headers {{
+                        constructor(init) {{
+                            this.map = new Map();
+                            const appendHeader = (name, value) => {{
+                                const key = String(name).toLowerCase();
+                                const val = String(value);
+                                if (this.map.has(key)) {{
+                                    const sep = key === "set-cookie" ? "\n" : ", ";
+                                    this.map.set(key, this.map.get(key) + sep + val);
+                                }} else {{
+                                    this.map.set(key, val);
+                                }}
+                            }};
+                            if (!init) {{
+                                return;
+                            }}
+                            if (init instanceof Headers || init instanceof Map) {{
+                                for (const [key, value] of init.entries()) {{
+                                    appendHeader(key, value);
+                                }}
+                                return;
+                            }}
+                            if (Array.isArray(init)) {{
+                                for (const pair of init) {{
+                                    if (Array.isArray(pair) && pair.length >= 2) {{
+                                        appendHeader(pair[0], pair[1]);
+                                    }}
+                                }}
+                                return;
+                            }}
+                            if (typeof init === "object" && typeof init[Symbol.iterator] === "function") {{
+                                for (const pair of init) {{
+                                    if (Array.isArray(pair) && pair.length >= 2) {{
+                                        appendHeader(pair[0], pair[1]);
+                                    }}
+                                }}
+                                return;
+                            }}
+                            for (const [key, value] of Object.entries(init)) {{
+                                appendHeader(key, value);
+                            }}
+                        }}
+                        append(name, value) {{
+                            const k = name.toLowerCase();
+                            const v = String(value);
+                            if (this.map.has(k)) {{
+                                const sep = k === "set-cookie" ? "\n" : ", ";
+                                this.map.set(k, this.map.get(k) + sep + v);
+                            }} else {{
+                                this.map.set(k, v);
+                            }}
+                        }}
+                        delete(name) {{ this.map.delete(name.toLowerCase()); }}
+                        get(name) {{ return this.map.get(name.toLowerCase()) || null; }}
+                        has(name) {{ return this.map.has(name.toLowerCase()); }}
+                        set(name, value) {{ this.map.set(name.toLowerCase(), String(value)); }}
+                        forEach(callback) {{ this.map.forEach((v, k) => callback(v, k, this)); }}
+                        keys() {{ return this.map.keys(); }}
+                        values() {{ return this.map.values(); }}
+                        entries() {{ return this.map.entries(); }}
+                        [Symbol.iterator]() {{ return this.map.entries(); }}
+                    }};
+                    globalThis.fetch = async function(url, options) {{
+                        // Preserve repeated headers by converting to tuple entries.
+                        if (options && options.headers) {{
+                            if (options.headers instanceof Headers) {{
+                                options = {{ ...options, headers: Array.from(options.headers.entries()) }};
+                            }} else if (typeof options.headers === "object" && !Array.isArray(options.headers)) {{
+                                options = {{ ...options, headers: Object.entries(options.headers).map(([k, v]) => [k, String(v)]) }};
+                            }}
+                        }}
+                        const response = await Deno.core.ops.op_fetch(url, options);
+                        const bodyBytes = Uint8Array.from(response.body_bytes);
+                        const textDecoder = new TextDecoder();
+                        return {{
+                            ok: response.status >= 200 && response.status < 300,
+                            status: response.status,
+                            statusText: response.status_text,
+                            headers: new Headers(response.headers),
+                            url: url,
+                            redirected: false, // stub
+                            type: 'basic', // stub
+                            bodyUsed: false, // stub
+                            clone: function() {{ return {{ ...this }}; }}, // naive clone stub
+                            arrayBuffer: async () => bodyBytes.slice().buffer,
+                            text: async () => textDecoder.decode(bodyBytes),
+                            json: async () => JSON.parse(textDecoder.decode(bodyBytes)),
+                        }};
+                    }};
+                    "#,
+                    input_json
+                );
                 js_runtime
                     .execute_script("setup", setup_code)
                     .map_err(|e| SandboxError::RuntimeError(e.to_string()))?;

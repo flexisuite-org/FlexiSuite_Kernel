@@ -384,7 +384,7 @@ async fn test_wasm_non_json_stdout_returns_string() {
     let mut runtime = WasmSandbox::new(options).unwrap();
     let input = serde_json::Value::Null;
     let output = runtime.execute(wat, input).await.unwrap();
-    assert_eq!(output, serde_json::json!("hello wasm\n"));
+    assert_eq!(output, serde_json::json!("hello wasm"));
 }
 
 #[tokio::test]
@@ -421,7 +421,7 @@ async fn test_wasm_invalid_stdout_utf8() {
 }
 
 #[tokio::test]
-async fn test_wasm_network_allowlist_rejection() {
+async fn test_wasm_network_allowlist_allows_execution_when_unused() {
     let mut options = RuntimeOptions::default();
     options.permissions.network_allowlist = vec!["https://example.com".to_string()];
 
@@ -434,21 +434,63 @@ async fn test_wasm_network_allowlist_rejection() {
     )
     "#;
     let input = serde_json::Value::Null;
-    match wasm_runtime.execute(wat, input).await {
-        Err(SandboxError::PermissionDenied(_)) => {}
-        other => panic!("Expected PermissionDenied for Wasm, got: {:?}", other),
-    }
+    let result = wasm_runtime.execute(wat, input).await;
+    assert!(
+        result.is_ok(),
+        "Expected execution to succeed when network is unused, got: {:?}",
+        result
+    );
 }
 
 #[tokio::test]
-async fn test_deno_network_allowlist_rejection() {
+async fn test_wasm_fetch_rejects_oversized_url_len_before_allocation() {
+    let wat = r#"
+    (module
+        (import "env" "flexi_fetch" (func $fetch (param i32 i32 i32 i32 i32 i32 i32 i32 i32 i32) (result i32)))
+        (memory (export "memory") 1)
+        (data (i32.const 0) "https://example.com")
+        (data (i32.const 256) "GET")
+        (data (i32.const 260) "{}")
+        (func (export "_start")
+            (local $rc i32)
+            (local.set $rc
+                (call $fetch
+                    (i32.const 0) (i32.const 9000)
+                    (i32.const 256) (i32.const 3)
+                    (i32.const 260) (i32.const 2)
+                    (i32.const 0) (i32.const 0)
+                    (i32.const 1024) (i32.const 512)
+                )
+            )
+            (if (i32.ne (local.get $rc) (i32.const -10))
+                (then unreachable)
+            )
+        )
+    )
+    "#;
+
+    let options = RuntimeOptions::default();
+    let mut runtime = WasmSandbox::new(options).unwrap();
+    let input = serde_json::Value::Null;
+    let result = runtime.execute(wat, input).await;
+    assert!(
+        result.is_ok(),
+        "Expected oversized URL length to return ERR_INVALID_LEN without trap, got: {:?}",
+        result
+    );
+}
+
+#[tokio::test]
+async fn test_deno_network_allowlist_allows_execution_when_unused() {
     let mut options = RuntimeOptions::default();
     options.permissions.network_allowlist = vec!["https://example.com".to_string()];
 
     let mut deno_runtime = DenoSandbox::new(options);
     let input = serde_json::Value::Null;
-    match deno_runtime.execute("1 + 1", input).await {
-        Err(SandboxError::PermissionDenied(_)) => {}
-        other => panic!("Expected PermissionDenied for Deno, got: {:?}", other),
-    }
+    let result = deno_runtime.execute("1 + 1", input).await;
+    assert!(
+        result.is_ok(),
+        "Expected execution to succeed when network is unused, got: {:?}",
+        result
+    );
 }

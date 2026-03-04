@@ -226,7 +226,10 @@ fn insert_dynamic_revoked_kid(raw_kid: &str, source: &'static str) {
 
     let trimmed = raw_kid.trim();
     if trimmed.is_empty() {
-        tracing::warn!(source = source, "KID revocation listener: empty payload ignored");
+        tracing::warn!(
+            source = source,
+            "KID revocation listener: empty payload ignored"
+        );
         return;
     }
     if trimmed.as_bytes().len() > MAX_KID_BYTES {
@@ -428,7 +431,6 @@ impl PasetoKeyset {
         }
         Ok(())
     }
-
 
     fn validate_token_kid(&self, kid: &str) -> Result<(), AuthError> {
         if self.revoked_kids.contains(kid) {

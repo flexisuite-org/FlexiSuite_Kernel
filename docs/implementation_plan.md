@@ -797,7 +797,8 @@ Kernelはエラー発生時や診断要求に対し、以下の構造化デー�
 ### 8.4 Feedback API
 - `POST /api/v1/diagnostics/report`: Player/Runtime がサニタイズ済み診断イベントを登録する（生成元はKernel内部コンポーネントのみ）。
 - `POST /api/v1/diagnostics/query`: 認可済みAIエージェント/開発者が `trace_id` を指定して詳細診断データを取得する。
-- `GET /api/v1/diagnostics/health`: 現在のコンポーネントツリーの健全性スコアを取得する。
+- `GET /api/v1/diagnostics/health`: 現在のコンポーネントツリーの健全性スコアを取得する（**認証必須**、`diagnostics:read`）。
+- `GET /api/v1/diagnostics/healthz`: 監視/プローブ向けの簡易ヘルス確認を返す（**認証不要**）。
 - `GET /api/v1/diagnostics/policy`: テナントの診断同意状態（`enabled`, `updated_at`, `updated_by`）を取得する。
 - `PUT /api/v1/diagnostics/policy`: テナント管理者が診断同意状態を更新する（既定 `false`）。
 - **Project Rules & Context Layer**:

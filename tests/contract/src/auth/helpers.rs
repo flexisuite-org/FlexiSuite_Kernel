@@ -14,11 +14,8 @@ pub fn setup() {
     let (_, pub_b64) = get_test_keypair();
     AUTH_INIT.get_or_init(|| {
         let _ = tracing_subscriber::fmt().with_test_writer().try_init();
-        init_auth_config_with_public_key_and_revoked_kids(
-            &pub_b64,
-            &["revoked"],
-        )
-        .expect("Auth initialization failed");
+        init_auth_config_with_public_key_and_revoked_kids(&pub_b64, &["revoked"])
+            .expect("Auth initialization failed");
     });
 }
 

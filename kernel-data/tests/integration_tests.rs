@@ -14,8 +14,8 @@ use common::admin::TestAdminTenantContext;
 use common::auth::TestAuth;
 use kernel_data::connection::{AuthenticatedScoped, RawConnection, TenantScoped, with_tenant_tx};
 use kernel_data::entities::entity_record;
-use kernel_data::repository::TenantRepository;
 use kernel_data::rbac::seed_rbac_membership_for_tests;
+use kernel_data::repository::TenantRepository;
 use kernel_data::{DataError, RBACRepository};
 use sea_orm::{
     ActiveValue, ConnectionTrait, Database, DatabaseConnection, DbBackend, Statement,

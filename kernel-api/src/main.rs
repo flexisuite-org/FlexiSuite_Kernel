@@ -91,17 +91,17 @@ async fn main() {
         revocation_result = &mut kid_revocation_handle => {
             match revocation_result {
                 Ok(()) => {
-                    eprintln!("KID revocation listener exited unexpectedly");
+                    tracing::error!("KID revocation listener exited unexpectedly");
                 }
                 Err(e) => {
-                    eprintln!("KID revocation listener task failed: {e}");
+                    tracing::error!("KID revocation listener task failed: {e}");
                 }
             }
             std::process::exit(1);
         }
         server_result = axum::serve(listener, app) => {
             if let Err(e) = server_result {
-                eprintln!("Server error: {e}");
+                tracing::error!("Server error: {e}");
                 kid_revocation_handle.abort();
                 std::process::exit(1);
             }
