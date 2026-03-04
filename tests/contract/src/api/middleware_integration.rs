@@ -8,13 +8,13 @@ use axum::{
     body::Body,
     http::{Request, StatusCode},
 };
-use kernel_api::middleware::{
-    IdempotencyStore, InMemoryActionStore, InMemoryQuotaStore, MiddlewareConfig, MiddlewareState,
-};
 #[cfg(feature = "dev-auth")]
 use kernel_api::middleware::{
     IdempotencyAcquireResult, IdempotencyEntry, IdempotencyLease, IdempotencyRecord,
     IdempotencyScopeKey, IdempotencyStoreError,
+};
+use kernel_api::middleware::{
+    IdempotencyStore, InMemoryActionStore, InMemoryQuotaStore, MiddlewareConfig, MiddlewareState,
 };
 use std::sync::Arc;
 #[cfg(feature = "dev-auth")]

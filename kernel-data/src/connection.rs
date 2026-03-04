@@ -163,10 +163,7 @@ fn parse_tenant_from_token(token: &str) -> Option<String> {
     if token.starts_with("v4.public.") {
         use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
         let parts: Vec<&str> = token.split('.').collect();
-        if parts.len() == 3
-            && !parts[0].is_empty()
-            && !parts[1].is_empty()
-            && !parts[2].is_empty()
+        if parts.len() == 3 && !parts[0].is_empty() && !parts[1].is_empty() && !parts[2].is_empty()
         {
             if let Ok(payload_bytes) = URL_SAFE_NO_PAD.decode(parts[2]) {
                 // PASETO v4.public payload format is "message || 64-byte Ed25519 signature".
@@ -256,14 +253,11 @@ impl<'a> AuthenticatedScoped<'a> {
     pub fn try_from_scoped(
         scoped: &'a TenantScoped<RawConnection>,
     ) -> Result<Self, crate::error::DataError> {
-        let user_id = scoped
-            .user_id
-            .clone()
-            .ok_or_else(|| {
-                crate::error::DataError::TenantAuthorizationFailed(
-                    "AuthenticatedScoped requires a user_id in TenantScoped context".to_string(),
-                )
-            })?;
+        let user_id = scoped.user_id.clone().ok_or_else(|| {
+            crate::error::DataError::TenantAuthorizationFailed(
+                "AuthenticatedScoped requires a user_id in TenantScoped context".to_string(),
+            )
+        })?;
         Ok(Self { scoped, user_id })
     }
 
