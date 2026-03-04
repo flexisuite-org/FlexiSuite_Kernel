@@ -73,7 +73,8 @@ pub fn verify_manifest(
     }
 
     if manifest.kid != trusted_key.kid {
-        metrics::counter!("verification_result", "result" => "KeyMismatch", "flow" => "manifest").increment(1);
+        metrics::counter!("verification_result", "result" => "KeyMismatch", "flow" => "manifest")
+            .increment(1);
         return VerificationResult::KeyMismatch;
     }
 
@@ -120,11 +121,23 @@ pub fn verify_manifest(
 
     #[cfg(feature = "test-utils")]
     {
+        let bypass_allowed =
+            cfg!(debug_assertions) || std::env::var_os("ENABLE_TEST_UTILS").is_some();
+
+        if !bypass_allowed {
+            tracing::error!(
+                "test-utils signature bypass blocked: enable debug assertions or set ENABLE_TEST_UTILS"
+            );
+            metrics::counter!("verification_result", "result" => "SignatureInvalid", "flow" => "manifest").increment(1);
+            return VerificationResult::SignatureInvalid;
+        }
+
         if manifest.signature == "invalid" {
             metrics::counter!("verification_result", "result" => "SignatureInvalid", "flow" => "manifest").increment(1);
             return VerificationResult::SignatureInvalid;
         }
-        metrics::counter!("verification_result", "result" => "Ok", "flow" => "manifest").increment(1);
+        metrics::counter!("verification_result", "result" => "Ok", "flow" => "manifest")
+            .increment(1);
         return VerificationResult::Ok;
     }
 
@@ -149,7 +162,8 @@ pub fn verify_manifest(
             return VerificationResult::SignatureInvalid;
         }
 
-        metrics::counter!("verification_result", "result" => "Ok", "flow" => "manifest").increment(1);
+        metrics::counter!("verification_result", "result" => "Ok", "flow" => "manifest")
+            .increment(1);
         VerificationResult::Ok
     }
 }
@@ -200,6 +214,7 @@ pub fn verify_break_glass(
         }
     }
 
-    metrics::counter!("verification_result", "result" => "Ok", "flow" => "break_glass").increment(1);
+    metrics::counter!("verification_result", "result" => "Ok", "flow" => "break_glass")
+        .increment(1);
     VerificationResult::Ok
 }

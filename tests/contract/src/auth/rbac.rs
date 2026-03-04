@@ -213,7 +213,9 @@ async fn test_rbac_rejects_v2_token_with_insufficient_parts() {
     let app = axum::Router::new()
         .route("/protected", axum::routing::get(|| async { "Allowed" }))
         .layer(axum::middleware::from_fn(load_permissions_middleware))
-        .layer(axum::Extension(BearerToken::new(token_malformed.to_string())))
+        .layer(axum::Extension(BearerToken::new(
+            token_malformed.to_string(),
+        )))
         .layer(axum::Extension(
             TenantContext::new(
                 TenantId::new(tenant_id).unwrap(),
@@ -269,7 +271,9 @@ async fn test_rbac_accepts_v2_token_with_valid_kid() {
             )),
         )
         .layer(axum::middleware::from_fn(load_permissions_middleware))
-        .layer(axum::Extension(BearerToken::new(token_with_kid.to_string())))
+        .layer(axum::Extension(BearerToken::new(
+            token_with_kid.to_string(),
+        )))
         .layer(axum::Extension(
             TenantContext::new(
                 TenantId::new(tenant_id).unwrap(),

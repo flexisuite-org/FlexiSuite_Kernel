@@ -12,6 +12,8 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use tracing::{error, info, instrument, warn};
 
+const ARTIFACT_MAX_BYTES: usize = 100 * 1024 * 1024; // 100 MiB
+
 pub struct RegistryStorage {
     store: Arc<dyn ObjectStore>,
     trust_provider: Arc<dyn TrustProvider>,
@@ -215,7 +217,30 @@ impl RegistryStorage {
             }
         })?;
 
+        if result.meta.size > ARTIFACT_MAX_BYTES {
+            warn!(
+                max = ARTIFACT_MAX_BYTES,
+                actual = result.meta.size,
+                "Artifact exceeds maximum allowed size"
+            );
+            return Err(RegistryError::ArtifactTooLarge {
+                max: ARTIFACT_MAX_BYTES,
+                actual: result.meta.size,
+            });
+        }
+
         let data = result.bytes().await?;
+        if data.len() > ARTIFACT_MAX_BYTES {
+            warn!(
+                max = ARTIFACT_MAX_BYTES,
+                actual = data.len(),
+                "Artifact exceeds maximum allowed size after read"
+            );
+            return Err(RegistryError::ArtifactTooLarge {
+                max: ARTIFACT_MAX_BYTES,
+                actual: data.len(),
+            });
+        }
 
         if let Some(expected) = expected_digest {
             let mut hasher = Sha384::new();

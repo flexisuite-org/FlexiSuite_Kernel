@@ -8,13 +8,13 @@ use axum::{
     body::Body,
     http::{Request, StatusCode},
 };
-use kernel_api::middleware::{
-    IdempotencyStore, InMemoryActionStore, InMemoryQuotaStore, MiddlewareConfig, MiddlewareState,
-};
 #[cfg(feature = "dev-auth")]
 use kernel_api::middleware::{
     IdempotencyAcquireResult, IdempotencyEntry, IdempotencyLease, IdempotencyRecord,
     IdempotencyScopeKey, IdempotencyStoreError,
+};
+use kernel_api::middleware::{
+    IdempotencyStore, InMemoryActionStore, InMemoryQuotaStore, MiddlewareConfig, MiddlewareState,
 };
 use std::sync::Arc;
 #[cfg(feature = "dev-auth")]
@@ -188,7 +188,6 @@ pub async fn setup_app_with_config_and_db(
             s,
             Arc::new(InMemoryActionStore::new()),
             Arc::new(InMemoryQuotaStore::new()),
-            None,
         )
     } else {
         MiddlewareState::new(config)

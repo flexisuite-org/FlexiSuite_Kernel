@@ -66,7 +66,11 @@ pub fn build_app_with_state(
 
     let public_router = Router::new()
         .route("/health", get(liveness))
-        .route("/health/liveness", get(liveness));
+        .route("/health/liveness", get(liveness))
+        .route(
+            "/api/v1/diagnostics/healthz",
+            get(diagnostics::healthz_probe),
+        );
 
     let auth_only_router = Router::new()
         .route("/health/readiness", get(readiness))
@@ -171,10 +175,7 @@ async fn readiness(Extension(ctx): Extension<TenantContext>) -> impl IntoRespons
             match tokio::time::timeout(timeout, db.ping()).await {
                 Ok(Ok(_)) => Ok(()),
                 Ok(Err(e)) => Err(format!("db ping failed: {e}")),
-                Err(_) => Err(format!(
-                    "db ping timed out after {}ms",
-                    timeout.as_millis()
-                )),
+                Err(_) => Err(format!("db ping timed out after {}ms", timeout.as_millis())),
             }
         })
         .await;

@@ -74,31 +74,144 @@ pub enum CheckUrlError {
 }
 
 fn normalize_allowlist_host(host: &str) -> String {
-    host.trim()
+    let trimmed = host.trim();
+    if let Ok(url) = Url::parse(trimmed)
+        && let Some(parsed_host) = url.host_str()
+    {
+        return parsed_host
+            .trim_start_matches('[')
+            .trim_end_matches(']')
+            .to_ascii_lowercase();
+    }
+    trimmed
         .trim_start_matches('[')
         .trim_end_matches(']')
         .to_ascii_lowercase()
 }
 
 #[derive(Clone, Debug)]
+struct UrlPrefixRule {
+    scheme: String,
+    host: String,
+    explicit_port: Option<u16>,
+    path_prefix: String,
+}
+
+impl UrlPrefixRule {
+    fn from_url(url: &Url) -> Result<Self, CheckUrlError> {
+        if url.scheme() != "http" && url.scheme() != "https" {
+            return Err(CheckUrlError::UnsupportedScheme(url.scheme().to_string()));
+        }
+
+        let host = url.host_str().ok_or(CheckUrlError::NoHost)?;
+        let path_prefix = if url.path().is_empty() {
+            "/".to_string()
+        } else {
+            url.path().to_string()
+        };
+
+        Ok(Self {
+            scheme: url.scheme().to_ascii_lowercase(),
+            host: normalize_allowlist_host(host),
+            explicit_port: url.port(),
+            path_prefix,
+        })
+    }
+
+    fn matches(&self, url: &Url) -> bool {
+        if url.scheme().to_ascii_lowercase() != self.scheme {
+            return false;
+        }
+
+        let Some(url_host) = url.host_str() else {
+            return false;
+        };
+        if normalize_allowlist_host(url_host) != self.host {
+            return false;
+        }
+
+        if let Some(port) = self.explicit_port
+            && url.port_or_known_default() != Some(port)
+        {
+            return false;
+        }
+
+        let path = url.path();
+        if self.path_prefix == "/" {
+            return true;
+        }
+        if !path.starts_with(&self.path_prefix) {
+            return false;
+        }
+        if path.len() == self.path_prefix.len() {
+            return true;
+        }
+        self.path_prefix.ends_with('/')
+            || path
+                .as_bytes()
+                .get(self.path_prefix.len())
+                .is_some_and(|b| *b == b'/')
+    }
+}
+
+#[derive(Clone, Debug)]
 pub(crate) struct NormalizedAllowlist {
-    normalized_set: Arc<HashSet<String>>,
+    domain_set: Arc<HashSet<String>>,
+    url_prefix_rules: Arc<Vec<UrlPrefixRule>>,
+    resolver_host_set: Arc<HashSet<String>>,
 }
 
 impl NormalizedAllowlist {
     pub(crate) fn new(allowlist: &[String]) -> Self {
-        let normalized_set = allowlist
-            .iter()
-            .map(|entry| normalize_allowlist_host(entry))
-            .collect::<HashSet<_>>();
+        let mut domain_set = HashSet::new();
+        let mut url_prefix_rules = Vec::new();
+        let mut resolver_host_set = HashSet::new();
+
+        for entry in allowlist {
+            let trimmed = entry.trim();
+            if let Ok(url) = Url::parse(trimmed) {
+                match UrlPrefixRule::from_url(&url) {
+                    Ok(rule) => {
+                        resolver_host_set.insert(rule.host.clone());
+                        url_prefix_rules.push(rule);
+                        continue;
+                    }
+                    // Do not reinterpret unsupported URL schemes as plain hosts.
+                    Err(CheckUrlError::UnsupportedScheme(_)) => continue,
+                    // URL input without host should be ignored, not widened.
+                    Err(CheckUrlError::NoHost) => continue,
+                    Err(CheckUrlError::ParseError(_)) | Err(CheckUrlError::NotAllowed(_)) => {}
+                }
+            }
+
+            let host = normalize_allowlist_host(trimmed);
+            resolver_host_set.insert(host.clone());
+            domain_set.insert(host);
+        }
+
         Self {
-            normalized_set: Arc::new(normalized_set),
+            domain_set: Arc::new(domain_set),
+            url_prefix_rules: Arc::new(url_prefix_rules),
+            resolver_host_set: Arc::new(resolver_host_set),
         }
     }
 
-    pub(crate) fn contains(&self, host: &str) -> bool {
-        self.normalized_set
+    pub(crate) fn contains_host(&self, host: &str) -> bool {
+        self.resolver_host_set
             .contains(&normalize_allowlist_host(host))
+    }
+
+    pub(crate) fn is_url_allowed(&self, url: &Url) -> bool {
+        let Some(host) = url.host_str() else {
+            return false;
+        };
+        let normalized_host = normalize_allowlist_host(host);
+
+        if self.domain_set.contains(&normalized_host) {
+            return true;
+        }
+
+        self.url_prefix_rules.iter().any(|rule| rule.matches(url))
     }
 }
 
@@ -114,7 +227,7 @@ pub(crate) fn check_url(
 
     let host = url.host_str().ok_or(CheckUrlError::NoHost)?;
 
-    if !allowlist.contains(host) {
+    if !allowlist.is_url_allowed(&url) {
         return Err(CheckUrlError::NotAllowed(host.to_string()));
     }
     Ok(url)
@@ -141,7 +254,7 @@ impl Resolve for AllowlistResolver {
         Box::pin(async move {
             // 1. Check allowlist (hostname)
             // We use check_url logic but repurposed since name is just host
-            if !allowlist.contains(&name_str) {
+            if !allowlist.contains_host(&name_str) {
                 return Err(Box::new(std::io::Error::new(
                     std::io::ErrorKind::PermissionDenied,
                     format!("Network access to '{}' is not allowed", name_str),
@@ -210,7 +323,7 @@ fn is_safe_ip(ip: &IpAddr, host: &str, allowlist: &NormalizedAllowlist) -> bool 
     }
 
     // Special case for localhost
-    if host == "localhost" && allowlist.contains("localhost") && ip.is_loopback() {
+    if host == "localhost" && allowlist.contains_host("localhost") && ip.is_loopback() {
         return true;
     }
 
@@ -321,6 +434,64 @@ fn is_global(ip: &IpAddr) -> bool {
 
             true
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn normalize_allowlist_host_extracts_host_from_url() {
+        assert_eq!(
+            normalize_allowlist_host("https://Example.COM/path"),
+            "example.com"
+        );
+        assert_eq!(
+            normalize_allowlist_host("http://127.0.0.1:8080"),
+            "127.0.0.1"
+        );
+    }
+
+    #[test]
+    fn check_url_accepts_allowlist_entry_written_as_url() {
+        let allowlist = NormalizedAllowlist::new(&["https://example.com".to_string()]);
+        assert!(check_url("https://example.com/api", &allowlist).is_ok());
+    }
+
+    #[test]
+    fn check_url_enforces_scheme_port_and_path_prefix_for_url_entries() {
+        let allowlist = NormalizedAllowlist::new(&["https://example.com:8443/api".to_string()]);
+
+        assert!(check_url("https://example.com:8443/api/v1", &allowlist).is_ok());
+        assert!(matches!(
+            check_url("http://example.com:8443/api/v1", &allowlist),
+            Err(CheckUrlError::NotAllowed(_))
+        ));
+        assert!(matches!(
+            check_url("https://example.com/api/v1", &allowlist),
+            Err(CheckUrlError::NotAllowed(_))
+        ));
+        assert!(matches!(
+            check_url("https://example.com:8443/apix", &allowlist),
+            Err(CheckUrlError::NotAllowed(_))
+        ));
+    }
+
+    #[test]
+    fn allowlist_url_entries_are_usable_for_dns_host_checks() {
+        let allowlist = NormalizedAllowlist::new(&["https://example.com:8443/api".to_string()]);
+        assert!(allowlist.contains_host("example.com"));
+    }
+
+    #[test]
+    fn unsupported_url_scheme_is_not_treated_as_domain_allow_entry() {
+        let allowlist = NormalizedAllowlist::new(&["ftp://internal.example/path".to_string()]);
+        assert!(!allowlist.contains_host("internal.example"));
+        assert!(matches!(
+            check_url("https://internal.example/api", &allowlist),
+            Err(CheckUrlError::NotAllowed(_))
+        ));
     }
 }
 

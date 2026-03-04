@@ -133,6 +133,8 @@ struct Ctx {
     stdout: MemoryOutputPipe,
     client: reqwest::Client,
     allowlist: crate::NormalizedAllowlist,
+    fetch_budget: Duration,
+    fetch_started_at: Instant,
 }
 
 #[derive(Deserialize)]
@@ -255,7 +257,13 @@ impl SandboxRuntime for WasmSandbox {
                             Err(_) => return Ok(ERR_PARSE_METHOD),
                         };
 
-                        let mut builder = client.request(method, url);
+                        let elapsed = caller.data().fetch_started_at.elapsed();
+                        let remaining = caller.data().fetch_budget.saturating_sub(elapsed);
+                        if remaining.is_zero() {
+                            return Ok(ERR_REQUEST_FAIL);
+                        }
+
+                        let mut builder = client.request(method, url).timeout(remaining);
 
                         if !headers_str.is_empty() {
                             let headers_val: std::collections::HashMap<String, HeaderInputValue> =
@@ -381,7 +389,6 @@ impl SandboxRuntime for WasmSandbox {
                     attempt.stop()
                 }
             }))
-            .timeout(Duration::from_secs(30))
             .build()
             .map_err(|e| SandboxError::InitError(e.to_string()))?;
 
@@ -395,6 +402,8 @@ impl SandboxRuntime for WasmSandbox {
                 allowlist: crate::NormalizedAllowlist::new(
                     &self.options.permissions.network_allowlist,
                 ),
+                fetch_budget: self.options.wall_clock_limit,
+                fetch_started_at: Instant::now(),
             },
         );
         store.limiter(|state| &mut state.limits);
@@ -469,6 +478,11 @@ impl SandboxRuntime for WasmSandbox {
             .unwrap_or(Duration::ZERO);
         if execute_budget.is_zero() {
             return Err(SandboxError::Timeout);
+        }
+        {
+            let ctx = store.data_mut();
+            ctx.fetch_budget = execute_budget;
+            ctx.fetch_started_at = Instant::now();
         }
         let engine_clone = self.engine.clone();
         let cancel_watchdog = Arc::new(AtomicBool::new(false));

@@ -122,7 +122,6 @@ async fn test_idempotency_cache_overflow_preserves_response_and_disables_replay(
         idempotency_store.clone(),
         Arc::new(InMemoryActionStore::new()),
         Arc::new(InMemoryQuotaStore::new()),
-        None,
     );
 
     let counter = Arc::new(AtomicUsize::new(0));

@@ -16,9 +16,17 @@ pub struct Model {
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
 pub enum Relation {
-    #[sea_orm(has_many = "super::permission::Entity")]
+    #[sea_orm(
+        has_many = "super::permission::Entity",
+        from = "(Column::Id, Column::TenantId)",
+        to = "(super::permission::Column::RoleId, super::permission::Column::TenantId)"
+    )]
     Permissions,
-    #[sea_orm(has_many = "super::group_role::Entity")]
+    #[sea_orm(
+        has_many = "super::group_role::Entity",
+        from = "(Column::Id, Column::TenantId)",
+        to = "(super::group_role::Column::RoleId, super::group_role::Column::TenantId)"
+    )]
     GroupRoles,
 }
 

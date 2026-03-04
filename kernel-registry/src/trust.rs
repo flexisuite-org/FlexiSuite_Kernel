@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::{error, info, warn};
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -68,7 +69,13 @@ impl TrustProvider for FileTrustProvider {
             "active" => KeyStatus::Active,
             "next" => KeyStatus::Next,
             "retired" => KeyStatus::Retired,
-            "revoked" => KeyStatus::Revoked,
+            "revoked" => {
+                warn!("Revoked key requested from trust root: {}", key.kid);
+                return Err(RegistryError::TrustRootError(format!(
+                    "Key is revoked and cannot be used: {}",
+                    key.kid
+                )));
+            }
             _ => {
                 warn!("Unknown key status: {}", key.status);
                 return Err(RegistryError::TrustRootError(format!(
@@ -88,6 +95,39 @@ impl TrustProvider for FileTrustProvider {
         hex::decode_to_slice(&key.public_key, &mut public_key).map_err(|e| {
             RegistryError::TrustRootError(format!("Invalid hex in public key {}: {}", key.kid, e))
         })?;
+
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|e| RegistryError::TrustRootError(format!("System clock error: {e}")))?
+            .as_secs();
+        if let Some(not_before) = key.not_before
+            && now < not_before
+        {
+            warn!(
+                kid = %key.kid,
+                now,
+                not_before,
+                "Key is not yet valid"
+            );
+            return Err(RegistryError::TrustRootError(format!(
+                "Key not yet valid: {} (not_before={not_before}, now={now})",
+                key.kid
+            )));
+        }
+        if let Some(not_after) = key.not_after
+            && now > not_after
+        {
+            warn!(
+                kid = %key.kid,
+                now,
+                not_after,
+                "Key has expired"
+            );
+            return Err(RegistryError::TrustRootError(format!(
+                "Key expired: {} (not_after={not_after}, now={now})",
+                key.kid
+            )));
+        }
 
         Ok(TrustedKey {
             kid: key.kid.clone(),

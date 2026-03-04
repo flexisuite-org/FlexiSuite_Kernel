@@ -35,6 +35,7 @@ impl RBACRepository {
             .join(JoinType::InnerJoin, group::Relation::GroupMembers.def())
             .filter(group_member::Column::TenantId.eq(tenant_id))
             .filter(group_member::Column::UserId.eq(user_id))
+            .distinct()
             .all(db)
             .await
             .map_err(DataError::DbError)?;

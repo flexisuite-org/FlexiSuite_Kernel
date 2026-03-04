@@ -163,31 +163,45 @@ fn assert_security_headers(res: &axum::response::Response) {
     let headers = res.headers();
 
     assert_eq!(
-        headers.get("x-frame-options").expect("missing header: x-frame-options"),
+        headers
+            .get("x-frame-options")
+            .expect("missing header: x-frame-options"),
         "DENY"
     );
     assert_eq!(
-        headers.get("x-content-type-options").expect("missing header: x-content-type-options"),
+        headers
+            .get("x-content-type-options")
+            .expect("missing header: x-content-type-options"),
         "nosniff"
     );
     assert_eq!(
-        headers.get("strict-transport-security").expect("missing header: strict-transport-security"),
+        headers
+            .get("strict-transport-security")
+            .expect("missing header: strict-transport-security"),
         "max-age=31536000; includeSubDomains; preload"
     );
     assert_eq!(
-        headers.get("content-security-policy").expect("missing header: content-security-policy"),
+        headers
+            .get("content-security-policy")
+            .expect("missing header: content-security-policy"),
         "default-src 'none'; frame-ancestors 'none';"
     );
     assert_eq!(
-        headers.get("cross-origin-opener-policy").expect("missing header: cross-origin-opener-policy"),
+        headers
+            .get("cross-origin-opener-policy")
+            .expect("missing header: cross-origin-opener-policy"),
         "same-origin"
     );
     assert_eq!(
-        headers.get("cross-origin-embedder-policy").expect("missing header: cross-origin-embedder-policy"),
+        headers
+            .get("cross-origin-embedder-policy")
+            .expect("missing header: cross-origin-embedder-policy"),
         "require-corp"
     );
     assert_eq!(
-        headers.get("cross-origin-resource-policy").expect("missing header: cross-origin-resource-policy"),
+        headers
+            .get("cross-origin-resource-policy")
+            .expect("missing header: cross-origin-resource-policy"),
         "same-origin"
     );
 }

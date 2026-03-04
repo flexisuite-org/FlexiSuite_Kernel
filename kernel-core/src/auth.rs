@@ -11,6 +11,7 @@ pub use kernel_data::auth_context::{
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash, Copy)]
+#[serde(transparent)]
 pub struct RoleId(uuid::Uuid);
 
 impl From<uuid::Uuid> for RoleId {
@@ -26,6 +27,7 @@ impl From<RoleId> for uuid::Uuid {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash, Copy)]
+#[serde(transparent)]
 pub struct PermissionId(uuid::Uuid);
 
 impl From<uuid::Uuid> for PermissionId {
@@ -41,6 +43,7 @@ impl From<PermissionId> for uuid::Uuid {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash, Copy)]
+#[serde(transparent)]
 pub struct GroupId(uuid::Uuid);
 
 impl From<uuid::Uuid> for GroupId {
