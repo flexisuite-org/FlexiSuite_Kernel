@@ -443,7 +443,11 @@ fn is_global(ip: &IpAddr) -> bool {
                 return false;
             }
             // Discard Prefix 100::/64
-            if ipv6.segments()[0] == 0x0100 {
+            if ipv6.segments()[0] == 0x0100
+                && ipv6.segments()[1] == 0
+                && ipv6.segments()[2] == 0
+                && ipv6.segments()[3] == 0
+            {
                 return false;
             }
             // Documentation 2001:db8::/32
@@ -531,6 +535,14 @@ mod tests {
             check_url("https://internal.example/api", &allowlist),
             Err(CheckUrlError::NotAllowed(_))
         ));
+    }
+
+    #[test]
+    fn ipv6_discard_prefix_is_limited_to_100_slash_64() {
+        let in_discard_prefix: IpAddr = "100::1".parse().expect("valid ipv6");
+        let outside_discard_prefix: IpAddr = "100:0:0:1::1".parse().expect("valid ipv6");
+        assert!(!is_global(&in_discard_prefix));
+        assert!(is_global(&outside_discard_prefix));
     }
 }
 

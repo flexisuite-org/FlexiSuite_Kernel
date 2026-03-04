@@ -161,6 +161,11 @@ pub mod tests {
     use std::collections::HashMap;
 
     #[derive(Clone)]
+    /// Lightweight `TrustProvider` test double.
+    ///
+    /// This mock intentionally does not enforce temporal validation (`not_before` / `not_after`)
+    /// in `get_key_at`; it only resolves by `kid`. Time-window behavior is covered by
+    /// `FileTrustProvider` tests in this module.
     pub struct MockTrustProvider {
         keys: HashMap<String, TrustedKey>,
         trust_root_version: String,
@@ -185,6 +190,7 @@ pub mod tests {
 
     impl TrustProvider for MockTrustProvider {
         fn get_key_at(&self, kid: &str, _now: u64) -> Result<TrustedKey, RegistryError> {
+            // Intentionally ignore `_now` to keep this test double focused on key lookup behavior.
             self.keys
                 .get(kid)
                 .cloned()
