@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use reqwest::dns::{Name, Resolve, Resolving};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
@@ -113,9 +113,26 @@ impl UrlPrefixRule {
         Ok(Self {
             scheme: url.scheme().to_ascii_lowercase(),
             host: normalize_allowlist_host(host),
-            explicit_port: url.port(),
+            explicit_port: url.port_or_known_default(),
             path_prefix,
         })
+    }
+
+    fn matches_path_prefix(&self, path: &str) -> bool {
+        if self.path_prefix == "/" {
+            return true;
+        }
+        if !path.starts_with(&self.path_prefix) {
+            return false;
+        }
+        if path.len() == self.path_prefix.len() {
+            return true;
+        }
+        self.path_prefix.ends_with('/')
+            || path
+                .as_bytes()
+                .get(self.path_prefix.len())
+                .is_some_and(|b| *b == b'/')
     }
 
     fn matches(&self, url: &Url) -> bool {
@@ -136,21 +153,7 @@ impl UrlPrefixRule {
             return false;
         }
 
-        let path = url.path();
-        if self.path_prefix == "/" {
-            return true;
-        }
-        if !path.starts_with(&self.path_prefix) {
-            return false;
-        }
-        if path.len() == self.path_prefix.len() {
-            return true;
-        }
-        self.path_prefix.ends_with('/')
-            || path
-                .as_bytes()
-                .get(self.path_prefix.len())
-                .is_some_and(|b| *b == b'/')
+        self.matches_path_prefix(url.path())
     }
 }
 
@@ -158,6 +161,7 @@ impl UrlPrefixRule {
 pub(crate) struct NormalizedAllowlist {
     domain_set: Arc<HashSet<String>>,
     url_prefix_rules: Arc<Vec<UrlPrefixRule>>,
+    url_prefix_rule_index: Arc<HashMap<(String, String, u16), Vec<UrlPrefixRule>>>,
     resolver_host_set: Arc<HashSet<String>>,
 }
 
@@ -165,6 +169,8 @@ impl NormalizedAllowlist {
     pub(crate) fn new(allowlist: &[String]) -> Self {
         let mut domain_set = HashSet::new();
         let mut url_prefix_rules = Vec::new();
+        let mut url_prefix_rule_index: HashMap<(String, String, u16), Vec<UrlPrefixRule>> =
+            HashMap::new();
         let mut resolver_host_set = HashSet::new();
 
         for entry in allowlist {
@@ -173,6 +179,12 @@ impl NormalizedAllowlist {
                 match UrlPrefixRule::from_url(&url) {
                     Ok(rule) => {
                         resolver_host_set.insert(rule.host.clone());
+                        if let Some(port) = rule.explicit_port {
+                            url_prefix_rule_index
+                                .entry((rule.scheme.clone(), rule.host.clone(), port))
+                                .or_default()
+                                .push(rule.clone());
+                        }
                         url_prefix_rules.push(rule);
                         continue;
                     }
@@ -192,6 +204,7 @@ impl NormalizedAllowlist {
         Self {
             domain_set: Arc::new(domain_set),
             url_prefix_rules: Arc::new(url_prefix_rules),
+            url_prefix_rule_index: Arc::new(url_prefix_rule_index),
             resolver_host_set: Arc::new(resolver_host_set),
         }
     }
@@ -211,7 +224,23 @@ impl NormalizedAllowlist {
             return true;
         }
 
-        self.url_prefix_rules.iter().any(|rule| rule.matches(url))
+        let Some(port) = url.port_or_known_default() else {
+            return self.url_prefix_rules.iter().any(|rule| rule.matches(url));
+        };
+
+        let bucket_key = (
+            url.scheme().to_ascii_lowercase(),
+            normalized_host.clone(),
+            port,
+        );
+
+        self.url_prefix_rule_index
+            .get(&bucket_key)
+            .is_some_and(|bucket| {
+                bucket
+                    .iter()
+                    .any(|rule| rule.matches_path_prefix(url.path()))
+            })
     }
 }
 
@@ -457,6 +486,16 @@ mod tests {
     fn check_url_accepts_allowlist_entry_written_as_url() {
         let allowlist = NormalizedAllowlist::new(&["https://example.com".to_string()]);
         assert!(check_url("https://example.com/api", &allowlist).is_ok());
+    }
+
+    #[test]
+    fn allowlist_url_entry_without_explicit_port_rejects_non_default_port() {
+        let allowlist = NormalizedAllowlist::new(&["https://example.com/api".to_string()]);
+        assert!(check_url("https://example.com/api/v1", &allowlist).is_ok());
+        assert!(matches!(
+            check_url("https://example.com:8443/api/v1", &allowlist),
+            Err(CheckUrlError::NotAllowed(_))
+        ));
     }
 
     #[test]

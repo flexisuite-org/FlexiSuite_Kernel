@@ -183,6 +183,19 @@ impl RegistryStorage {
     #[instrument(skip(self, data), fields(tenant = %self.tenant_id, artifact = %key))]
     pub async fn save_artifact(&self, key: &str, data: Bytes) -> Result<String, RegistryError> {
         Self::validate_key(key)?;
+        if data.len() > ARTIFACT_MAX_BYTES {
+            error!(
+                max = ARTIFACT_MAX_BYTES,
+                actual = data.len(),
+                "Artifact too large: {} bytes",
+                data.len()
+            );
+            return Err(RegistryError::ArtifactTooLarge {
+                max: ARTIFACT_MAX_BYTES,
+                actual: data.len(),
+            });
+        }
+
         let mut hasher = Sha384::new();
         hasher.update(&data);
         let digest = hex::encode(hasher.finalize());
@@ -400,9 +413,15 @@ impl RegistryStorage {
         }
 
         // 3. Signature Verification (Authenticity)
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|e| {
+                RegistryError::InvalidManifest(format!("System time before UNIX EPOCH: {}", e))
+            })?
+            .as_secs();
         let trusted_key = self
             .trust_provider
-            .get_key(&manifest.security.manifest_signature_kid)?;
+            .get_key_at(&manifest.security.manifest_signature_kid, now)?;
 
         let core_manifest = CoreManifest {
             id: manifest.id.clone(),
@@ -410,13 +429,6 @@ impl RegistryStorage {
             signature: manifest.security.manifest_signature.clone(),
             kid: manifest.security.manifest_signature_kid.clone(),
         };
-
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_err(|e| {
-                RegistryError::InvalidManifest(format!("System time before UNIX EPOCH: {}", e))
-            })?
-            .as_secs();
 
         match verify_manifest(&core_manifest, &trusted_key, &normalized_stored, now) {
             VerificationResult::Ok => {

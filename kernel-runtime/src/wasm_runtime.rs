@@ -213,7 +213,7 @@ impl SandboxRuntime for WasmSandbox {
                                 .checked_add(len as usize)
                                 .ok_or(ERR_INVALID_LEN)?;
                             if end > mem.data_size(&caller) {
-                                return Err(ERR_READ_MEM);
+                                return Err(ERR_INVALID_LEN);
                             }
 
                             let mut buf = vec![0u8; len as usize];

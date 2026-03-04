@@ -14,6 +14,13 @@ pub struct TrustRoot {
     pub keys: Vec<TrustRootKey>,
 }
 
+fn current_unix_ts() -> Result<u64, RegistryError> {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|e| RegistryError::TrustRootError(format!("System clock error: {e}")))
+        .map(|d| d.as_secs())
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct TrustRootKey {
     pub kid: String,
@@ -26,7 +33,11 @@ pub struct TrustRootKey {
 }
 
 pub trait TrustProvider: Send + Sync {
-    fn get_key(&self, kid: &str) -> Result<TrustedKey, RegistryError>;
+    fn get_key(&self, kid: &str) -> Result<TrustedKey, RegistryError> {
+        let now = current_unix_ts()?;
+        self.get_key_at(kid, now)
+    }
+    fn get_key_at(&self, kid: &str, now: u64) -> Result<TrustedKey, RegistryError>;
     fn trust_root_version(&self) -> &str;
 }
 
@@ -54,7 +65,7 @@ impl FileTrustProvider {
 }
 
 impl TrustProvider for FileTrustProvider {
-    fn get_key(&self, kid: &str) -> Result<TrustedKey, RegistryError> {
+    fn get_key_at(&self, kid: &str, now: u64) -> Result<TrustedKey, RegistryError> {
         let key = self
             .trust_root
             .keys
@@ -71,10 +82,9 @@ impl TrustProvider for FileTrustProvider {
             "retired" => KeyStatus::Retired,
             "revoked" => {
                 warn!("Revoked key requested from trust root: {}", key.kid);
-                return Err(RegistryError::TrustRootError(format!(
-                    "Key is revoked and cannot be used: {}",
-                    key.kid
-                )));
+                return Err(RegistryError::KeyRevoked {
+                    kid: key.kid.clone(),
+                });
             }
             _ => {
                 warn!("Unknown key status: {}", key.status);
@@ -96,10 +106,6 @@ impl TrustProvider for FileTrustProvider {
             RegistryError::TrustRootError(format!("Invalid hex in public key {}: {}", key.kid, e))
         })?;
 
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_err(|e| RegistryError::TrustRootError(format!("System clock error: {e}")))?
-            .as_secs();
         if let Some(not_before) = key.not_before
             && now < not_before
         {
@@ -109,10 +115,11 @@ impl TrustProvider for FileTrustProvider {
                 not_before,
                 "Key is not yet valid"
             );
-            return Err(RegistryError::TrustRootError(format!(
-                "Key not yet valid: {} (not_before={not_before}, now={now})",
-                key.kid
-            )));
+            return Err(RegistryError::KeyNotYetValid {
+                kid: key.kid.clone(),
+                valid_from: not_before,
+                now,
+            });
         }
         if let Some(not_after) = key.not_after
             && now > not_after
@@ -123,10 +130,11 @@ impl TrustProvider for FileTrustProvider {
                 not_after,
                 "Key has expired"
             );
-            return Err(RegistryError::TrustRootError(format!(
-                "Key expired: {} (not_after={not_after}, now={now})",
-                key.kid
-            )));
+            return Err(RegistryError::KeyExpired {
+                kid: key.kid.clone(),
+                expired_at: not_after,
+                now,
+            });
         }
 
         Ok(TrustedKey {
@@ -174,7 +182,7 @@ pub mod tests {
     }
 
     impl TrustProvider for MockTrustProvider {
-        fn get_key(&self, kid: &str) -> Result<TrustedKey, RegistryError> {
+        fn get_key_at(&self, kid: &str, _now: u64) -> Result<TrustedKey, RegistryError> {
             self.keys
                 .get(kid)
                 .cloned()
