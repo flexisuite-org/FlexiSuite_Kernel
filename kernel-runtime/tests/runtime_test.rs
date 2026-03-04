@@ -443,6 +443,44 @@ async fn test_wasm_network_allowlist_allows_execution_when_unused() {
 }
 
 #[tokio::test]
+async fn test_wasm_fetch_rejects_oversized_url_len_before_allocation() {
+    let wat = r#"
+    (module
+        (import "env" "flexi_fetch" (func $fetch (param i32 i32 i32 i32 i32 i32 i32 i32 i32 i32) (result i32)))
+        (memory (export "memory") 1)
+        (data (i32.const 0) "https://example.com")
+        (data (i32.const 256) "GET")
+        (data (i32.const 260) "{}")
+        (func (export "_start")
+            (local $rc i32)
+            (local.set $rc
+                (call $fetch
+                    (i32.const 0) (i32.const 9000)
+                    (i32.const 256) (i32.const 3)
+                    (i32.const 260) (i32.const 2)
+                    (i32.const 0) (i32.const 0)
+                    (i32.const 1024) (i32.const 512)
+                )
+            )
+            (if (i32.ne (local.get $rc) (i32.const -10))
+                (then unreachable)
+            )
+        )
+    )
+    "#;
+
+    let options = RuntimeOptions::default();
+    let mut runtime = WasmSandbox::new(options).unwrap();
+    let input = serde_json::Value::Null;
+    let result = runtime.execute(wat, input).await;
+    assert!(
+        result.is_ok(),
+        "Expected oversized URL length to return ERR_INVALID_LEN without trap, got: {:?}",
+        result
+    );
+}
+
+#[tokio::test]
 async fn test_deno_network_allowlist_allows_execution_when_unused() {
     let mut options = RuntimeOptions::default();
     options.permissions.network_allowlist = vec!["https://example.com".to_string()];

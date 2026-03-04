@@ -20,6 +20,10 @@ pub struct WasmSandbox {
 }
 
 const DEFAULT_MAX_STDOUT: usize = 1 << 20; // 1MB default hard cap
+const MAX_FETCH_URL_BYTES: usize = 8 * 1024;
+const MAX_FETCH_METHOD_BYTES: usize = 16;
+const MAX_FETCH_HEADERS_JSON_BYTES: usize = 64 * 1024;
+const MAX_FETCH_REQUEST_BODY_BYTES: usize = MAX_FETCH_BODY_BYTES;
 
 // Error codes for flexi_fetch
 // Table:
@@ -203,44 +207,54 @@ impl SandboxRuntime for WasmSandbox {
                             _ => return Ok(ERR_NO_MEMORY_EXPORT),
                         };
 
-                        let read_string = |ptr: i32, len: i32| -> Result<String, i32> {
-                            if len < 0 {
-                                return Err(ERR_INVALID_LEN);
-                            }
-                            // Check memory bounds before allocation
-                            let end = (ptr as usize)
-                                .checked_add(len as usize)
-                                .ok_or(ERR_INVALID_LEN)?;
-                            if end > mem.data_size(&caller) {
-                                return Err(ERR_INVALID_LEN);
-                            }
+                        let read_string =
+                            |ptr: i32, len: i32, max_len: usize| -> Result<String, i32> {
+                                if ptr < 0 || len < 0 {
+                                    return Err(ERR_INVALID_LEN);
+                                }
+                                let start = ptr as usize;
+                                let len = len as usize;
+                                if len > max_len {
+                                    return Err(ERR_INVALID_LEN);
+                                }
+                                // Check memory bounds before allocation
+                                let end = start.checked_add(len).ok_or(ERR_INVALID_LEN)?;
+                                if end > mem.data_size(&caller) {
+                                    return Err(ERR_INVALID_LEN);
+                                }
 
-                            let mut buf = vec![0u8; len as usize];
-                            if mem.read(&caller, ptr as usize, &mut buf).is_err() {
-                                return Err(ERR_READ_MEM);
-                            }
-                            String::from_utf8(buf).map_err(|_| ERR_UTF8)
-                        };
+                                let mut buf = vec![0u8; len];
+                                if mem.read(&caller, start, &mut buf).is_err() {
+                                    return Err(ERR_READ_MEM);
+                                }
+                                String::from_utf8(buf).map_err(|_| ERR_UTF8)
+                            };
 
-                        let url_str = match read_string(url_ptr, url_len) {
+                        let url_str = match read_string(url_ptr, url_len, MAX_FETCH_URL_BYTES) {
                             Ok(s) => s,
                             Err(e) => return Ok(e),
                         };
 
-                        let method_str = match read_string(method_ptr, method_len) {
+                        let method_str =
+                            match read_string(method_ptr, method_len, MAX_FETCH_METHOD_BYTES) {
+                                Ok(s) => s,
+                                Err(e) => return Ok(e),
+                            };
+
+                        let headers_str = match read_string(
+                            headers_ptr,
+                            headers_len,
+                            MAX_FETCH_HEADERS_JSON_BYTES,
+                        ) {
                             Ok(s) => s,
                             Err(e) => return Ok(e),
                         };
 
-                        let headers_str = match read_string(headers_ptr, headers_len) {
-                            Ok(s) => s,
-                            Err(e) => return Ok(e),
-                        };
-
-                        let body_str = match read_string(body_ptr, body_len) {
-                            Ok(s) => s,
-                            Err(e) => return Ok(e),
-                        };
+                        let body_str =
+                            match read_string(body_ptr, body_len, MAX_FETCH_REQUEST_BODY_BYTES) {
+                                Ok(s) => s,
+                                Err(e) => return Ok(e),
+                            };
 
                         let client = caller.data().client.clone();
                         let allowlist = caller.data().allowlist.clone();
