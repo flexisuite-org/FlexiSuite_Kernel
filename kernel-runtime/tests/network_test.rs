@@ -121,6 +121,81 @@ async fn test_deno_network_denied() {
 }
 
 #[tokio::test]
+async fn test_deno_network_default_deny_without_allowlist() {
+    let (url, stop_server) = start_mock_server().await;
+    let options = RuntimeOptions::default();
+    let mut runtime = DenoSandbox::new(options);
+
+    let code = format!(
+        r#"
+        (async () => {{
+            try {{
+                await fetch("{}", {{}});
+                return "Allowed";
+            }} catch (e) {{
+                return e.message;
+            }}
+        }})()
+        "#,
+        url
+    );
+
+    let result = runtime.execute(&code, serde_json::Value::Null).await;
+    stop_server.notify_one();
+
+    let output = result.unwrap();
+    let output_str = output.as_str().unwrap();
+    assert!(
+        output_str.contains("Network access to"),
+        "Expected network error, got: {}",
+        output_str
+    );
+    assert!(
+        output_str.contains("not allowed"),
+        "Expected 'not allowed', got: {}",
+        output_str
+    );
+}
+
+#[tokio::test]
+async fn test_deno_network_default_deny_with_empty_allowlist() {
+    let (url, stop_server) = start_mock_server().await;
+    let mut options = RuntimeOptions::default();
+    options.permissions.network_allowlist = vec![];
+    let mut runtime = DenoSandbox::new(options);
+
+    let code = format!(
+        r#"
+        (async () => {{
+            try {{
+                await fetch("{}", {{}});
+                return "Allowed";
+            }} catch (e) {{
+                return e.message;
+            }}
+        }})()
+        "#,
+        url
+    );
+
+    let result = runtime.execute(&code, serde_json::Value::Null).await;
+    stop_server.notify_one();
+
+    let output = result.unwrap();
+    let output_str = output.as_str().unwrap();
+    assert!(
+        output_str.contains("Network access to"),
+        "Expected network error, got: {}",
+        output_str
+    );
+    assert!(
+        output_str.contains("not allowed"),
+        "Expected 'not allowed', got: {}",
+        output_str
+    );
+}
+
+#[tokio::test]
 async fn test_wasm_network_allowed() {
     let (url, stop_server) = start_mock_server().await;
     let hostname = "127.0.0.1";
