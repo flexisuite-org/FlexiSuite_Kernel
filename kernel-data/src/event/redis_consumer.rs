@@ -1,0 +1,323 @@
+use crate::auth_context::TenantId;
+use crate::event::{
+    Delivery, EventEnvelope, EventError, ReliableConsumer, RetryPolicy, SHARD_COUNT,
+    validate_stream_key,
+};
+use async_trait::async_trait;
+use redis::aio::ConnectionManager;
+use redis::streams::{
+    StreamClaimReply, StreamId, StreamPendingCountReply, StreamReadOptions, StreamReadReply,
+};
+use redis::{AsyncCommands, Client};
+use std::time::Duration;
+use tracing::{instrument, warn};
+#[cfg(test)]
+use std::hash::Hasher;
+#[cfg(test)]
+use twox_hash::XxHash64;
+
+#[derive(Clone)]
+pub struct RedisConsumer {
+    connection_manager: ConnectionManager,
+    block_timeout: Duration,
+}
+
+impl RedisConsumer {
+    const DEFAULT_BLOCK_TIMEOUT: Duration = Duration::from_secs(1);
+    const INTERNAL_RETRY_CONSUMER: &'static str = "__retry__";
+
+    pub async fn new(client: Client) -> Result<Self, EventError> {
+        let connection_manager = client.get_connection_manager().await.map_err(|e| {
+            EventError::Consumer(format!("failed to create connection manager: {e}"))
+        })?;
+        Ok(Self {
+            connection_manager,
+            block_timeout: Self::DEFAULT_BLOCK_TIMEOUT,
+        })
+    }
+
+    pub async fn new_with_config(
+        client: Client,
+        block_timeout: Duration,
+    ) -> Result<Self, EventError> {
+        let connection_manager = client.get_connection_manager().await.map_err(|e| {
+            EventError::Consumer(format!("failed to create connection manager: {e}"))
+        })?;
+        Ok(Self {
+            connection_manager,
+            block_timeout,
+        })
+    }
+
+    #[cfg(test)]
+    fn calculate_shard(key: &str) -> u64 {
+        let mut hasher = XxHash64::default();
+        hasher.write(key.as_bytes());
+        hasher.finish() % SHARD_COUNT
+    }
+
+    fn validate_stream_base(stream_base: &str) -> Result<(), EventError> {
+        if stream_base.is_empty() || stream_base.contains(':') {
+            return Err(EventError::Consumer(format!(
+                "invalid stream_base: '{stream_base}'. Must not be empty or contain ':'"
+            )));
+        }
+        Ok(())
+    }
+
+    fn stream_key_for_shard(tenant_id: &TenantId, stream_base: &str, shard: u64) -> String {
+        format!("{}:{}:{}", tenant_id, stream_base, shard)
+    }
+
+    fn stream_keys_for_tenant(tenant_id: &TenantId, stream_base: &str) -> Vec<String> {
+        (0..SHARD_COUNT)
+            .map(|shard| Self::stream_key_for_shard(tenant_id, stream_base, shard))
+            .collect()
+    }
+
+    fn decode_stream_entry(stream_key: &str, stream_id: &StreamId) -> Result<Delivery, EventError> {
+        let payload = stream_id.get::<String>("data").ok_or_else(|| {
+            EventError::Consumer(format!(
+                "stream entry {} on {} missing data field",
+                stream_id.id, stream_key
+            ))
+        })?;
+        let event: EventEnvelope = serde_json::from_str(&payload)?;
+        validate_stream_key(stream_key, &event.tenant_id)?;
+        Ok(Delivery {
+            delivery_id: stream_id.id.clone(),
+            stream_key: stream_key.to_string(),
+            event,
+        })
+    }
+
+    fn decode_stream_read(reply: StreamReadReply) -> Result<Vec<Delivery>, EventError> {
+        let mut deliveries = Vec::new();
+        for key in reply.keys {
+            for stream_id in key.ids {
+                deliveries.push(Self::decode_stream_entry(&key.key, &stream_id)?);
+            }
+        }
+        Ok(deliveries)
+    }
+
+    fn decode_claimed(stream_key: &str, reply: StreamClaimReply) -> Result<Vec<Delivery>, EventError> {
+        reply
+            .ids
+            .iter()
+            .map(|stream_id| Self::decode_stream_entry(stream_key, stream_id))
+            .collect()
+    }
+
+    fn retry_policy_warning(policy: &RetryPolicy) {
+        if let RetryPolicy::BackoffUntil(retry_at) = policy {
+            warn!(
+                retry_at = %retry_at,
+                "RedisConsumer::nack does not delay Redis Streams visibility; message is re-claimed immediately to the retry consumer"
+            );
+        }
+    }
+}
+
+#[async_trait]
+impl ReliableConsumer for RedisConsumer {
+    #[instrument(skip(self), fields(tenant_id = %tenant_id, stream_base = stream_base, consumer_group = consumer_group, consumer_name = consumer_name))]
+    async fn poll(
+        &self,
+        tenant_id: &TenantId,
+        stream_base: &str,
+        consumer_group: &str,
+        consumer_name: &str,
+        max_count: usize,
+    ) -> Result<Vec<Delivery>, EventError> {
+        Self::validate_stream_base(stream_base)?;
+        if max_count == 0 {
+            return Ok(Vec::new());
+        }
+
+        let keys = Self::stream_keys_for_tenant(tenant_id, stream_base);
+        let ids = vec![">"; keys.len()];
+        let options = StreamReadOptions::default()
+            .group(consumer_group, consumer_name)
+            .count(max_count)
+            .block(self.block_timeout.as_millis() as usize);
+
+        let mut conn = self.connection_manager.clone();
+        let reply: StreamReadReply = conn
+            .xread_options(&keys, &ids, &options)
+            .await
+            .map_err(|e| EventError::Consumer(format!("failed to read stream group entries: {e}")))?;
+        if reply.keys.is_empty() {
+            return Ok(Vec::new());
+        }
+        Self::decode_stream_read(reply)
+    }
+
+    #[instrument(skip(self), fields(tenant_id = %tenant_id, stream_key = stream_key, consumer_group = consumer_group, delivery_id = delivery_id))]
+    async fn ack(
+        &self,
+        tenant_id: &TenantId,
+        stream_key: &str,
+        consumer_group: &str,
+        delivery_id: &str,
+    ) -> Result<(), EventError> {
+        validate_stream_key(stream_key, tenant_id)?;
+
+        let mut conn = self.connection_manager.clone();
+        let acked: i32 = conn
+            .xack(stream_key, consumer_group, &[delivery_id])
+            .await
+            .map_err(|e| EventError::Consumer(format!("failed to acknowledge stream entry: {e}")))?;
+        if acked == 0 {
+            warn!(
+                stream_key = stream_key,
+                delivery_id = delivery_id,
+                "ack completed but Redis reported 0 acknowledged messages"
+            );
+        }
+        Ok(())
+    }
+
+    #[instrument(skip(self, policy), fields(tenant_id = %tenant_id, stream_key = stream_key, consumer_group = consumer_group, delivery_id = delivery_id))]
+    async fn nack(
+        &self,
+        tenant_id: &TenantId,
+        stream_key: &str,
+        consumer_group: &str,
+        delivery_id: &str,
+        policy: RetryPolicy,
+    ) -> Result<(), EventError> {
+        validate_stream_key(stream_key, tenant_id)?;
+        Self::retry_policy_warning(&policy);
+
+        let mut conn = self.connection_manager.clone();
+        let _: StreamClaimReply = conn
+            .xclaim(
+                stream_key,
+                consumer_group,
+                Self::INTERNAL_RETRY_CONSUMER,
+                0,
+                &[delivery_id],
+            )
+            .await
+            .map_err(|e| EventError::Consumer(format!("failed to re-claim stream entry for retry: {e}")))?;
+        Ok(())
+    }
+
+    #[instrument(skip(self), fields(tenant_id = %tenant_id, stream_base = stream_base, consumer_group = consumer_group, consumer_name = consumer_name))]
+    async fn claim_pending(
+        &self,
+        tenant_id: &TenantId,
+        stream_base: &str,
+        consumer_group: &str,
+        consumer_name: &str,
+        min_idle_ms: u64,
+        max_count: usize,
+    ) -> Result<Vec<Delivery>, EventError> {
+        Self::validate_stream_base(stream_base)?;
+        if max_count == 0 {
+            return Ok(Vec::new());
+        }
+
+        let keys = Self::stream_keys_for_tenant(tenant_id, stream_base);
+        let mut claimed = Vec::new();
+
+        for key in keys {
+            if claimed.len() >= max_count {
+                break;
+            }
+
+            let remaining = max_count - claimed.len();
+            let mut conn = self.connection_manager.clone();
+            let pending: StreamPendingCountReply = conn
+                .xpending_count(&key, consumer_group, "-", "+", remaining)
+                .await
+                .map_err(|e| EventError::Consumer(format!("failed to read pending entries: {e}")))?;
+
+            let claim_ids: Vec<&str> = pending
+                .ids
+                .iter()
+                .filter(|entry| entry.last_delivered_ms as u64 >= min_idle_ms)
+                .map(|entry| entry.id.as_str())
+                .take(remaining)
+                .collect();
+
+            if claim_ids.is_empty() {
+                continue;
+            }
+
+            let reply: StreamClaimReply = conn
+                .xclaim(&key, consumer_group, consumer_name, min_idle_ms, &claim_ids)
+                .await
+                .map_err(|e| EventError::Consumer(format!("failed to claim pending entries: {e}")))?;
+
+            claimed.extend(Self::decode_claimed(&key, reply)?);
+        }
+
+        Ok(claimed)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::Utc;
+    use redis::Value;
+    use uuid::Uuid;
+
+    fn sample_event() -> EventEnvelope {
+        EventEnvelope {
+            event_id: Uuid::now_v7(),
+            tenant_id: TenantId::new("tenant-1").unwrap(),
+            order_mode: crate::event::OrderMode::Entity {
+                entity_id: Uuid::now_v7(),
+                seq: Some(7),
+            },
+            payload: serde_json::json!({"ok": true}),
+            created_at: Utc::now(),
+            event_type: "sample.created".to_string(),
+        }
+    }
+
+    #[test]
+    fn test_calculate_shard_matches_producer_contract() {
+        let tenant_id = TenantId::new("tenant-1").unwrap();
+        let event = sample_event();
+        let shard = RedisConsumer::calculate_shard(&event.order_mode.shard_input(&tenant_id));
+        assert!(shard < SHARD_COUNT);
+        assert_eq!(
+            RedisConsumer::stream_key_for_shard(&tenant_id, "events", shard),
+            format!("tenant-1:events:{shard}")
+        );
+    }
+
+    #[test]
+    fn test_validate_stream_base_rejects_invalid_names() {
+        assert!(RedisConsumer::validate_stream_base("events").is_ok());
+        assert!(RedisConsumer::validate_stream_base("").is_err());
+        assert!(RedisConsumer::validate_stream_base("events:invalid").is_err());
+    }
+
+    #[test]
+    fn test_decode_stream_entry_enforces_tenant_scope() {
+        let event = sample_event();
+        let payload = serde_json::to_string(&event).unwrap();
+        let stream_id = StreamId {
+            id: "1-0".to_string(),
+            map: [("data".to_string(), Value::BulkString(payload.into_bytes()))]
+                .into_iter()
+                .collect(),
+            milliseconds_elapsed_from_delivery: None,
+            delivered_count: None,
+        };
+
+        let delivery =
+            RedisConsumer::decode_stream_entry("tenant-1:events:4", &stream_id).expect("delivery");
+        assert_eq!(delivery.stream_key, "tenant-1:events:4");
+        assert_eq!(delivery.event.tenant_id, event.tenant_id);
+
+        let err = RedisConsumer::decode_stream_entry("tenant-2:events:4", &stream_id)
+            .expect_err("tenant mismatch must fail");
+        assert!(matches!(err, EventError::Consumer(_)));
+    }
+}

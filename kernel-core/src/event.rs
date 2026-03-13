@@ -1,4 +1,6 @@
 use std::cmp::Ordering;
+use std::future::Future;
+use std::time::{Duration, Instant};
 
 pub use kernel_data::event::{
     Delivery, EventEnvelope, EventError, OrderMode, PublishAck, ReliableConsumer, ReliableProducer,
@@ -11,6 +13,129 @@ pub enum GapRecoveryState {
     GapDetected,
     Recovering,
     RebuildRequired,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GapObservation {
+    pub ordering_key: String,
+    pub expected_seq: u64,
+    pub actual_seq: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DeliveryResolution {
+    Apply,
+    Duplicate,
+    GapDetected(GapObservation),
+}
+
+#[derive(Debug, Clone)]
+pub enum GapRecoveryAction {
+    AwaitingTimeout(GapObservation),
+    ReplayMissing(EventEnvelope),
+    MarkPoisonAndRebuild { ordering_key: String },
+}
+
+#[derive(Debug, Clone)]
+pub struct GapTracker {
+    expected_seq: u64,
+    state: GapRecoveryState,
+    gap_started_at: Option<Instant>,
+    active_gap: Option<GapObservation>,
+}
+
+impl GapTracker {
+    pub fn new(expected_seq: u64) -> Self {
+        Self {
+            expected_seq,
+            state: GapRecoveryState::Normal,
+            gap_started_at: None,
+            active_gap: None,
+        }
+    }
+
+    pub fn expected_seq(&self) -> u64 {
+        self.expected_seq
+    }
+
+    pub fn state(&self) -> GapRecoveryState {
+        self.state
+    }
+
+    pub fn observe_delivery(
+        &mut self,
+        delivery: &Delivery,
+        now: Instant,
+    ) -> Result<DeliveryResolution, EventError> {
+        let delivery_seq = delivery.event.order_mode.seq().ok_or_else(|| {
+            EventError::Consumer(format!(
+                "delivery {} missing ordering sequence",
+                delivery.delivery_id
+            ))
+        })?;
+
+        match delivery_seq.cmp(&self.expected_seq) {
+            Ordering::Less => Ok(DeliveryResolution::Duplicate),
+            Ordering::Equal => {
+                self.expected_seq = self.expected_seq.saturating_add(1);
+                self.state = GapRecoveryState::Normal;
+                self.gap_started_at = None;
+                self.active_gap = None;
+                Ok(DeliveryResolution::Apply)
+            }
+            Ordering::Greater => {
+                let gap = GapObservation {
+                    ordering_key: delivery.event.order_mode.entity_or_causality_key(),
+                    expected_seq: self.expected_seq,
+                    actual_seq: delivery_seq,
+                };
+                self.state = GapRecoveryState::GapDetected;
+                self.gap_started_at.get_or_insert(now);
+                self.active_gap = Some(gap.clone());
+                Ok(DeliveryResolution::GapDetected(gap))
+            }
+        }
+    }
+
+    pub async fn recover_gap<F, Fut>(
+        &mut self,
+        now: Instant,
+        gap_timeout: Duration,
+        lookup_missing: F,
+    ) -> Result<Option<GapRecoveryAction>, EventError>
+    where
+        F: FnOnce(GapObservation) -> Fut,
+        Fut: Future<Output = Result<Option<EventEnvelope>, EventError>>,
+    {
+        let started_at = match self.gap_started_at {
+            Some(started_at) => started_at,
+            None => return Ok(None),
+        };
+        let gap = match self.active_gap.clone() {
+            Some(gap) => gap,
+            None => return Ok(None),
+        };
+
+        if now.duration_since(started_at) < gap_timeout {
+            return Ok(Some(GapRecoveryAction::AwaitingTimeout(gap)));
+        }
+
+        let maybe_missing = lookup_missing(gap.clone()).await?;
+        let found_missing = maybe_missing.is_some();
+        self.state = progress_gap_recovery(self.state, found_missing);
+
+        if let Some(event) = maybe_missing {
+            self.gap_started_at = None;
+            self.active_gap = None;
+            return Ok(Some(GapRecoveryAction::ReplayMissing(event)));
+        }
+
+        self.gap_started_at = None;
+        self.active_gap = None;
+        Ok(Some(GapRecoveryAction::MarkPoisonAndRebuild {
+            ordering_key: gap.ordering_key,
+        }))
+    }
 }
 
 /// Validates that a transition between two OrderMode instances is valid.
@@ -233,6 +358,98 @@ mod tests {
         assert_eq!(state, GapRecoveryState::Recovering);
         let state = progress_gap_recovery(state, false);
         assert_eq!(state, GapRecoveryState::Normal);
+    }
+
+    #[tokio::test]
+    async fn test_gap_tracker_replays_missing_event_after_timeout() {
+        let tenant_id = TenantId::new("tenant-1").unwrap();
+        let entity_id = Uuid::now_v7();
+        let missing = EventEnvelope {
+            event_id: Uuid::now_v7(),
+            tenant_id: tenant_id.clone(),
+            order_mode: OrderMode::Entity {
+                entity_id,
+                seq: Some(3),
+            },
+            payload: Value::Null,
+            created_at: Utc::now(),
+            event_type: "entity.updated".to_string(),
+        };
+        let future = EventEnvelope {
+            event_id: Uuid::now_v7(),
+            tenant_id,
+            order_mode: OrderMode::Entity {
+                entity_id,
+                seq: Some(4),
+            },
+            payload: Value::Null,
+            created_at: Utc::now(),
+            event_type: "entity.updated".to_string(),
+        };
+        let delivery = Delivery {
+            delivery_id: "1-0".to_string(),
+            stream_key: "tenant-1:events:0".to_string(),
+            event: future,
+        };
+
+        let start = Instant::now();
+        let mut tracker = GapTracker::new(3);
+        let observed = tracker.observe_delivery(&delivery, start).unwrap();
+        assert!(matches!(observed, DeliveryResolution::GapDetected(_)));
+
+        let action = tracker
+            .recover_gap(start + Duration::from_secs(31), Duration::from_secs(30), |_| async {
+                Ok(Some(missing))
+            })
+            .await
+            .unwrap()
+            .expect("recovery action");
+
+        assert!(matches!(action, GapRecoveryAction::ReplayMissing(_)));
+        assert_eq!(tracker.state(), GapRecoveryState::Recovering);
+    }
+
+    #[tokio::test]
+    async fn test_gap_tracker_marks_rebuild_when_missing_event_not_found() {
+        let tenant_id = TenantId::new("tenant-1").unwrap();
+        let entity_id = Uuid::now_v7();
+        let future = EventEnvelope {
+            event_id: Uuid::now_v7(),
+            tenant_id,
+            order_mode: OrderMode::Entity {
+                entity_id,
+                seq: Some(9),
+            },
+            payload: Value::Null,
+            created_at: Utc::now(),
+            event_type: "entity.updated".to_string(),
+        };
+        let delivery = Delivery {
+            delivery_id: "1-0".to_string(),
+            stream_key: "tenant-1:events:0".to_string(),
+            event: future,
+        };
+
+        let start = Instant::now();
+        let mut tracker = GapTracker::new(7);
+        let observed = tracker.observe_delivery(&delivery, start).unwrap();
+        assert!(matches!(observed, DeliveryResolution::GapDetected(_)));
+
+        let action = tracker
+            .recover_gap(
+                start + Duration::from_secs(31),
+                Duration::from_secs(30),
+                |_| async { Ok(None) },
+            )
+            .await
+            .unwrap()
+            .expect("recovery action");
+
+        assert!(matches!(
+            action,
+            GapRecoveryAction::MarkPoisonAndRebuild { ordering_key } if ordering_key == entity_id.to_string()
+        ));
+        assert_eq!(tracker.state(), GapRecoveryState::RebuildRequired);
     }
 
     #[test]
