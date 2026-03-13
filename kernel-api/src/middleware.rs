@@ -1420,10 +1420,7 @@ impl MiddlewareState {
             if config.require_redis {
                 return Err(msg);
             }
-            warn!("{}", msg);
-            warn!(
-                "InMemoryQuotaStore selected — quota enforcement disabled; SystemHardLimit and other layers will be bypassed"
-            );
+            log_dev_only_redis_fallback(&msg);
             return Ok(Self::with_store(
                 config,
                 Arc::new(InMemoryIdempotencyStore::new()),
@@ -1453,10 +1450,7 @@ impl MiddlewareState {
                     if config.require_redis {
                         return Err(msg);
                     }
-                    error!("{msg}");
-                    warn!(
-                        "InMemoryQuotaStore selected — quota enforcement disabled; SystemHardLimit and other layers will be bypassed"
-                    );
+                    log_dev_only_redis_fallback(&msg);
                     Ok(Self::with_store(
                         config,
                         Arc::new(InMemoryIdempotencyStore::new()),
@@ -1474,10 +1468,7 @@ impl MiddlewareState {
                 if config.require_redis {
                     return Err(msg);
                 }
-                error!("{msg}");
-                warn!(
-                    "InMemoryQuotaStore selected — quota enforcement disabled; SystemHardLimit and other layers will be bypassed"
-                );
+                log_dev_only_redis_fallback(&msg);
                 Ok(Self::with_store(
                     config,
                     Arc::new(InMemoryIdempotencyStore::new()),
@@ -1515,6 +1506,16 @@ impl MiddlewareState {
             }
         })
     }
+}
+
+fn log_dev_only_redis_fallback(reason: &str) {
+    error!("{reason}");
+    error!(
+        "DEVELOPMENT-ONLY fallback activated: using InMemoryIdempotencyStore and InMemoryQuotaStore because REQUIRE_REDIS=false"
+    );
+    warn!(
+        "This fallback is unsafe for multi-instance production deployments; idempotency state and quota state are not shared across instances"
+    );
 }
 
 fn redact_redis_url(redis_url: &str) -> String {
@@ -1989,6 +1990,7 @@ pub use rbac::{UserPermissions, load_permissions_middleware, require_permission}
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
 
     #[test]
     fn test_sha256_hex() {
@@ -2015,5 +2017,50 @@ mod tests {
         let mut s = String::new();
         append_sha256_hex(input_nist, &mut s);
         assert_eq!(s, expected_nist);
+    }
+
+    #[tokio::test]
+    async fn test_new_with_redis_fails_closed_when_redis_required() {
+        let config = MiddlewareConfig {
+            redis_url: "not-a-redis-url".to_string(),
+            require_redis: true,
+            ..MiddlewareConfig::default()
+        };
+
+        let err = match MiddlewareState::new_with_redis(config).await {
+            Ok(_) => panic!("require_redis=true must fail startup"),
+            Err(err) => err,
+        };
+        assert!(err.contains("REDIS_URL must use redis:// or rediss:// scheme"));
+    }
+
+    #[tokio::test]
+    async fn test_new_with_redis_allows_dev_only_fallback_when_redis_optional() {
+        let config = MiddlewareConfig {
+            redis_url: "not-a-redis-url".to_string(),
+            require_redis: false,
+            idempotency_ttl: Duration::from_secs(60),
+            action_ttl: Duration::from_secs(60),
+            ..MiddlewareConfig::default()
+        };
+
+        let state = MiddlewareState::new_with_redis(config)
+            .await
+            .expect("require_redis=false may use development-only fallback");
+
+        let key = IdempotencyScopeKey {
+            tenant_id: kernel_core::auth::TenantId::new("tenant-fallback").expect("tenant id"),
+            method: "POST".to_string(),
+            canonical_target: "/test".to_string(),
+            idempotency_key: "fallback-key".to_string(),
+        };
+
+        let acquired = state
+            .idempotency_store
+            .try_acquire(key, "body-hash".to_string(), Duration::from_secs(60))
+            .await
+            .expect("in-memory idempotency store must be active");
+
+        assert!(matches!(acquired, IdempotencyAcquireResult::Acquired(_)));
     }
 }
