@@ -862,7 +862,7 @@ Kernelはエラー発生時や診断要求に対し、以下の構造化デー�
 - **Goal**: `kernel-core` で定義した契約ロジックを Axum ミドルウェアとして統合し、HTTP フローで強制する。
 - **Middleware Chain**: `Auth` → `Idempotency` → `Quota` の順で適用。
 - **Security Policy (REQ-AUTH-SEC)**:
-  - `X-Tenant-Id` ヘッダは `dev_only` (cfg(debug_assertions)) とし、Release ビルドではトークン検証のみを信頼する。
+  - `X-Tenant-Id` / `X-User-Id` ヘッダは `dev_only` (`feature = "enable_dev_auth"`) とし、既定機能に含めてはならない **(MUST NOT)**。Release ビルドでは当該 feature を有効化してはならず、トークン検証のみを信頼する **(MUST)**。
   - `401 Unauthorized` (Identity 未確定) と `403 Forbidden` (権限/テナント境界不足) を厳格に使い分ける。
 - **Idempotency Scope**: `(tenant, method, target, key)` の複合キーで 24h 保持。
 - **Quota Priority**: `System Hard Limit` (1-30s clip) → `Tenant` → `API` の順で短絡評価。

@@ -109,6 +109,27 @@ async fn test_security_headers_present_on_401_unauthorized() {
 
 #[tokio::test]
 #[cfg(not(feature = "dev-auth"))]
+async fn test_dev_auth_headers_are_rejected_without_enable_dev_auth() {
+    setup();
+    let app = setup_app().await;
+
+    let req = Request::builder()
+        .uri("/test")
+        .method("POST")
+        .header("Idempotency-Key", "security-dev-auth-disabled")
+        .header("X-Tenant-Id", "tenant-1")
+        .header("X-User-Id", "user-1")
+        .body(Body::empty())
+        .unwrap();
+
+    let res = app.oneshot(req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+
+    assert_security_headers(&res);
+}
+
+#[tokio::test]
+#[cfg(not(feature = "dev-auth"))]
 async fn test_security_headers_present_on_403_forbidden() {
     setup();
     let app = setup_app_for_bearer_tests().await;
