@@ -33,16 +33,62 @@ pub enum OrderMode {
     },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "namespace", rename_all = "snake_case")]
+pub enum OrderingKey {
+    Entity { entity_id: Uuid },
+    Causality { key: String },
+}
+
+impl OrderingKey {
+    pub fn logical_key(&self) -> String {
+        match self {
+            OrderingKey::Entity { entity_id } => entity_id.to_string(),
+            OrderingKey::Causality { key } => key.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TenantScopedOrderingKey {
+    pub tenant_id: TenantId,
+    #[serde(flatten)]
+    pub ordering: OrderingKey,
+}
+
+impl TenantScopedOrderingKey {
+    pub fn logical_key(&self) -> String {
+        self.ordering.logical_key()
+    }
+
+    pub fn shard_input(&self) -> String {
+        format!("{}:{}", self.tenant_id, self.logical_key())
+    }
+}
+
 impl OrderMode {
     pub fn entity_or_causality_key(&self) -> String {
+        self.ordering_key().logical_key()
+    }
+
+    pub fn ordering_key(&self) -> OrderingKey {
         match self {
-            OrderMode::Entity { entity_id, .. } => entity_id.to_string(),
-            OrderMode::Causality { key, .. } => key.clone(),
+            OrderMode::Entity { entity_id, .. } => OrderingKey::Entity {
+                entity_id: *entity_id,
+            },
+            OrderMode::Causality { key, .. } => OrderingKey::Causality { key: key.clone() },
+        }
+    }
+
+    pub fn tenant_scoped_ordering_key(&self, tenant_id: &TenantId) -> TenantScopedOrderingKey {
+        TenantScopedOrderingKey {
+            tenant_id: tenant_id.clone(),
+            ordering: self.ordering_key(),
         }
     }
 
     pub fn shard_input(&self, tenant_id: &TenantId) -> String {
-        format!("{}:{}", tenant_id, self.entity_or_causality_key())
+        self.tenant_scoped_ordering_key(tenant_id).shard_input()
     }
 
     pub fn seq(&self) -> Option<u64> {
@@ -213,5 +259,25 @@ mod tests {
             // If "tenant/a" is valid, then "tenant/a:..." should work
             assert!(validate_stream_key("tenant/a:stream:0", &weird_tenant).is_ok());
         }
+    }
+
+    #[test]
+    fn test_tenant_scoped_ordering_key_preserves_namespace() {
+        let tenant_id = TenantId::new("tenant_a").unwrap();
+        let entity_id = Uuid::now_v7();
+        let entity_key = OrderMode::Entity {
+            entity_id,
+            seq: Some(1),
+        }
+        .tenant_scoped_ordering_key(&tenant_id);
+        let causality_key = OrderMode::Causality {
+            key: entity_id.to_string(),
+            seq: Some(1),
+        }
+        .tenant_scoped_ordering_key(&tenant_id);
+
+        assert_ne!(entity_key, causality_key);
+        assert_eq!(entity_key.logical_key(), entity_id.to_string());
+        assert_eq!(causality_key.logical_key(), entity_id.to_string());
     }
 }

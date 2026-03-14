@@ -58,14 +58,28 @@ async fn test_gap_tracker_replays_after_timeout_when_outbox_has_missing_event() 
     tracker.observe_delivery(&delivery, start).unwrap();
 
     let action = tracker
-        .recover_gap(start + Duration::from_secs(31), Duration::from_secs(30), |_| async {
-            Ok(Some(missing))
-        })
+        .recover_gap(
+            start + Duration::from_secs(31),
+            Duration::from_secs(30),
+            |_| async { Ok(Some(missing)) },
+        )
         .await
         .unwrap()
         .expect("recovery action");
 
-    assert!(matches!(action, GapRecoveryAction::ReplayMissing(_)));
+    let (gap, replay) = match action {
+        GapRecoveryAction::ReplayApply { gap, event } => (gap, event),
+        other => panic!("unexpected recovery action: {other:?}"),
+    };
+    tracker.confirm_gap_replay(&gap, &replay).unwrap();
+
+    let resolution = tracker
+        .observe_delivery(&delivery, start + Duration::from_secs(32))
+        .unwrap();
+    assert!(matches!(
+        resolution,
+        kernel_core::event::DeliveryResolution::Apply
+    ));
 }
 
 #[tokio::test]
@@ -104,6 +118,7 @@ async fn test_gap_tracker_requests_rebuild_after_timeout_when_outbox_missing() {
 
     assert!(matches!(
         action,
-        GapRecoveryAction::MarkPoisonAndRebuild { ordering_key } if ordering_key == entity_id.to_string()
+        GapRecoveryAction::MarkPoisonAndRebuild { ordering_key }
+            if ordering_key.logical_key() == entity_id.to_string()
     ));
 }

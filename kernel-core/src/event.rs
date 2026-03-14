@@ -4,10 +4,11 @@ use std::time::{Duration, Instant};
 
 pub use kernel_data::event::{
     Delivery, EventEnvelope, EventError, OrderMode, PublishAck, ReliableConsumer, ReliableProducer,
-    RetryPolicy, SHARD_COUNT, validate_stream_key,
+    RetryPolicy, SHARD_COUNT, TenantScopedOrderingKey, validate_stream_key,
 };
+use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum GapRecoveryState {
     Normal,
     GapDetected,
@@ -15,9 +16,9 @@ pub enum GapRecoveryState {
     RebuildRequired,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GapObservation {
-    pub ordering_key: String,
+    pub ordering_key: TenantScopedOrderingKey,
     pub expected_seq: u64,
     pub actual_seq: u64,
 }
@@ -32,8 +33,13 @@ pub enum DeliveryResolution {
 #[derive(Debug, Clone)]
 pub enum GapRecoveryAction {
     AwaitingTimeout(GapObservation),
-    ReplayMissing(EventEnvelope),
-    MarkPoisonAndRebuild { ordering_key: String },
+    ReplayApply {
+        gap: GapObservation,
+        event: EventEnvelope,
+    },
+    MarkPoisonAndRebuild {
+        ordering_key: TenantScopedOrderingKey,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -85,7 +91,10 @@ impl GapTracker {
             }
             Ordering::Greater => {
                 let gap = GapObservation {
-                    ordering_key: delivery.event.order_mode.entity_or_causality_key(),
+                    ordering_key: delivery
+                        .event
+                        .order_mode
+                        .tenant_scoped_ordering_key(&delivery.event.tenant_id),
                     expected_seq: self.expected_seq,
                     actual_seq: delivery_seq,
                 };
@@ -125,9 +134,7 @@ impl GapTracker {
         self.state = progress_gap_recovery(self.state, found_missing);
 
         if let Some(event) = maybe_missing {
-            self.gap_started_at = None;
-            self.active_gap = None;
-            return Ok(Some(GapRecoveryAction::ReplayMissing(event)));
+            return Ok(Some(GapRecoveryAction::ReplayApply { gap, event }));
         }
 
         self.gap_started_at = None;
@@ -135,6 +142,47 @@ impl GapTracker {
         Ok(Some(GapRecoveryAction::MarkPoisonAndRebuild {
             ordering_key: gap.ordering_key,
         }))
+    }
+
+    pub fn confirm_gap_replay(
+        &mut self,
+        gap: &GapObservation,
+        event: &EventEnvelope,
+    ) -> Result<(), EventError> {
+        let active_gap = self.active_gap.as_ref().ok_or_else(|| {
+            EventError::Consumer("no active gap to confirm replay against".to_string())
+        })?;
+        if active_gap != gap {
+            return Err(EventError::Consumer(
+                "replay confirmation does not match the active gap".to_string(),
+            ));
+        }
+
+        let replay_key = event
+            .order_mode
+            .tenant_scoped_ordering_key(&event.tenant_id);
+        if replay_key != gap.ordering_key {
+            return Err(EventError::Consumer(format!(
+                "replay confirmation ordering key mismatch: expected {:?}, got {:?}",
+                gap.ordering_key, replay_key
+            )));
+        }
+
+        let replay_seq = event.order_mode.seq().ok_or_else(|| {
+            EventError::Consumer("replay confirmation missing ordering sequence".to_string())
+        })?;
+        if replay_seq != gap.expected_seq {
+            return Err(EventError::Consumer(format!(
+                "replay confirmation sequence mismatch: expected {}, got {}",
+                gap.expected_seq, replay_seq
+            )));
+        }
+
+        self.expected_seq = self.expected_seq.saturating_add(1);
+        self.state = progress_gap_recovery(self.state, false);
+        self.gap_started_at = None;
+        self.active_gap = None;
+        Ok(())
     }
 }
 
@@ -398,15 +446,23 @@ mod tests {
         assert!(matches!(observed, DeliveryResolution::GapDetected(_)));
 
         let action = tracker
-            .recover_gap(start + Duration::from_secs(31), Duration::from_secs(30), |_| async {
-                Ok(Some(missing))
-            })
+            .recover_gap(
+                start + Duration::from_secs(31),
+                Duration::from_secs(30),
+                |_| async { Ok(Some(missing)) },
+            )
             .await
             .unwrap()
             .expect("recovery action");
 
-        assert!(matches!(action, GapRecoveryAction::ReplayMissing(_)));
-        assert_eq!(tracker.state(), GapRecoveryState::Recovering);
+        let (gap, replay) = match action {
+            GapRecoveryAction::ReplayApply { gap, event } => (gap, event),
+            other => panic!("unexpected recovery action: {other:?}"),
+        };
+        tracker.confirm_gap_replay(&gap, &replay).unwrap();
+        let replayed = tracker.observe_delivery(&delivery, start + Duration::from_secs(32));
+        assert!(matches!(replayed, Ok(DeliveryResolution::Apply)));
+        assert_eq!(tracker.state(), GapRecoveryState::Normal);
     }
 
     #[tokio::test]
@@ -447,7 +503,8 @@ mod tests {
 
         assert!(matches!(
             action,
-            GapRecoveryAction::MarkPoisonAndRebuild { ordering_key } if ordering_key == entity_id.to_string()
+            GapRecoveryAction::MarkPoisonAndRebuild { ordering_key }
+                if ordering_key.logical_key() == entity_id.to_string()
         ));
         assert_eq!(tracker.state(), GapRecoveryState::RebuildRequired);
     }

@@ -6,13 +6,14 @@ use crate::event::{
 use async_trait::async_trait;
 use redis::aio::ConnectionManager;
 use redis::streams::{
-    StreamClaimReply, StreamId, StreamPendingCountReply, StreamReadOptions, StreamReadReply,
+    StreamAutoClaimOptions, StreamAutoClaimReply, StreamClaimReply, StreamId, StreamReadOptions,
+    StreamReadReply,
 };
 use redis::{AsyncCommands, Client};
-use std::time::Duration;
-use tracing::{instrument, warn};
 #[cfg(test)]
 use std::hash::Hasher;
+use std::time::Duration;
+use tracing::{instrument, warn};
 #[cfg(test)]
 use twox_hash::XxHash64;
 
@@ -101,7 +102,10 @@ impl RedisConsumer {
         Ok(deliveries)
     }
 
-    fn decode_claimed(stream_key: &str, reply: StreamClaimReply) -> Result<Vec<Delivery>, EventError> {
+    fn decode_claimed(
+        stream_key: &str,
+        reply: StreamClaimReply,
+    ) -> Result<Vec<Delivery>, EventError> {
         reply
             .ids
             .iter()
@@ -109,13 +113,13 @@ impl RedisConsumer {
             .collect()
     }
 
-    fn retry_policy_warning(policy: &RetryPolicy) {
+    fn validate_retry_policy(policy: &RetryPolicy) -> Result<(), EventError> {
         if let RetryPolicy::BackoffUntil(retry_at) = policy {
-            warn!(
-                retry_at = %retry_at,
-                "RedisConsumer::nack does not delay Redis Streams visibility; message is re-claimed immediately to the retry consumer"
-            );
+            return Err(EventError::Consumer(format!(
+                "RetryPolicy::BackoffUntil({retry_at}) is not supported by RedisConsumer without a delayed retry queue"
+            )));
         }
+        Ok(())
     }
 }
 
@@ -143,10 +147,12 @@ impl ReliableConsumer for RedisConsumer {
             .block(self.block_timeout.as_millis() as usize);
 
         let mut conn = self.connection_manager.clone();
-        let reply: StreamReadReply = conn
-            .xread_options(&keys, &ids, &options)
-            .await
-            .map_err(|e| EventError::Consumer(format!("failed to read stream group entries: {e}")))?;
+        let reply: StreamReadReply =
+            conn.xread_options(&keys, &ids, &options)
+                .await
+                .map_err(|e| {
+                    EventError::Consumer(format!("failed to read stream group entries: {e}"))
+                })?;
         if reply.keys.is_empty() {
             return Ok(Vec::new());
         }
@@ -167,7 +173,9 @@ impl ReliableConsumer for RedisConsumer {
         let acked: i32 = conn
             .xack(stream_key, consumer_group, &[delivery_id])
             .await
-            .map_err(|e| EventError::Consumer(format!("failed to acknowledge stream entry: {e}")))?;
+            .map_err(|e| {
+                EventError::Consumer(format!("failed to acknowledge stream entry: {e}"))
+            })?;
         if acked == 0 {
             warn!(
                 stream_key = stream_key,
@@ -188,7 +196,7 @@ impl ReliableConsumer for RedisConsumer {
         policy: RetryPolicy,
     ) -> Result<(), EventError> {
         validate_stream_key(stream_key, tenant_id)?;
-        Self::retry_policy_warning(&policy);
+        Self::validate_retry_policy(&policy)?;
 
         let mut conn = self.connection_manager.clone();
         let _: StreamClaimReply = conn
@@ -200,7 +208,9 @@ impl ReliableConsumer for RedisConsumer {
                 &[delivery_id],
             )
             .await
-            .map_err(|e| EventError::Consumer(format!("failed to re-claim stream entry for retry: {e}")))?;
+            .map_err(|e| {
+                EventError::Consumer(format!("failed to re-claim stream entry for retry: {e}"))
+            })?;
         Ok(())
     }
 
@@ -227,31 +237,47 @@ impl ReliableConsumer for RedisConsumer {
                 break;
             }
 
-            let remaining = max_count - claimed.len();
-            let mut conn = self.connection_manager.clone();
-            let pending: StreamPendingCountReply = conn
-                .xpending_count(&key, consumer_group, "-", "+", remaining)
-                .await
-                .map_err(|e| EventError::Consumer(format!("failed to read pending entries: {e}")))?;
+            let mut next_stream_id = "0-0".to_string();
+            loop {
+                if claimed.len() >= max_count {
+                    break;
+                }
 
-            let claim_ids: Vec<&str> = pending
-                .ids
-                .iter()
-                .filter(|entry| entry.last_delivered_ms as u64 >= min_idle_ms)
-                .map(|entry| entry.id.as_str())
-                .take(remaining)
-                .collect();
+                let remaining = max_count - claimed.len();
+                let options = StreamAutoClaimOptions::default().count(remaining.min(100));
+                let mut conn = self.connection_manager.clone();
+                let reply: StreamAutoClaimReply = conn
+                    .xautoclaim_options(
+                        &key,
+                        consumer_group,
+                        consumer_name,
+                        min_idle_ms,
+                        &next_stream_id,
+                        options,
+                    )
+                    .await
+                    .map_err(|e| {
+                        EventError::Consumer(format!("failed to claim pending entries: {e}"))
+                    })?;
 
-            if claim_ids.is_empty() {
-                continue;
+                let claimed_entries = reply.claimed;
+                let next_cursor = reply.next_stream_id;
+                if claimed_entries.is_empty() {
+                    break;
+                }
+
+                claimed.extend(Self::decode_claimed(
+                    &key,
+                    StreamClaimReply {
+                        ids: claimed_entries,
+                    },
+                )?);
+
+                if next_cursor == "0-0" {
+                    break;
+                }
+                next_stream_id = next_cursor;
             }
-
-            let reply: StreamClaimReply = conn
-                .xclaim(&key, consumer_group, consumer_name, min_idle_ms, &claim_ids)
-                .await
-                .map_err(|e| EventError::Consumer(format!("failed to claim pending entries: {e}")))?;
-
-            claimed.extend(Self::decode_claimed(&key, reply)?);
         }
 
         Ok(claimed)
