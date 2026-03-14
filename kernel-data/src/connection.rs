@@ -1,6 +1,11 @@
 #![allow(clippy::items_after_test_module)]
 #![allow(clippy::collapsible_if)]
 
+#[cfg(all(not(test), not(debug_assertions), feature = "enable_dev_auth"))]
+compile_error!(
+    "feature \"enable_dev_auth\" must not be enabled in release builds; remove it from production dependencies or CI"
+);
+
 use crate::auth_context::TenantContext;
 use crate::error::DataError;
 use futures::future::BoxFuture;
