@@ -73,6 +73,13 @@ impl GapTracker {
         delivery: &Delivery,
         now: Instant,
     ) -> Result<DeliveryResolution, EventError> {
+        if self.state == GapRecoveryState::RebuildRequired {
+            return Err(EventError::Consumer(format!(
+                "delivery {} observed while rebuild is required for expected sequence {}",
+                delivery.delivery_id, self.expected_seq
+            )));
+        }
+
         let delivery_seq = delivery.event.order_mode.seq().ok_or_else(|| {
             EventError::Consumer(format!(
                 "delivery {} missing ordering sequence",
@@ -519,6 +526,65 @@ mod tests {
             GapRecoveryAction::MarkPoisonAndRebuild { ordering_key }
                 if ordering_key.logical_key() == entity_id.to_string()
         ));
+        assert_eq!(tracker.state(), GapRecoveryState::RebuildRequired);
+    }
+
+    #[tokio::test]
+    async fn test_gap_tracker_rejects_deliveries_while_rebuild_required() {
+        let tenant_id = TenantId::new("tenant-1").unwrap();
+        let entity_id = Uuid::now_v7();
+        let future = EventEnvelope {
+            event_id: Uuid::now_v7(),
+            tenant_id: tenant_id.clone(),
+            order_mode: OrderMode::Entity {
+                entity_id,
+                seq: Some(9),
+            },
+            payload: Value::Null,
+            created_at: Utc::now(),
+            event_type: "entity.updated".to_string(),
+        };
+        let delivery = Delivery {
+            delivery_id: "1-0".to_string(),
+            stream_key: "tenant-1:events:0".to_string(),
+            event: future.clone(),
+        };
+
+        let start = Instant::now();
+        let mut tracker = GapTracker::new(7);
+        tracker.observe_delivery(&delivery, start).unwrap();
+        tracker
+            .recover_gap(
+                start + Duration::from_secs(31),
+                Duration::from_secs(30),
+                |_| async { Ok::<Option<EventEnvelope>, EventError>(None) },
+            )
+            .await
+            .unwrap()
+            .expect("recovery action");
+
+        let err = tracker
+            .observe_delivery(
+                &Delivery {
+                    delivery_id: "2-0".to_string(),
+                    stream_key: "tenant-1:events:0".to_string(),
+                    event: EventEnvelope {
+                        event_id: Uuid::now_v7(),
+                        tenant_id,
+                        order_mode: OrderMode::Entity {
+                            entity_id,
+                            seq: Some(7),
+                        },
+                        payload: Value::Null,
+                        created_at: Utc::now(),
+                        event_type: "entity.updated".to_string(),
+                    },
+                },
+                start + Duration::from_secs(32),
+            )
+            .expect_err("deliveries must be rejected during rebuild");
+
+        assert!(matches!(err, EventError::Consumer(_)));
         assert_eq!(tracker.state(), GapRecoveryState::RebuildRequired);
     }
 
