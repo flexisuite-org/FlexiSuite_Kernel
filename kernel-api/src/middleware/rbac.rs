@@ -134,15 +134,10 @@ pub async fn load_permissions_middleware(
         validate_v2_token_kid(incoming_token)?;
         use_incoming_as_db_token = true;
     }
-    #[cfg(any(feature = "test-utils", feature = "enable_dev_auth"))]
-    if incoming_token.starts_with("dev-token:") {
-        use_incoming_as_db_token = true;
-    }
-
     let db_token = if use_incoming_as_db_token {
         incoming_token.clone()
     } else {
-        // Bridge V4 -> V2
+        // Bridge non-v2 request credentials onto a DB-recognized tenant token.
         let ctx_for_closure = ctx.clone();
         match ctx
             .with_system_context(|sys_ctx| async move {

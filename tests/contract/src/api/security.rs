@@ -1,4 +1,4 @@
-use crate::api::middleware_integration::{setup_app, setup_app_with_db};
+use crate::api::middleware_integration::setup_app;
 use crate::auth::helpers::setup;
 // generate_token_with_claims is always needed for tests that need specific tenant/user claims.
 // generate_token is only used when dev-auth feature is NOT enabled (real Bearer token path).

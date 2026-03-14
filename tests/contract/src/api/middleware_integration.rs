@@ -158,7 +158,15 @@ fn default_mock_db() -> sea_orm::DatabaseConnection {
     // Default mock that allows up to 20 successful authorizations and permission checks.
     // This covers most integration tests that expect success.
     // Tests expecting failure or specific DB behavior should use setup_app_with_db.
-    mock_db_with_budget(20)
+    #[cfg(feature = "dev-auth")]
+    {
+        return mock_db_with_bridge_budget(20);
+    }
+
+    #[cfg(not(feature = "dev-auth"))]
+    {
+        mock_db_with_budget(20)
+    }
 }
 
 pub async fn setup_app() -> axum::Router {
@@ -358,6 +366,24 @@ async fn test_rbac_fail_closed_with_empty_permissions_fixture() {
 
     #[cfg(not(feature = "dev-auth"))]
     assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+#[cfg(feature = "dev-auth")]
+async fn test_dev_auth_bridges_to_v2_token_for_db_authorization() {
+    let app = setup_app_with_db(mock_db_with_bridge_budget(1)).await;
+
+    let req = Request::builder()
+        .uri("/test")
+        .method("POST")
+        .header("X-Tenant-Id", "tenant-1")
+        .header("X-User-Id", "user-1")
+        .header("Idempotency-Key", "dev-auth-v2-bridge")
+        .body(Body::empty())
+        .unwrap();
+
+    let res = app.oneshot(req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::CREATED);
 }
 
 #[tokio::test]
