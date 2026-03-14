@@ -1511,7 +1511,7 @@ impl MiddlewareState {
 fn log_dev_only_redis_fallback(reason: &str) {
     error!("{reason}");
     error!(
-        "DEVELOPMENT-ONLY fallback activated: using InMemoryIdempotencyStore and InMemoryQuotaStore because REQUIRE_REDIS=false"
+        "DEVELOPMENT-ONLY fallback activated: using InMemoryIdempotencyStore, InMemoryActionStore, and InMemoryQuotaStore because REQUIRE_REDIS=false"
     );
     warn!(
         "This fallback is unsafe for multi-instance production deployments; idempotency state and quota state are not shared across instances"
