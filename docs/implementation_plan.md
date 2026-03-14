@@ -458,6 +458,7 @@ KMS (Key Management Service) を前提とした鍵ライフサイクルを規定
   - `action_id` と `idempotency_key` の対応はサーバー側で保持し、クライアントに複合キー再構築を要求してはならない **(MUST NOT)**。
 - **Result Inquiry**: 重い処理やすぐにリトライできない場合のために、`GET /actions/{action_id}` エンドポイントを提供し、処理結果（`PENDING | COMPLETED | FAILED`）を返却**しなければならない (MUST)**。
 - **Server Behavior**: サーバーは `action_id` と `idempotency_key` の処理結果を **24時間** 保持し、同一キーかつ同一ハッシュの再送に対しては既存 `action_id` の結果を返す（処理の再実行をしない）。
+- **Backend Requirement**: multi-instance 本番構成では、冪等性ストアは共有バックエンド（Redis 等）を使用しなければならない **(MUST)**。`InMemoryIdempotencyStore` へのフォールバックは `REQUIRE_REDIS=false` を明示したローカル開発用途に限定し、本番構成で暗黙に許容してはならない **(MUST NOT)**。
 
 ---
 
