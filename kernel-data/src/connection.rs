@@ -186,7 +186,7 @@ fn parse_tenant_from_token(token: &str) -> Option<String> {
         }
     }
 
-    #[cfg(feature = "test-utils")]
+    #[cfg(any(feature = "test-utils", feature = "enable_dev_auth"))]
     if let Some(tenant_id) = token.strip_prefix("dev-token:") {
         // Special dev token for tests/debug with tenant ID
         if !tenant_id.is_empty() {
@@ -194,7 +194,7 @@ fn parse_tenant_from_token(token: &str) -> Option<String> {
         }
     }
 
-    #[cfg(not(feature = "test-utils"))]
+    #[cfg(not(any(feature = "test-utils", feature = "enable_dev_auth")))]
     if token.starts_with("dev-token:") {
         warn!("dev-token encountered in non-test build; parsing rejected");
         return None;
