@@ -13,7 +13,7 @@ use redis::{AsyncCommands, Client, RedisError};
 #[cfg(test)]
 use std::hash::Hasher;
 use std::time::Duration;
-use tracing::{instrument, warn};
+use tracing::instrument;
 #[cfg(test)]
 use twox_hash::XxHash64;
 
@@ -369,11 +369,9 @@ impl ReliableConsumer for RedisConsumer {
                 EventError::Consumer(format!("failed to acknowledge stream entry: {e}"))
             })?;
         if acked == 0 {
-            warn!(
-                stream_key = stream_key,
-                delivery_id = delivery_id,
-                "ack completed but Redis reported 0 acknowledged messages"
-            );
+            return Err(EventError::Consumer(format!(
+                "failed to acknowledge stream entry {delivery_id} on {stream_key}: Redis reported 0 acknowledged messages"
+            )));
         }
         Ok(())
     }

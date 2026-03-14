@@ -179,9 +179,18 @@ impl GapTracker {
         }
 
         self.expected_seq = self.expected_seq.saturating_add(1);
-        self.state = progress_gap_recovery(self.state, false);
-        self.gap_started_at = None;
-        self.active_gap = None;
+        if self.expected_seq < gap.actual_seq {
+            self.state = progress_gap_recovery(self.state, true);
+            self.active_gap = Some(GapObservation {
+                ordering_key: gap.ordering_key.clone(),
+                expected_seq: self.expected_seq,
+                actual_seq: gap.actual_seq,
+            });
+        } else {
+            self.state = progress_gap_recovery(self.state, false);
+            self.gap_started_at = None;
+            self.active_gap = None;
+        }
         Ok(())
     }
 }
@@ -507,6 +516,93 @@ mod tests {
                 if ordering_key.logical_key() == entity_id.to_string()
         ));
         assert_eq!(tracker.state(), GapRecoveryState::RebuildRequired);
+    }
+
+    #[tokio::test]
+    async fn test_gap_tracker_keeps_recovering_until_all_missing_sequences_replayed() {
+        let tenant_id = TenantId::new("tenant-1").unwrap();
+        let entity_id = Uuid::now_v7();
+        let future = EventEnvelope {
+            event_id: Uuid::now_v7(),
+            tenant_id: tenant_id.clone(),
+            order_mode: OrderMode::Entity {
+                entity_id,
+                seq: Some(8),
+            },
+            payload: Value::Null,
+            created_at: Utc::now(),
+            event_type: "entity.updated".to_string(),
+        };
+        let delivery = Delivery {
+            delivery_id: "1-0".to_string(),
+            stream_key: "tenant-1:events:0".to_string(),
+            event: future.clone(),
+        };
+        let replay_three = EventEnvelope {
+            event_id: Uuid::now_v7(),
+            tenant_id: tenant_id.clone(),
+            order_mode: OrderMode::Entity {
+                entity_id,
+                seq: Some(3),
+            },
+            payload: Value::Null,
+            created_at: Utc::now(),
+            event_type: "entity.updated".to_string(),
+        };
+        let replay_four = EventEnvelope {
+            event_id: Uuid::now_v7(),
+            tenant_id,
+            order_mode: OrderMode::Entity {
+                entity_id,
+                seq: Some(4),
+            },
+            payload: Value::Null,
+            created_at: Utc::now(),
+            event_type: "entity.updated".to_string(),
+        };
+
+        let start = Instant::now();
+        let mut tracker = GapTracker::new(3);
+        let observed = tracker.observe_delivery(&delivery, start).unwrap();
+        assert!(matches!(observed, DeliveryResolution::GapDetected(_)));
+
+        let action = tracker
+            .recover_gap(
+                start + Duration::from_secs(31),
+                Duration::from_secs(30),
+                |_| async { Ok(Some(replay_three)) },
+            )
+            .await
+            .unwrap()
+            .expect("first recovery action");
+        let (gap, replay) = match action {
+            GapRecoveryAction::ReplayApply { gap, event } => (gap, event),
+            other => panic!("unexpected recovery action: {other:?}"),
+        };
+        tracker.confirm_gap_replay(&gap, &replay).unwrap();
+
+        assert_eq!(tracker.expected_seq(), 4);
+        assert_eq!(tracker.state(), GapRecoveryState::Recovering);
+
+        let next_action = tracker
+            .recover_gap(
+                start + Duration::from_secs(32),
+                Duration::from_secs(30),
+                |_| async { Ok(Some(replay_four)) },
+            )
+            .await
+            .unwrap()
+            .expect("second recovery action");
+
+        let (next_gap, next_replay) = match next_action {
+            GapRecoveryAction::ReplayApply { gap, event } => (gap, event),
+            other => panic!("unexpected recovery action: {other:?}"),
+        };
+        assert_eq!(next_gap.expected_seq, 4);
+        assert_eq!(next_gap.actual_seq, 8);
+        tracker.confirm_gap_replay(&next_gap, &next_replay).unwrap();
+        assert_eq!(tracker.expected_seq(), 5);
+        assert_eq!(tracker.state(), GapRecoveryState::Recovering);
     }
 
     #[test]
