@@ -121,6 +121,19 @@ impl RedisConsumer {
         Ok(())
     }
 
+    fn handle_ack_result(
+        acked: i32,
+        stream_key: &str,
+        delivery_id: &str,
+    ) -> Result<(), EventError> {
+        if acked < 0 {
+            return Err(EventError::Consumer(format!(
+                "failed to acknowledge stream entry {delivery_id} on {stream_key}: Redis reported a negative acknowledgement count"
+            )));
+        }
+        Ok(())
+    }
+
     fn is_busy_group_error(error: &RedisError) -> bool {
         error.code() == Some("BUSYGROUP")
     }
@@ -303,12 +316,7 @@ impl ReliableConsumer for RedisConsumer {
             .map_err(|e| {
                 EventError::Consumer(format!("failed to acknowledge stream entry: {e}"))
             })?;
-        if acked == 0 {
-            return Err(EventError::Consumer(format!(
-                "failed to acknowledge stream entry {delivery_id} on {stream_key}: Redis reported 0 acknowledged messages"
-            )));
-        }
-        Ok(())
+        Self::handle_ack_result(acked, stream_key, delivery_id)
     }
 
     #[instrument(skip(self, policy), fields(tenant_id = %tenant_id, stream_key = stream_key, consumer_group = consumer_group, delivery_id = delivery_id))]
@@ -325,9 +333,9 @@ impl ReliableConsumer for RedisConsumer {
         let _ = (consumer_group, delivery_id);
 
         match policy {
-            RetryPolicy::Immediate => Err(EventError::Consumer(format!(
-                "RetryPolicy::Immediate is not supported by RedisConsumer because requeueing would reorder stream entries on {stream_key}; retry the pending delivery in-process or reclaim it after idle timeout"
-            ))),
+            // Preserve the entry in the PEL so callers can retry in-process without
+            // requeueing and breaking per-key ordering.
+            RetryPolicy::Immediate => Ok(()),
             RetryPolicy::BackoffUntil(_) => unreachable!("validated above"),
         }
     }
@@ -415,6 +423,26 @@ mod tests {
         assert!(RedisConsumer::validate_stream_base("events").is_ok());
         assert!(RedisConsumer::validate_stream_base("").is_err());
         assert!(RedisConsumer::validate_stream_base("events:invalid").is_err());
+    }
+
+    #[test]
+    fn test_validate_retry_policy_rejects_delayed_retry_without_queue() {
+        let policy = RetryPolicy::BackoffUntil(Utc::now());
+        let err = RedisConsumer::validate_retry_policy(&policy).expect_err("backoff must fail");
+        assert!(matches!(err, EventError::Consumer(_)));
+    }
+
+    #[test]
+    fn test_handle_ack_result_allows_zero_for_duplicate_delivery() {
+        assert!(RedisConsumer::handle_ack_result(0, "tenant-1:events:4", "1-0").is_ok());
+        assert!(RedisConsumer::handle_ack_result(1, "tenant-1:events:4", "1-0").is_ok());
+    }
+
+    #[test]
+    fn test_handle_ack_result_rejects_negative_counts() {
+        let err = RedisConsumer::handle_ack_result(-1, "tenant-1:events:4", "1-0")
+            .expect_err("negative ack count must fail");
+        assert!(matches!(err, EventError::Consumer(_)));
     }
 
     #[test]
