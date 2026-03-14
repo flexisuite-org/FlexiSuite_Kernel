@@ -187,8 +187,9 @@ pub trait ReliableConsumer: Send + Sync {
     /// The `policy` parameter defines when the message should be retried.
     /// Implementations are expected to handle this based on the storage backend:
     /// - For Redis Streams: This might involve implementing a delay queue or
-    ///   re-inserting the message with a delay, as Redis Streams doesn't natively
-    ///   support visibility timeouts per message.
+    ///   retaining the pending delivery and retrying in-process, as Redis Streams
+    ///   doesn't natively support visibility timeouts per message while preserving
+    ///   per-key ordering.
     /// - Callers can expect at-least-once delivery; however, ordering might
     ///   be impacted during retries depending on the implementation.
     ///

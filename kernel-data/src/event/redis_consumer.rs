@@ -6,8 +6,8 @@ use crate::event::{
 use async_trait::async_trait;
 use redis::aio::ConnectionManager;
 use redis::streams::{
-    StreamAutoClaimOptions, StreamAutoClaimReply, StreamClaimReply, StreamId, StreamRangeReply,
-    StreamReadOptions, StreamReadReply,
+    StreamAutoClaimOptions, StreamAutoClaimReply, StreamClaimReply, StreamId, StreamReadOptions,
+    StreamReadReply,
 };
 use redis::{AsyncCommands, Client, RedisError};
 #[cfg(test)]
@@ -241,71 +241,6 @@ impl RedisConsumer {
 
         Ok(claimed)
     }
-
-    async fn load_delivery_payload(
-        &self,
-        tenant_id: &TenantId,
-        stream_key: &str,
-        delivery_id: &str,
-    ) -> Result<String, EventError> {
-        validate_stream_key(stream_key, tenant_id)?;
-
-        let mut conn = self.connection_manager.clone();
-        let reply: StreamRangeReply = conn
-            .xrange_count(stream_key, delivery_id, delivery_id, 1)
-            .await
-            .map_err(|e| {
-                EventError::Consumer(format!(
-                    "failed to fetch stream entry {delivery_id} for retry: {e}"
-                ))
-            })?;
-
-        let stream_id = reply.ids.into_iter().next().ok_or_else(|| {
-            EventError::Consumer(format!(
-                "stream entry {delivery_id} not found on {stream_key}"
-            ))
-        })?;
-        let delivery = Self::decode_stream_entry(stream_key, &stream_id)?;
-        serde_json::to_string(&delivery.event).map_err(EventError::Serialization)
-    }
-
-    async fn requeue_immediate_retry(
-        &self,
-        tenant_id: &TenantId,
-        stream_key: &str,
-        consumer_group: &str,
-        delivery_id: &str,
-    ) -> Result<(), EventError> {
-        let payload = self
-            .load_delivery_payload(tenant_id, stream_key, delivery_id)
-            .await?;
-
-        let mut conn = self.connection_manager.clone();
-        let _: String = conn
-            .xadd(stream_key, "*", &[("data", payload)])
-            .await
-            .map_err(|e| {
-                EventError::Consumer(format!(
-                    "failed to requeue stream entry {delivery_id} for immediate retry: {e}"
-                ))
-            })?;
-
-        let acked: i32 = conn
-            .xack(stream_key, consumer_group, &[delivery_id])
-            .await
-            .map_err(|e| {
-                EventError::Consumer(format!(
-                    "failed to acknowledge original stream entry {delivery_id} after retry requeue: {e}"
-                ))
-            })?;
-        if acked == 0 {
-            return Err(EventError::Consumer(format!(
-                "failed to acknowledge original stream entry {delivery_id} after retry requeue"
-            )));
-        }
-
-        Ok(())
-    }
 }
 
 #[async_trait]
@@ -387,12 +322,12 @@ impl ReliableConsumer for RedisConsumer {
     ) -> Result<(), EventError> {
         validate_stream_key(stream_key, tenant_id)?;
         Self::validate_retry_policy(&policy)?;
+        let _ = (consumer_group, delivery_id);
 
         match policy {
-            RetryPolicy::Immediate => {
-                self.requeue_immediate_retry(tenant_id, stream_key, consumer_group, delivery_id)
-                    .await
-            }
+            RetryPolicy::Immediate => Err(EventError::Consumer(format!(
+                "RetryPolicy::Immediate is not supported by RedisConsumer because requeueing would reorder stream entries on {stream_key}; retry the pending delivery in-process or reclaim it after idle timeout"
+            ))),
             RetryPolicy::BackoffUntil(_) => unreachable!("validated above"),
         }
     }

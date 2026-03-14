@@ -71,7 +71,9 @@ async fn test_gap_tracker_replays_after_timeout_when_outbox_has_missing_event() 
         GapRecoveryAction::ReplayApply { gap, event } => (gap, event),
         other => panic!("unexpected recovery action: {other:?}"),
     };
-    tracker.confirm_gap_replay(&gap, &replay).unwrap();
+    tracker
+        .confirm_gap_replay(&gap, &replay, start + Duration::from_secs(31))
+        .unwrap();
 
     let resolution = tracker
         .observe_delivery(&delivery, start + Duration::from_secs(32))
@@ -79,6 +81,75 @@ async fn test_gap_tracker_replays_after_timeout_when_outbox_has_missing_event() 
     assert!(matches!(
         resolution,
         kernel_core::event::DeliveryResolution::Apply
+    ));
+}
+
+#[tokio::test]
+async fn test_gap_tracker_resets_timeout_after_partial_replay() {
+    let tenant_id = TenantId::new("tenant-1").unwrap();
+    let entity_id = Uuid::now_v7();
+    let delivery = Delivery {
+        delivery_id: "1-0".to_string(),
+        stream_key: "tenant-1:events:0".to_string(),
+        event: kernel_core::event::EventEnvelope {
+            event_id: Uuid::now_v7(),
+            tenant_id: tenant_id.clone(),
+            order_mode: OrderMode::Entity {
+                entity_id,
+                seq: Some(8),
+            },
+            payload: Value::Null,
+            created_at: chrono::Utc::now(),
+            event_type: "entity.updated".to_string(),
+        },
+    };
+    let missing = kernel_core::event::EventEnvelope {
+        event_id: Uuid::now_v7(),
+        tenant_id,
+        order_mode: OrderMode::Entity {
+            entity_id,
+            seq: Some(3),
+        },
+        payload: Value::Null,
+        created_at: chrono::Utc::now(),
+        event_type: "entity.updated".to_string(),
+    };
+
+    let start = Instant::now();
+    let mut tracker = GapTracker::new(3);
+    tracker.observe_delivery(&delivery, start).unwrap();
+
+    let action = tracker
+        .recover_gap(
+            start + Duration::from_secs(31),
+            Duration::from_secs(30),
+            |_| async { Ok(Some(missing)) },
+        )
+        .await
+        .unwrap()
+        .expect("recovery action");
+
+    let (gap, replay) = match action {
+        GapRecoveryAction::ReplayApply { gap, event } => (gap, event),
+        other => panic!("unexpected recovery action: {other:?}"),
+    };
+    tracker
+        .confirm_gap_replay(&gap, &replay, start + Duration::from_secs(31))
+        .unwrap();
+
+    let next_action = tracker
+        .recover_gap(
+            start + Duration::from_secs(59),
+            Duration::from_secs(30),
+            |_| async { Ok::<Option<kernel_core::event::EventEnvelope>, _>(None) },
+        )
+        .await
+        .unwrap()
+        .expect("awaiting timeout");
+
+    assert!(matches!(
+        next_action,
+        GapRecoveryAction::AwaitingTimeout(gap) if gap.expected_seq == 4 && gap.actual_seq == 8
     ));
 }
 
