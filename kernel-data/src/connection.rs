@@ -399,7 +399,7 @@ mod tests {
         }
     }
 
-    #[cfg(not(feature = "test-utils"))]
+    #[cfg(not(any(feature = "test-utils", feature = "enable_dev_auth")))]
     mod production_parsing {
         use super::*;
 
