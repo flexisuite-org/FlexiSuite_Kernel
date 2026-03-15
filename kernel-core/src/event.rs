@@ -110,6 +110,9 @@ impl GapTracker {
                 self.expected_seq = self.expected_seq.saturating_add(1);
                 if let Some(active_gap) = self.active_gap.as_ref() {
                     if self.expected_seq < active_gap.actual_seq {
+                        // Safety: active_gap is Some, which means a gap was previously detected
+                        // and not yet closed. Therefore, self.state cannot logically be Normal here,
+                        // and progress_gap_recovery will not trigger its debug_assert.
                         self.state = progress_gap_recovery(self.state, true);
                         self.gap_started_at = Some(now);
                         self.active_gap = Some(GapObservation {
@@ -250,6 +253,10 @@ impl GapTracker {
                 actual_seq: active_gap.actual_seq,
             });
         } else {
+            // Replay has filled the final missing sequence of the active gap.
+            // We use GapRecoveryState::Recovering explicitly to guarantee transition to Normal,
+            // safely bypassing the current state (e.g. GapDetected) which would incorrectly transition
+            // to RebuildRequired if we mistakenly passed outbox_has_missing_seq=false.
             self.state = progress_gap_recovery(GapRecoveryState::Recovering, false);
             self.gap_started_at = None;
             self.active_gap = None;

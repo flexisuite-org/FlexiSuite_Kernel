@@ -139,7 +139,7 @@ pub fn verify_manifest(
         }
         metrics::counter!("verification_result", "result" => "Ok", "flow" => "manifest")
             .increment(1);
-        return VerificationResult::Ok;
+        VerificationResult::Ok
     }
 
     #[cfg(not(feature = "test-utils"))]

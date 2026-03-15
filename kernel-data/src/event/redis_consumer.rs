@@ -210,7 +210,7 @@ impl RedisConsumer {
         stream_base: &str,
         consumer_group: &str,
     ) -> String {
-        format!("{tenant_id}:{stream_base}:{consumer_group}")
+        format!("{tenant_id}:{stream_base}:cg:{consumer_group}")
     }
 
     async fn ensure_consumer_groups(
@@ -248,6 +248,9 @@ impl RedisConsumer {
                 return Ok(());
             }
         }
+        // Design note: Intentionally dropping the lock before calling ensure_consumer_groups
+        // (which does network I/O) to avoid blocking other concurrent polls. The underlying
+        // XGROUP CREATE operation is idempotent, so concurrent redundant calls are benign.
 
         self.ensure_consumer_groups(tenant_id, stream_base, consumer_group)
             .await?;
@@ -257,6 +260,7 @@ impl RedisConsumer {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn recover_nogroup_and_retry<T, F, Fut>(
         &self,
         tenant_id: &TenantId,
@@ -272,6 +276,7 @@ impl RedisConsumer {
         Fut: std::future::Future<Output = Result<T, RedisError>>,
     {
         if let Err(error) = &reply {
+            // Redis returns NOGROUP when the consumer group does not exist.
             if error.code() == Some("NOGROUP") {
                 tracing::warn!(
                     tenant_id = %tenant_id,
@@ -280,9 +285,11 @@ impl RedisConsumer {
                     "NOGROUP error detected during {}; evicting cache and recreating consumer group",
                     operation_name
                 );
-                let cache_key = Self::consumer_group_cache_key(tenant_id, stream_base, consumer_group);
+                let cache_key =
+                    Self::consumer_group_cache_key(tenant_id, stream_base, consumer_group);
                 self.ensured_consumer_groups.lock().await.remove(&cache_key);
-                self.ensure_consumer_groups_cached(tenant_id, stream_base, consumer_group).await?;
+                self.ensure_consumer_groups_cached(tenant_id, stream_base, consumer_group)
+                    .await?;
 
                 return Ok(retry_op().await);
             }
@@ -307,6 +314,7 @@ impl RedisConsumer {
         let keys = Self::stream_keys_for_tenant_ordered(tenant_id, stream_base, start_shard);
         let mut deliveries = Vec::new();
 
+        // Phase 1: Non-blocking scan across all shards to respect strict max_count
         for key in &keys {
             if deliveries.len() >= max_count {
                 break;
@@ -328,7 +336,9 @@ impl RedisConsumer {
                     reply,
                     || async {
                         let mut retry_conn = self.connection_manager.clone();
-                        retry_conn.xread_options(&[key.as_str()], &[">"], &options).await
+                        retry_conn
+                            .xread_options(&[key.as_str()], &[">"], &options)
+                            .await
                     },
                 )
                 .await?;
@@ -346,77 +356,47 @@ impl RedisConsumer {
             return Ok(deliveries);
         }
 
-        let Some(blocking_key) = keys.first() else {
-            return Ok(Vec::new());
-        };
-        let blocking_options = Self::build_read_options(
-            consumer_group,
-            consumer_name,
-            max_count,
-            Some(self.block_timeout),
-        );
+        // Phase 2: Hybrid Blocking. Listen on ALL shards concurrently to fulfill 500ms SLA.
+        // We use COUNT 1 to act as a "liveness signal" while keeping memory spike predictable (~64 events max).
+        let blocking_options =
+            Self::build_read_options(consumer_group, consumer_name, 1, Some(self.block_timeout));
+
+        let key_strs: Vec<&str> = keys.iter().map(|s| s.as_str()).collect();
+        let id_strs: Vec<&str> = vec![">"; keys.len()];
+
         let mut conn = self.connection_manager.clone();
-        let blocking_reply: Result<StreamReadReply, RedisError> = conn
-            .xread_options(&[blocking_key.as_str()], &[">"], &blocking_options)
+        let reply: Result<StreamReadReply, RedisError> = conn
+            .xread_options(&key_strs, &id_strs, &blocking_options)
             .await;
 
-        let blocking_reply = self
+        let reply = self
             .recover_nogroup_and_retry(
                 tenant_id,
                 stream_base,
-                blocking_key.as_str(),
+                key_strs[0],
                 consumer_group,
                 "blocking poll_once",
-                blocking_reply,
+                reply,
                 || async {
                     let mut retry_conn = self.connection_manager.clone();
                     retry_conn
-                        .xread_options(&[blocking_key.as_str()], &[">"], &blocking_options)
+                        .xread_options(&key_strs, &id_strs, &blocking_options)
                         .await
                 },
             )
             .await?;
 
-        let blocking_reply = blocking_reply.map_err(|e| {
+        let reply = reply.map_err(|e| {
             EventError::Consumer(format!("failed to read stream group entries: {e}"))
         })?;
-        let mut deliveries = Self::decode_stream_read(blocking_reply)?;
 
-        for key in keys.iter().skip(1) {
-            if deliveries.len() >= max_count {
-                break;
-            }
-
-            let remaining = max_count - deliveries.len();
-            let options = Self::build_read_options(consumer_group, consumer_name, remaining, None);
-            let mut conn = self.connection_manager.clone();
-            let reply: Result<StreamReadReply, RedisError> =
-                conn.xread_options(&[key.as_str()], &[">"], &options).await;
-
-            let reply = self
-                .recover_nogroup_and_retry(
-                    tenant_id,
-                    stream_base,
-                    key.as_str(),
-                    consumer_group,
-                    "fallback poll_once",
-                    reply,
-                    || async {
-                        let mut retry_conn = self.connection_manager.clone();
-                        retry_conn.xread_options(&[key.as_str()], &[">"], &options).await
-                    },
-                )
-                .await?;
-
-            let reply = reply.map_err(|e| {
-                EventError::Consumer(format!("failed to read stream group entries: {e}"))
-            })?;
-            if reply.keys.is_empty() {
-                continue;
-            }
-            deliveries.extend(Self::decode_stream_read(reply)?);
+        if reply.keys.is_empty() {
+            return Ok(Vec::new());
         }
 
+        let mut deliveries = Self::decode_stream_read(reply)?;
+        // Final safeguard: Strictly respect max_count
+        deliveries.truncate(max_count);
         Ok(deliveries)
     }
 
@@ -582,6 +562,9 @@ impl ReliableConsumer for RedisConsumer {
         }
     }
 
+    /// NACK is not supported for RedisConsumer without delayed retry queues.
+    /// Per the event semantics, pending deliveries should be retried in-process or reclaimed
+    /// via `claim_pending` after an idle timeout. Returning an error maintains sequence ordering constraints.
     #[instrument(skip(self, policy), fields(tenant_id = %tenant_id, stream_key = stream_key, consumer_group = consumer_group, delivery_id = delivery_id))]
     async fn nack(
         &self,
@@ -774,7 +757,11 @@ mod tests {
         // Teardown before setup
         let mut conn = client.get_connection_manager().await.unwrap();
         for key in RedisConsumer::stream_keys_for_tenant(&tenant_id, stream_base) {
-            let _: () = redis::cmd("DEL").arg(&key).query_async(&mut conn).await.unwrap();
+            let _: () = redis::cmd("DEL")
+                .arg(&key)
+                .query_async(&mut conn)
+                .await
+                .unwrap();
         }
 
         consumer
@@ -789,19 +776,40 @@ mod tests {
         let mut event_a = sample_event();
         event_a.tenant_id = tenant_id.clone();
         let payload_a = serde_json::to_string(&event_a).unwrap();
-        let _: () = redis::cmd("XADD").arg(key1).arg("*").arg("data").arg(&payload_a).query_async(&mut conn).await.unwrap();
+        let _: () = redis::cmd("XADD")
+            .arg(key1)
+            .arg("*")
+            .arg("data")
+            .arg(&payload_a)
+            .query_async(&mut conn)
+            .await
+            .unwrap();
 
         let mut event_b = sample_event();
         event_b.tenant_id = tenant_id.clone();
         let payload_b = serde_json::to_string(&event_b).unwrap();
-        let _: () = redis::cmd("XADD").arg(key2).arg("*").arg("data").arg(&payload_b).query_async(&mut conn).await.unwrap();
+        let _: () = redis::cmd("XADD")
+            .arg(key2)
+            .arg("*")
+            .arg("data")
+            .arg(&payload_b)
+            .query_async(&mut conn)
+            .await
+            .unwrap();
 
         // Have "other_consumer" read them to put them in PEL
         let _: () = redis::cmd("XREADGROUP")
-            .arg("GROUP").arg(consumer_group).arg("other_consumer")
-            .arg("STREAMS").arg(key1).arg(key2)
-            .arg(">").arg(">")
-            .query_async(&mut conn).await.unwrap();
+            .arg("GROUP")
+            .arg(consumer_group)
+            .arg("other_consumer")
+            .arg("STREAMS")
+            .arg(key1)
+            .arg(key2)
+            .arg(">")
+            .arg(">")
+            .query_async(&mut conn)
+            .await
+            .unwrap();
 
         let mut seen_streams = std::collections::HashSet::new();
         // Since it loops through SHARD_COUNT, we try just enough times to cover both shards.
@@ -813,13 +821,17 @@ mod tests {
                 seen_streams.insert(delivery.stream_key);
             }
         }
-        
+
         assert!(seen_streams.contains(key1.as_str()), "missing key1");
         assert!(seen_streams.contains(key2.as_str()), "missing key2");
 
         // Clean up
         for key in RedisConsumer::stream_keys_for_tenant(&tenant_id, stream_base) {
-            let _: () = redis::cmd("DEL").arg(&key).query_async(&mut conn).await.unwrap();
+            let _: () = redis::cmd("DEL")
+                .arg(&key)
+                .query_async(&mut conn)
+                .await
+                .unwrap();
         }
 
         Ok(())
