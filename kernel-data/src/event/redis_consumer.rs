@@ -343,7 +343,8 @@ impl RedisConsumer {
         }
 
         // Phase 2: Hybrid Blocking. Listen on ALL shards concurrently to fulfill 500ms SLA.
-        // We use COUNT 1 to act as a "liveness signal" while keeping memory spike predictable (~64 events max).
+        // We use COUNT 1 to act as a "liveness signal" while keeping memory spike predictable
+        // (~SHARD_COUNT events max).
         let blocking_options =
             Self::build_read_options(consumer_group, consumer_name, 1, Some(self.block_timeout));
 
@@ -564,13 +565,11 @@ impl ReliableConsumer for RedisConsumer {
         policy: RetryPolicy,
     ) -> Result<(), EventError> {
         validate_stream_key(stream_key, tenant_id)?;
+        Self::validate_retry_policy(&policy)?;
 
         match policy {
             RetryPolicy::Immediate => Ok(()),
-            RetryPolicy::BackoffUntil(_) => Err(EventError::Consumer(
-                "Redis consumer does not support BackoffUntil; use claim_pending for retries"
-                    .to_string(),
-            )),
+            _ => unreachable!("validate_retry_policy should have caught other variants"),
         }
     }
 

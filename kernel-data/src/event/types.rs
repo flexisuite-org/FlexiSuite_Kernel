@@ -304,9 +304,20 @@ mod tests {
 
         // Verifying sharding contract: namespace separation MUST be reflected in shard_input
         // even if logical_key is identical.
+        let entity_shard_input = entity_key.shard_input();
+        let causality_shard_input = causality_key.shard_input();
+
+        assert!(
+            entity_shard_input.starts_with("tenant_a:"),
+            "entity shard_input must start with tenant_id"
+        );
+        assert!(
+            causality_shard_input.starts_with("tenant_a:"),
+            "causality shard_input must start with tenant_id"
+        );
+
         assert_ne!(
-            entity_key.shard_input(),
-            causality_key.shard_input(),
+            entity_shard_input, causality_shard_input,
             "namespace must be preserved in shard_input"
         );
 

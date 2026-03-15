@@ -1,10 +1,12 @@
 use std::cmp::Ordering;
 use std::future::Future;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 pub use kernel_data::event::{
-    Delivery, EventEnvelope, EventError, OrderMode, PublishAck, ReliableConsumer, ReliableProducer,
-    RetryPolicy, SHARD_COUNT, TenantScopedOrderingKey, calculate_shard, validate_stream_key,
+    Delivery, EventEnvelope, EventError, OrderMode, OrderingKey, PublishAck, ReliableConsumer,
+    ReliableProducer, RetryPolicy, SHARD_COUNT, TenantScopedOrderingKey, calculate_shard,
+    validate_stream_key,
 };
 use serde::{Deserialize, Serialize};
 
@@ -36,7 +38,7 @@ pub enum GapRecoveryAction {
     AwaitingTimeout(GapObservation),
     ReplayApply {
         gap: GapObservation,
-        event: EventEnvelope,
+        event: Arc<EventEnvelope>,
     },
     MarkPoisonAndRebuild {
         ordering_key: TenantScopedOrderingKey,
@@ -187,7 +189,10 @@ impl GapTracker {
             if replay_key == gap.ordering_key && replay_seq == Some(gap.expected_seq) {
                 self.state = progress_gap_recovery(self.state, true);
                 self.gap_started_at = Some(now); // リプレイ完了を待つためにタイムアウト基準をリセット
-                return Ok(Some(GapRecoveryAction::ReplayApply { gap, event }));
+                return Ok(Some(GapRecoveryAction::ReplayApply {
+                    gap,
+                    event: Arc::new(event),
+                }));
             } else {
                 tracing::error!(
                     expected_key = ?gap.ordering_key,
@@ -910,7 +915,7 @@ mod tests {
         let interleaved_delivery = Delivery {
             delivery_id: "2-0".to_string(),
             stream_key: "tenant-1:events:0".to_string(),
-            event: replay.clone(),
+            event: (*replay).clone(),
         };
         let interleaved_res = tracker
             .observe_delivery(&interleaved_delivery, start + Duration::from_secs(32))
@@ -1439,5 +1444,80 @@ mod tests {
         assert_eq!(tracker.state(), GapRecoveryState::Normal);
         assert_eq!(tracker.expected_seq, 4);
         assert!(tracker.active_gap.is_none());
+    }
+
+    #[test]
+    fn test_gap_tracker_sequence_overflow() {
+        let tenant_id = TenantId::new("tenant-1").unwrap();
+        let entity_id = Uuid::now_v7();
+        let start = Instant::now();
+
+        let mut tracker = GapTracker::new(
+            TenantScopedOrderingKey {
+                tenant_id: tenant_id.clone(),
+                ordering: OrderingKey::Entity { entity_id },
+            },
+            u64::MAX,
+        );
+
+        let delivery = Delivery {
+            delivery_id: "1-0".to_string(),
+            stream_key: "tenant-1:events:0".to_string(),
+            event: EventEnvelope {
+                event_id: Uuid::now_v7(),
+                tenant_id: tenant_id.clone(),
+                order_mode: OrderMode::Entity {
+                    entity_id,
+                    seq: Some(u64::MAX),
+                },
+                payload: Value::Null,
+                created_at: Utc::now(),
+                event_type: "test".to_string(),
+            },
+        };
+
+        let res = tracker.observe_delivery(&delivery, start);
+        assert!(res.is_err());
+        assert!(res
+            .unwrap_err()
+            .to_string()
+            .contains("sequence overflow for ordering key"));
+    }
+
+    #[test]
+    fn test_gap_tracker_observe_delivery_missing_sequence() {
+        let tenant_id = TenantId::new("tenant-1").unwrap();
+        let entity_id = Uuid::now_v7();
+        let start = Instant::now();
+        let mut tracker = GapTracker::new(
+            TenantScopedOrderingKey {
+                tenant_id: tenant_id.clone(),
+                ordering: OrderingKey::Entity { entity_id },
+            },
+            1,
+        );
+
+        let delivery = Delivery {
+            delivery_id: "1-0".to_string(),
+            stream_key: "tenant-1:events:0".to_string(),
+            event: EventEnvelope {
+                event_id: Uuid::now_v7(),
+                tenant_id,
+                order_mode: OrderMode::Entity {
+                    entity_id,
+                    seq: None, // Missing sequence
+                },
+                payload: Value::Null,
+                created_at: Utc::now(),
+                event_type: "test".to_string(),
+            },
+        };
+
+        let res = tracker.observe_delivery(&delivery, start);
+        assert!(res.is_err());
+        assert!(res
+            .unwrap_err()
+            .to_string()
+            .contains("missing ordering sequence"));
     }
 }
