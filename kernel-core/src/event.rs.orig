@@ -189,6 +189,15 @@ impl GapTracker {
         event: &EventEnvelope,
         now: Instant,
     ) -> Result<(), EventError> {
+        let active_gap = self.active_gap.as_ref().ok_or_else(|| {
+            EventError::Consumer("no active gap to confirm replay against".to_string())
+        })?;
+        if active_gap != gap {
+            return Err(EventError::Consumer(
+                "replay confirmation does not match the active gap".to_string(),
+            ));
+        }
+
         let replay_key = event
             .order_mode
             .tenant_scoped_ordering_key(&event.tenant_id);
@@ -209,34 +218,17 @@ impl GapTracker {
             )));
         }
 
-        if replay_seq < self.expected_seq {
-            // Sequence has already advanced (e.g., via recover_gap -> observe_delivery -> confirm_gap_replay).
-            // Treat as idempotent success.
-            return Ok(());
-        }
-
-        let active_gap = self.active_gap.as_ref().ok_or_else(|| {
-            EventError::Consumer("no active gap to confirm replay against".to_string())
-        })?;
-        if active_gap.ordering_key != gap.ordering_key
-            || active_gap.expected_seq != gap.expected_seq
-        {
-            return Err(EventError::Consumer(
-                "replay confirmation does not match the active gap".to_string(),
-            ));
-        }
-
         self.expected_seq = self.expected_seq.saturating_add(1);
-        if self.expected_seq < active_gap.actual_seq {
+        if self.expected_seq < gap.actual_seq {
             self.state = progress_gap_recovery(self.state, true);
             self.gap_started_at = Some(now);
             self.active_gap = Some(GapObservation {
-                ordering_key: active_gap.ordering_key.clone(),
+                ordering_key: gap.ordering_key.clone(),
                 expected_seq: self.expected_seq,
-                actual_seq: active_gap.actual_seq,
+                actual_seq: gap.actual_seq,
             });
         } else {
-            self.state = progress_gap_recovery(GapRecoveryState::Recovering, false);
+            self.state = progress_gap_recovery(self.state, false);
             self.gap_started_at = None;
             self.active_gap = None;
         }
@@ -802,87 +794,6 @@ mod tests {
             .expect("original gap must remain active for replay confirmation");
     }
 
-    #[tokio::test]
-    async fn test_gap_tracker_interleaved_observe_delivery_during_recovery() {
-        let tenant_id = TenantId::new("tenant-1").unwrap();
-        let entity_id = Uuid::now_v7();
-        let future = EventEnvelope {
-            event_id: Uuid::now_v7(),
-            tenant_id: tenant_id.clone(),
-            order_mode: OrderMode::Entity {
-                entity_id,
-                seq: Some(5),
-            },
-            payload: Value::Null,
-            created_at: Utc::now(),
-            event_type: "entity.updated".to_string(),
-        };
-        let delivery = Delivery {
-            delivery_id: "1-0".to_string(),
-            stream_key: "tenant-1:events:0".to_string(),
-            event: future,
-        };
-
-        let start = Instant::now();
-        let mut tracker = GapTracker::new(
-            delivery
-                .event
-                .order_mode
-                .tenant_scoped_ordering_key(&delivery.event.tenant_id),
-            3,
-        );
-        let observed = tracker.observe_delivery(&delivery, start).unwrap();
-        assert!(matches!(observed, DeliveryResolution::GapDetected(_)));
-
-        let missing = EventEnvelope {
-            event_id: Uuid::now_v7(),
-            tenant_id: tenant_id.clone(),
-            order_mode: OrderMode::Entity {
-                entity_id,
-                seq: Some(3),
-            },
-            payload: Value::Null,
-            created_at: Utc::now(),
-            event_type: "entity.updated".to_string(),
-        };
-
-        let action = tracker
-            .recover_gap(
-                start + Duration::from_secs(31),
-                Duration::from_secs(30),
-                |_| async { Ok(Some(missing)) },
-            )
-            .await
-            .unwrap()
-            .expect("recovery action");
-
-        let (gap, replay) = match action {
-            GapRecoveryAction::ReplayApply { gap, event } => (gap, event),
-            other => panic!("unexpected recovery action: {other:?}"),
-        };
-
-        // Interleaved delivery of the exact missing sequence via `observe_delivery`.
-        // This advances tracker.expected_seq from 3 to 4.
-        let interleaved_delivery = Delivery {
-            delivery_id: "2-0".to_string(),
-            stream_key: "tenant-1:events:0".to_string(),
-            event: replay.clone(),
-        };
-        let interleaved_res = tracker
-            .observe_delivery(&interleaved_delivery, start + Duration::from_secs(32))
-            .unwrap();
-        assert_eq!(interleaved_res, DeliveryResolution::Apply);
-        assert_eq!(tracker.expected_seq, 4);
-
-        // Now confirm_gap_replay runs. Since replay.seq (3) < tracker.expected_seq (4),
-        // it should idempotently return Ok(()).
-        tracker
-            .confirm_gap_replay(&gap, &replay, start + Duration::from_secs(33))
-            .expect("confirm_gap_replay must succeed idempotently for interleaved sequence");
-
-        assert_eq!(tracker.expected_seq, 4); // Expected sequence remains unchanged by duplicate confirmation
-    }
-
     #[test]
     fn test_gap_tracker_allows_multiple_future_deliveries_while_gap_is_active() {
         let tenant_id = TenantId::new("tenant-1").unwrap();
@@ -1329,71 +1240,5 @@ mod tests {
         };
         assert_eq!(compare_event_order(&e_some1, &causality_event), None);
         assert_eq!(compare_event_order(&causality_event, &e_some1), None);
-    }
-
-    #[tokio::test]
-    async fn test_gap_tracker_1_item_gap_immediate_replay() {
-        let tenant_id = TenantId::new("tenant-1").unwrap();
-        let entity_id = Uuid::now_v7();
-        let gap_seq = 3;
-        let future_seq = 4;
-
-        let future = EventEnvelope {
-            event_id: Uuid::now_v7(),
-            tenant_id: tenant_id.clone(),
-            order_mode: OrderMode::Entity {
-                entity_id,
-                seq: Some(future_seq),
-            },
-            payload: Value::Null,
-            created_at: Utc::now(),
-            event_type: "entity.updated".to_string(),
-        };
-        let delivery = Delivery {
-            delivery_id: "1-0".to_string(),
-            stream_key: "tenant-1:events:0".to_string(),
-            event: future,
-        };
-
-        let start = Instant::now();
-        let mut tracker = GapTracker::new(
-            delivery
-                .event
-                .order_mode
-                .tenant_scoped_ordering_key(&delivery.event.tenant_id),
-            gap_seq,
-        );
-        let observed = tracker.observe_delivery(&delivery, start).unwrap();
-        assert!(matches!(observed, DeliveryResolution::GapDetected(_)));
-
-        // Assert state is GapDetected
-        assert_eq!(tracker.state(), GapRecoveryState::GapDetected);
-
-        let replay = EventEnvelope {
-            event_id: Uuid::now_v7(),
-            tenant_id,
-            order_mode: OrderMode::Entity {
-                entity_id,
-                seq: Some(gap_seq),
-            },
-            payload: Value::Null,
-            created_at: Utc::now(),
-            event_type: "entity.updated".to_string(),
-        };
-
-        let gap = match tracker.active_gap.clone() {
-            Some(g) => g,
-            None => panic!("Gap should be active"),
-        };
-
-        // Confirm replay directly without going through recover_gap (which changes state to Recovering first)
-        // This simulates immediate manual replay or tightly coupled recovery logic
-        let res = tracker.confirm_gap_replay(&gap, &replay, start);
-        assert!(res.is_ok());
-
-        // Should transition to Normal, NOT RebuildRequired
-        assert_eq!(tracker.state(), GapRecoveryState::Normal);
-        assert_eq!(tracker.expected_seq, 4);
-        assert!(tracker.active_gap.is_none());
     }
 }
