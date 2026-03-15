@@ -44,6 +44,7 @@ pub enum GapRecoveryAction {
 
 #[derive(Debug, Clone)]
 pub struct GapTracker {
+    ordering_key: TenantScopedOrderingKey,
     expected_seq: u64,
     state: GapRecoveryState,
     gap_started_at: Option<Instant>,
@@ -51,8 +52,9 @@ pub struct GapTracker {
 }
 
 impl GapTracker {
-    pub fn new(expected_seq: u64) -> Self {
+    pub fn new(ordering_key: TenantScopedOrderingKey, expected_seq: u64) -> Self {
         Self {
+            ordering_key,
             expected_seq,
             state: GapRecoveryState::Normal,
             gap_started_at: None,
@@ -62,6 +64,10 @@ impl GapTracker {
 
     pub fn expected_seq(&self) -> u64 {
         self.expected_seq
+    }
+
+    pub fn ordering_key(&self) -> &TenantScopedOrderingKey {
+        &self.ordering_key
     }
 
     pub fn state(&self) -> GapRecoveryState {
@@ -86,6 +92,16 @@ impl GapTracker {
                 delivery.delivery_id
             ))
         })?;
+        let delivery_key = delivery
+            .event
+            .order_mode
+            .tenant_scoped_ordering_key(&delivery.event.tenant_id);
+        if delivery_key != self.ordering_key {
+            return Err(EventError::Consumer(format!(
+                "delivery {} ordering key mismatch: expected {:?}, got {:?}",
+                delivery.delivery_id, self.ordering_key, delivery_key
+            )));
+        }
 
         match delivery_seq.cmp(&self.expected_seq) {
             Ordering::Less => Ok(DeliveryResolution::Duplicate),
@@ -98,10 +114,7 @@ impl GapTracker {
             }
             Ordering::Greater => {
                 let gap = GapObservation {
-                    ordering_key: delivery
-                        .event
-                        .order_mode
-                        .tenant_scoped_ordering_key(&delivery.event.tenant_id),
+                    ordering_key: self.ordering_key.clone(),
                     expected_seq: self.expected_seq,
                     actual_seq: delivery_seq,
                 };
@@ -459,7 +472,13 @@ mod tests {
         };
 
         let start = Instant::now();
-        let mut tracker = GapTracker::new(3);
+        let mut tracker = GapTracker::new(
+            delivery
+                .event
+                .order_mode
+                .tenant_scoped_ordering_key(&delivery.event.tenant_id),
+            3,
+        );
         let observed = tracker.observe_delivery(&delivery, start).unwrap();
         assert!(matches!(observed, DeliveryResolution::GapDetected(_)));
 
@@ -507,7 +526,13 @@ mod tests {
         };
 
         let start = Instant::now();
-        let mut tracker = GapTracker::new(7);
+        let mut tracker = GapTracker::new(
+            delivery
+                .event
+                .order_mode
+                .tenant_scoped_ordering_key(&delivery.event.tenant_id),
+            7,
+        );
         let observed = tracker.observe_delivery(&delivery, start).unwrap();
         assert!(matches!(observed, DeliveryResolution::GapDetected(_)));
 
@@ -551,7 +576,13 @@ mod tests {
         };
 
         let start = Instant::now();
-        let mut tracker = GapTracker::new(7);
+        let mut tracker = GapTracker::new(
+            delivery
+                .event
+                .order_mode
+                .tenant_scoped_ordering_key(&delivery.event.tenant_id),
+            7,
+        );
         tracker.observe_delivery(&delivery, start).unwrap();
         tracker
             .recover_gap(
@@ -632,7 +663,13 @@ mod tests {
         };
 
         let start = Instant::now();
-        let mut tracker = GapTracker::new(3);
+        let mut tracker = GapTracker::new(
+            delivery
+                .event
+                .order_mode
+                .tenant_scoped_ordering_key(&delivery.event.tenant_id),
+            3,
+        );
         let observed = tracker.observe_delivery(&delivery, start).unwrap();
         assert!(matches!(observed, DeliveryResolution::GapDetected(_)));
 
@@ -712,7 +749,13 @@ mod tests {
         };
 
         let start = Instant::now();
-        let mut tracker = GapTracker::new(3);
+        let mut tracker = GapTracker::new(
+            delivery
+                .event
+                .order_mode
+                .tenant_scoped_ordering_key(&delivery.event.tenant_id),
+            3,
+        );
         let observed = tracker.observe_delivery(&delivery, start).unwrap();
         assert!(matches!(observed, DeliveryResolution::GapDetected(_)));
 
@@ -748,6 +791,42 @@ mod tests {
             GapRecoveryAction::AwaitingTimeout(gap) if gap.expected_seq == 4 && gap.actual_seq == 8
         ));
         assert_eq!(tracker.state(), GapRecoveryState::Recovering);
+    }
+
+    #[test]
+    fn test_gap_tracker_rejects_foreign_ordering_key() {
+        let tenant_id = TenantId::new("tenant-1").unwrap();
+        let tracked_entity_id = Uuid::now_v7();
+        let other_entity_id = Uuid::now_v7();
+        let mut tracker = GapTracker::new(
+            OrderMode::Entity {
+                entity_id: tracked_entity_id,
+                seq: Some(1),
+            }
+            .tenant_scoped_ordering_key(&tenant_id),
+            1,
+        );
+        let delivery = Delivery {
+            delivery_id: "1-0".to_string(),
+            stream_key: "tenant-1:events:0".to_string(),
+            event: EventEnvelope {
+                event_id: Uuid::now_v7(),
+                tenant_id,
+                order_mode: OrderMode::Entity {
+                    entity_id: other_entity_id,
+                    seq: Some(1),
+                },
+                payload: Value::Null,
+                created_at: Utc::now(),
+                event_type: "entity.updated".to_string(),
+            },
+        };
+
+        let err = tracker
+            .observe_delivery(&delivery, Instant::now())
+            .expect_err("foreign ordering key must be rejected");
+
+        assert!(matches!(err, EventError::Consumer(_)));
     }
 
     #[test]

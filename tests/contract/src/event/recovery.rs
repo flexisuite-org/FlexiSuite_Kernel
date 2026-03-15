@@ -6,6 +6,17 @@ use serde_json::Value;
 use std::time::{Duration, Instant};
 use uuid::Uuid;
 
+fn entity_ordering_key(
+    tenant_id: &TenantId,
+    entity_id: Uuid,
+) -> kernel_core::event::TenantScopedOrderingKey {
+    OrderMode::Entity {
+        entity_id,
+        seq: Some(1),
+    }
+    .tenant_scoped_ordering_key(tenant_id)
+}
+
 #[tokio::test]
 async fn test_gap_recovery_found() {
     let state = progress_gap_recovery(GapRecoveryState::GapDetected, true);
@@ -54,7 +65,7 @@ async fn test_gap_tracker_replays_after_timeout_when_outbox_has_missing_event() 
     };
 
     let start = Instant::now();
-    let mut tracker = GapTracker::new(3);
+    let mut tracker = GapTracker::new(entity_ordering_key(&delivery.event.tenant_id, entity_id), 3);
     tracker.observe_delivery(&delivery, start).unwrap();
 
     let action = tracker
@@ -116,7 +127,7 @@ async fn test_gap_tracker_resets_timeout_after_partial_replay() {
     };
 
     let start = Instant::now();
-    let mut tracker = GapTracker::new(3);
+    let mut tracker = GapTracker::new(entity_ordering_key(&delivery.event.tenant_id, entity_id), 3);
     tracker.observe_delivery(&delivery, start).unwrap();
 
     let action = tracker
@@ -174,7 +185,7 @@ async fn test_gap_tracker_requests_rebuild_after_timeout_when_outbox_missing() {
     };
 
     let start = Instant::now();
-    let mut tracker = GapTracker::new(6);
+    let mut tracker = GapTracker::new(entity_ordering_key(&delivery.event.tenant_id, entity_id), 6);
     tracker.observe_delivery(&delivery, start).unwrap();
 
     let action = tracker

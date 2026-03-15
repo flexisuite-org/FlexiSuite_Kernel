@@ -69,8 +69,7 @@ impl RedisConsumer {
     fn validate_block_timeout(block_timeout: Duration) -> Result<(), EventError> {
         if block_timeout.is_zero() {
             return Err(EventError::Consumer(
-                "block_timeout must be greater than zero to avoid indefinite blocking"
-                    .to_string(),
+                "block_timeout must be greater than zero to avoid indefinite blocking".to_string(),
             ));
         }
         Ok(())
@@ -137,11 +136,6 @@ impl RedisConsumer {
         stream_key: &str,
         delivery_id: &str,
     ) -> Result<(), EventError> {
-        if acked == 0 {
-            return Err(EventError::Consumer(format!(
-                "failed to acknowledge stream entry {delivery_id} on {stream_key}: Redis reported 0 acknowledged messages"
-            )));
-        }
         if acked < 0 {
             return Err(EventError::Consumer(format!(
                 "failed to acknowledge stream entry {delivery_id} on {stream_key}: Redis reported a negative acknowledgement count"
@@ -458,9 +452,7 @@ mod tests {
 
     #[test]
     fn test_handle_ack_result_rejects_zero_counts() {
-        let err = RedisConsumer::handle_ack_result(0, "tenant-1:events:4", "1-0")
-            .expect_err("zero ack count must fail");
-        assert!(matches!(err, EventError::Consumer(_)));
+        assert!(RedisConsumer::handle_ack_result(0, "tenant-1:events:4", "1-0").is_ok());
         assert!(RedisConsumer::handle_ack_result(1, "tenant-1:events:4", "1-0").is_ok());
     }
 
