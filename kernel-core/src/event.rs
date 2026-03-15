@@ -172,6 +172,7 @@ impl GapTracker {
         let maybe_missing = lookup_missing(gap.clone()).await?;
         if let Some(event) = maybe_missing {
             self.state = progress_gap_recovery(self.state, true);
+            self.gap_started_at = Some(now); // リプレイ完了を待つためにタイムアウト基準をリセット
             return Ok(Some(GapRecoveryAction::ReplayApply { gap, event }));
         }
 
