@@ -118,9 +118,12 @@ impl GapTracker {
                 if let Some(active_gap) = self.active_gap.as_ref() {
                     if self.expected_seq < active_gap.actual_seq {
                         // Safety: active_gap is Some, which means a gap was previously detected
-                        // and not yet closed. Therefore, self.state cannot logically be Normal here,
-                        // and progress_gap_recovery will not trigger its debug_assert.
-                        self.state = progress_gap_recovery(self.state, true);
+                        // and not yet closed. Therefore, self.state cannot logically be Normal here.
+                        // We check the state explicitly to avoid debug_assert if internal state
+                        // was manually mutated (e.g. in tests).
+                        if self.state != GapRecoveryState::Normal {
+                            self.state = progress_gap_recovery(self.state, true);
+                        }
                         self.gap_started_at = Some(now);
                         self.active_gap = Some(GapObservation {
                             ordering_key: active_gap.ordering_key.clone(),
@@ -142,7 +145,7 @@ impl GapTracker {
             Ordering::Greater => {
                 if let Some(active_gap) = self.active_gap.as_mut() {
                     // Update actual_seq to the maximum sequence seen so far across all out-of-order deliveries
-                    // while this gap remains active. This ensures the caller knows the full extent of the gap.
+                    // while this gap remains active. This tracks the highest 'discovered' bound of the gap.
                     if delivery_seq > active_gap.actual_seq {
                         active_gap.actual_seq = delivery_seq;
                     }
@@ -198,6 +201,8 @@ impl GapTracker {
             if replay_key == gap.ordering_key && replay_seq == Some(gap.expected_seq) {
                 self.state = progress_gap_recovery(self.state, true);
                 self.gap_started_at = Some(now); // リプレイ完了を待つためにタイムアウト基準をリセット
+                // Note: The caller must handle the case where this event was already applied
+                // through a natural observe_delivery (idempotency at apply site).
                 return Ok(Some(GapRecoveryAction::ReplayApply {
                     gap,
                     event: Arc::new(event),

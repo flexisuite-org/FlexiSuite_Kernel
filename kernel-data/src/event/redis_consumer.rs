@@ -220,7 +220,8 @@ impl RedisConsumer {
         stream_base: &str,
         consumer_group: &str,
     ) -> String {
-        format!("{tenant_id}:{stream_base}:cg:{consumer_group}")
+        // Use 'cache:cg' to avoid collision with stream key format '{tenant}:{base}:{shard}'
+        format!("{tenant_id}:{stream_base}:cache:cg:{consumer_group}")
     }
 
     async fn ensure_consumer_groups(
@@ -326,6 +327,7 @@ impl RedisConsumer {
             .next_poll_start_shard
             .fetch_add(1, AtomicOrdering::Relaxed)
             % shard_count;
+        // In the rare event of usize overflow, the modulo produces a negligible fairness blip.
         let keys = Self::stream_keys_for_tenant_ordered(tenant_id, stream_base, start_shard);
         let mut deliveries = Vec::new();
 
@@ -373,6 +375,8 @@ impl RedisConsumer {
 
         // Phase 2: Blocking Fallback. Read from a single shard to provide fair coverage over time.
         // pass false to NOACK to ensure at-least-once delivery.
+        // Note: Blocking on a single shard means worst-case latency for a message on a specific
+        // shard can be (SHARD_COUNT * block_timeout) during periods of zero activity.
         let blocking_options =
             Self::build_read_options(consumer_group, consumer_name, 1, Some(self.block_timeout), false);
 
