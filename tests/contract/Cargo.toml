@@ -37,6 +37,8 @@ ed25519-dalek = { workspace = true }
 rand = "0.8"
 uuid = { version = "1", features = ["v7", "serde"] }
 sea-orm = { version = "1.1.19", features = ["mock", "runtime-tokio-rustls"] }
+redis = { version = "1.0.3", features = ["tokio-comp"] }
+twox-hash = "2.1.2"
 
 [features]
 test-utils = ["kernel-core/test-utils", "kernel-api/test-utils"]

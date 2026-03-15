@@ -241,7 +241,9 @@ async fn test_gap_tracker_defers_later_future_deliveries_while_gap_is_active() {
         },
     };
 
-    let detected = tracker.observe_delivery(&first_delivery, Instant::now()).unwrap();
+    let detected = tracker
+        .observe_delivery(&first_delivery, Instant::now())
+        .unwrap();
     assert!(matches!(
         detected,
         kernel_core::event::DeliveryResolution::GapDetected(_)

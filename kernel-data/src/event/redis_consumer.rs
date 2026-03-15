@@ -13,7 +13,7 @@ use redis::{AsyncCommands, Client, RedisError};
 #[cfg(test)]
 use std::hash::Hasher;
 use std::time::Duration;
-use tracing::instrument;
+use tracing::{instrument, warn};
 #[cfg(test)]
 use twox_hash::XxHash64;
 
@@ -137,9 +137,12 @@ impl RedisConsumer {
         delivery_id: &str,
     ) -> Result<(), EventError> {
         if acked == 0 {
-            return Err(EventError::Consumer(format!(
-                "failed to acknowledge stream entry {delivery_id} on {stream_key}: Redis reported that no pending entry matched the provided consumer group"
-            )));
+            warn!(
+                stream_key = stream_key,
+                delivery_id = delivery_id,
+                "xack reported no pending entry; treating ack as idempotent success"
+            );
+            return Ok(());
         }
         if acked < 0 {
             return Err(EventError::Consumer(format!(
@@ -162,7 +165,7 @@ impl RedisConsumer {
         for key in Self::stream_keys_for_tenant(tenant_id, stream_base) {
             let mut conn = self.connection_manager.clone();
             let create_group: Result<(), RedisError> =
-                conn.xgroup_create_mkstream(&key, consumer_group, "0").await;
+                conn.xgroup_create_mkstream(&key, consumer_group, "$").await;
             if let Err(error) = create_group {
                 if Self::is_busy_group_error(&error) {
                     continue;
@@ -456,10 +459,8 @@ mod tests {
     }
 
     #[test]
-    fn test_handle_ack_result_rejects_zero_counts() {
-        let err = RedisConsumer::handle_ack_result(0, "tenant-1:events:4", "1-0")
-            .expect_err("zero ack count must fail");
-        assert!(matches!(err, EventError::Consumer(_)));
+    fn test_handle_ack_result_treats_zero_count_as_idempotent_success() {
+        assert!(RedisConsumer::handle_ack_result(0, "tenant-1:events:4", "1-0").is_ok());
     }
 
     #[test]

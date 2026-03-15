@@ -1331,6 +1331,7 @@ dependencies = [
  "kernel-core",
  "kernel-data",
  "rand 0.8.5",
+ "redis",
  "reqwest",
  "rusty_paseto",
  "sea-orm",
@@ -1342,6 +1343,7 @@ dependencies = [
  "tower-http 0.5.2",
  "tracing",
  "tracing-subscriber",
+ "twox-hash",
  "url",
  "uuid",
 ]
