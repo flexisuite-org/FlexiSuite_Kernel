@@ -1,4 +1,6 @@
-use crate::api::middleware_integration::{setup_app, setup_app_with_db};
+use crate::api::middleware_integration::setup_app;
+#[cfg(not(feature = "dev-auth"))]
+use crate::api::middleware_integration::setup_app_with_db;
 use crate::auth::helpers::setup;
 // generate_token_with_claims is always needed for tests that need specific tenant/user claims.
 // generate_token is only used when dev-auth feature is NOT enabled (real Bearer token path).
@@ -98,6 +100,27 @@ async fn test_security_headers_present_on_401_unauthorized() {
         .uri("/test")
         .method("POST")
         .header("Idempotency-Key", "security-401-test")
+        .body(Body::empty())
+        .unwrap();
+
+    let res = app.oneshot(req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+
+    assert_security_headers(&res);
+}
+
+#[tokio::test]
+#[cfg(not(feature = "dev-auth"))]
+async fn test_dev_auth_headers_are_rejected_without_enable_dev_auth() {
+    setup();
+    let app = setup_app().await;
+
+    let req = Request::builder()
+        .uri("/test")
+        .method("POST")
+        .header("Idempotency-Key", "security-dev-auth-disabled")
+        .header("X-Tenant-Id", "tenant-1")
+        .header("X-User-Id", "user-1")
         .body(Body::empty())
         .unwrap();
 
