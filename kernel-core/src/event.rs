@@ -193,10 +193,16 @@ impl GapTracker {
         let replay_key = event
             .order_mode
             .tenant_scoped_ordering_key(&event.tenant_id);
-        if replay_key != gap.ordering_key {
+        if replay_key != self.ordering_key {
             return Err(EventError::Consumer(format!(
                 "replay confirmation ordering key mismatch: expected {:?}, got {:?}",
-                gap.ordering_key, replay_key
+                self.ordering_key, replay_key
+            )));
+        }
+        if gap.ordering_key != self.ordering_key {
+            return Err(EventError::Consumer(format!(
+                "replay confirmation gap ordering key mismatch: expected {:?}, got {:?}",
+                self.ordering_key, gap.ordering_key
             )));
         }
 

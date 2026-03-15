@@ -555,9 +555,12 @@ impl ReliableConsumer for RedisConsumer {
                     stream_key = stream_key,
                     consumer_group = consumer_group,
                     delivery_id = delivery_id,
-                    "NOGROUP error during ack; treating as idempotent success since pending state formulation is lost"
+                    "NOGROUP error during ack: consumer group does not exist"
                 );
-                Ok(())
+                Err(EventError::Consumer(format!(
+                    "failed to acknowledge stream entry {} on {} for group {}: consumer group does not exist",
+                    delivery_id, stream_key, consumer_group
+                )))
             }
             Err(e) => Err(EventError::Consumer(format!(
                 "failed to acknowledge stream entry: {e}"
