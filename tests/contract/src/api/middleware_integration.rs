@@ -85,6 +85,23 @@ pub fn mock_db_with_budget(auth_calls: usize) -> sea_orm::DatabaseConnection {
 pub fn mock_db_with_empty_permissions(auth_calls: usize) -> sea_orm::DatabaseConnection {
     let mut db = MockDatabase::new(DatabaseBackend::Postgres);
     for _ in 0..auth_calls {
+        #[cfg(feature = "dev-auth")]
+        {
+            let now = Utc::now();
+            db = db.append_query_results([vec![key_record::Model {
+                kid: "hmac-key-1".to_string(),
+                key_type: key_record::KeyType::Hmac,
+                algorithm: "HS256".to_string(),
+                secret_bytes: Some(vec![0u8; 32]),
+                public_bytes: None,
+                state: key_record::KeyState::Active,
+                created_at: now.into(),
+                activated_at: Some(now.into()),
+                retired_at: None,
+                revoked_at: None,
+                expires_at: None,
+            }]]);
+        }
         db = db.append_exec_results([MockExecResult {
             last_insert_id: 0,
             rows_affected: 1,
@@ -156,9 +173,17 @@ pub fn mock_db_with_bridge_budget(auth_calls: usize) -> sea_orm::DatabaseConnect
 
 fn default_mock_db() -> sea_orm::DatabaseConnection {
     // Default mock that allows up to 20 successful authorizations and permission checks.
-    // This covers most integration tests that expect success.
+    // In dev-auth builds, protected routes still bridge onto a v2 tenant token for DB auth.
     // Tests expecting failure or specific DB behavior should use setup_app_with_db.
-    mock_db_with_budget(20)
+    #[cfg(feature = "dev-auth")]
+    {
+        return mock_db_with_bridge_budget(20);
+    }
+
+    #[cfg(not(feature = "dev-auth"))]
+    {
+        return mock_db_with_budget(20);
+    }
 }
 
 pub async fn setup_app() -> axum::Router {
@@ -362,8 +387,8 @@ async fn test_rbac_fail_closed_with_empty_permissions_fixture() {
 
 #[tokio::test]
 #[cfg(feature = "dev-auth")]
-async fn test_dev_auth_uses_dev_token_for_db_authorization() {
-    let app = setup_app_with_db(mock_db_with_budget(1)).await;
+async fn test_dev_auth_bridges_to_v2_token_for_db_authorization() {
+    let app = setup_app_with_db(mock_db_with_bridge_budget(1)).await;
 
     let req = Request::builder()
         .uri("/test")
