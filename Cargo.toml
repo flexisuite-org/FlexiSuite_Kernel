@@ -14,3 +14,4 @@ members = [
 
 [workspace.dependencies]
 ed25519-dalek = { version = "=2.2.0", features = ["rand_core"] }
+twox-hash = "=2.1.2"

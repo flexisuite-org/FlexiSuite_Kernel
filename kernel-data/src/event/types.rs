@@ -33,16 +33,73 @@ pub enum OrderMode {
     },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "namespace", rename_all = "snake_case")]
+pub enum OrderingKey {
+    Entity { entity_id: Uuid },
+    Causality { key: String },
+}
+
+impl OrderingKey {
+    pub fn logical_key(&self) -> String {
+        match self {
+            OrderingKey::Entity { entity_id } => entity_id.to_string(),
+            OrderingKey::Causality { key } => key.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TenantScopedOrderingKey {
+    pub tenant_id: TenantId,
+    #[serde(flatten)]
+    pub ordering: OrderingKey,
+}
+
+impl TenantScopedOrderingKey {
+    pub fn logical_key(&self) -> String {
+        self.ordering.logical_key()
+    }
+
+    pub fn shard_input(&self) -> String {
+        match &self.ordering {
+            OrderingKey::Entity { entity_id } => format!("{}:e:{}", self.tenant_id, entity_id),
+            OrderingKey::Causality { key } => format!("{}:c:{}", self.tenant_id, key),
+        }
+    }
+
+    pub fn shard(&self) -> u64 {
+        calculate_shard(&self.shard_input())
+    }
+}
+
 impl OrderMode {
     pub fn entity_or_causality_key(&self) -> String {
+        self.ordering_key().logical_key()
+    }
+
+    pub fn ordering_key(&self) -> OrderingKey {
         match self {
-            OrderMode::Entity { entity_id, .. } => entity_id.to_string(),
-            OrderMode::Causality { key, .. } => key.clone(),
+            OrderMode::Entity { entity_id, .. } => OrderingKey::Entity {
+                entity_id: *entity_id,
+            },
+            OrderMode::Causality { key, .. } => OrderingKey::Causality { key: key.clone() },
+        }
+    }
+
+    pub fn tenant_scoped_ordering_key(&self, tenant_id: &TenantId) -> TenantScopedOrderingKey {
+        TenantScopedOrderingKey {
+            tenant_id: tenant_id.clone(),
+            ordering: self.ordering_key(),
         }
     }
 
     pub fn shard_input(&self, tenant_id: &TenantId) -> String {
-        format!("{}:{}", tenant_id, self.entity_or_causality_key())
+        self.tenant_scoped_ordering_key(tenant_id).shard_input()
+    }
+
+    pub fn shard(&self, tenant_id: &TenantId) -> u64 {
+        self.tenant_scoped_ordering_key(tenant_id).shard()
     }
 
     pub fn seq(&self) -> Option<u64> {
@@ -92,6 +149,16 @@ pub fn validate_stream_key(stream_key: &str, tenant_id: &TenantId) -> Result<(),
     Ok(())
 }
 
+/// Authoritative sharding algorithm for FlexiSuite events.
+/// Uses XxHash64 for high-performance deterministic hashing.
+pub fn calculate_shard(key: &str) -> u64 {
+    use std::hash::Hasher;
+    use twox_hash::XxHash64;
+    let mut hasher = XxHash64::default();
+    hasher.write(key.as_bytes());
+    hasher.finish() % SHARD_COUNT
+}
+
 #[async_trait]
 pub trait ReliableProducer: Send + Sync {
     async fn publish(
@@ -114,6 +181,12 @@ pub trait ReliableConsumer: Send + Sync {
     /// `stream_base` is a logical stream name (e.g., `orders`) and MUST NOT include tenant prefix.
     /// Implementations MUST scope by `tenant_id` and internally fan-out across shards
     /// (e.g., `{tenant_id}:{stream}:0`..`{tenant_id}:{stream}:63`).
+    ///
+    /// ### Out-of-order Protocol
+    /// If an implementation uses `GapTracker`, deliveries returning `DeliveryResolution::Deferred`
+    /// MUST be buffered by the caller. These buffered deliveries MUST be re-processed (re-fed to
+    /// `observe_delivery`) only AFTER the corresponding gap is successfully closed (indicated by
+    /// a successful `confirm_gap_replay` or a subsequent natural `Ordering::Equal` match).
     async fn poll(
         &self,
         tenant_id: &TenantId,
@@ -141,8 +214,9 @@ pub trait ReliableConsumer: Send + Sync {
     /// The `policy` parameter defines when the message should be retried.
     /// Implementations are expected to handle this based on the storage backend:
     /// - For Redis Streams: This might involve implementing a delay queue or
-    ///   re-inserting the message with a delay, as Redis Streams doesn't natively
-    ///   support visibility timeouts per message.
+    ///   retaining the pending delivery and retrying in-process, as Redis Streams
+    ///   doesn't natively support visibility timeouts per message while preserving
+    ///   per-key ordering.
     /// - Callers can expect at-least-once delivery; however, ordering might
     ///   be impacted during retries depending on the implementation.
     ///
@@ -186,6 +260,27 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_calculate_shard_golden_vectors() {
+        // These values are pinned to the current behavior of XxHash64 and SHARD_COUNT=64
+        // to detect any accidental changes in hashing or partitioning.
+        let cases = [
+            ("tenant-1:e:entity-1", 21),
+            ("tenant-1:e:entity-2", 45),
+            ("tenant-2:c:causality-1", 26),
+            ("tenant-3:e:user-99", 30),
+        ];
+
+        for (input, expected_shard) in cases {
+            assert_eq!(
+                calculate_shard(input),
+                expected_shard,
+                "shard mismatch for input: {}",
+                input
+            );
+        }
+    }
+
+    #[test]
     fn test_validate_stream_key() {
         let tenant_id = TenantId::new("tenant_a").expect("Valid tenant ID");
 
@@ -213,5 +308,74 @@ mod tests {
             // If "tenant/a" is valid, then "tenant/a:..." should work
             assert!(validate_stream_key("tenant/a:stream:0", &weird_tenant).is_ok());
         }
+    }
+
+    #[test]
+    fn test_tenant_scoped_ordering_key_preserves_namespace() {
+        let tenant_id = TenantId::new("tenant_a").unwrap();
+        let entity_id = Uuid::now_v7();
+        let entity_key = OrderMode::Entity {
+            entity_id,
+            seq: Some(1),
+        }
+        .tenant_scoped_ordering_key(&tenant_id);
+        let causality_key = OrderMode::Causality {
+            key: entity_id.to_string(),
+            seq: Some(1),
+        }
+        .tenant_scoped_ordering_key(&tenant_id);
+
+        assert_ne!(entity_key, causality_key);
+        assert_eq!(entity_key.logical_key(), entity_id.to_string());
+        assert_eq!(causality_key.logical_key(), entity_id.to_string());
+
+        // Verifying sharding contract: namespace separation MUST be reflected in shard_input
+        // even if logical_key is identical.
+        let entity_shard_input = entity_key.shard_input();
+        let causality_shard_input = causality_key.shard_input();
+
+        assert!(
+            entity_shard_input.starts_with("tenant_a:"),
+            "entity shard_input must start with tenant_id"
+        );
+        assert!(
+            causality_shard_input.starts_with("tenant_a:"),
+            "causality shard_input must start with tenant_id"
+        );
+
+        assert_ne!(
+            entity_shard_input, causality_shard_input,
+            "namespace must be preserved in shard_input"
+        );
+
+        // While unlikely, shard() could collide due to mod 64.
+        // But shard_input() must be strictly different for isolation.
+    }
+
+    #[test]
+    fn test_shard_pinnnig_contract() {
+        // This test pins the shard calculation to prevent silent routing changes.
+        // If these values change, it BREAKS backward compatibility with existing Redis Streams.
+        
+        let tenant_a = TenantId::new("tenant_a").unwrap();
+        let entity_id = Uuid::parse_str("018e404b-7000-7000-8000-000000000001").unwrap();
+        
+        // Entity: tenant_a:e:018e404b-7000-7000-8000-000000000001
+        let entity_key = OrderingKey::Entity { entity_id };
+        let scoped_e = TenantScopedOrderingKey {
+            tenant_id: tenant_a.clone(),
+            ordering: entity_key,
+        };
+        assert_eq!(scoped_e.shard_input(), "tenant_a:e:018e404b-7000-7000-8000-000000000001");
+        assert_eq!(scoped_e.shard(), 33); // Deterministic hash % 64
+
+        // Causality: tenant_a:c:user_data_123
+        let causality_key = OrderingKey::Causality { key: "user_data_123".to_string() };
+        let scoped_c = TenantScopedOrderingKey {
+            tenant_id: tenant_a,
+            ordering: causality_key,
+        };
+        assert_eq!(scoped_c.shard_input(), "tenant_a:c:user_data_123");
+        assert_eq!(scoped_c.shard(), 29); // Deterministic hash % 64
     }
 }
