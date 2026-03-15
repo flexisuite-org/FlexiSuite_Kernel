@@ -1,6 +1,11 @@
 #![allow(clippy::items_after_test_module)]
 #![allow(clippy::collapsible_if)]
 
+#[cfg(all(not(test), not(debug_assertions), feature = "enable_dev_auth"))]
+compile_error!(
+    "feature \"enable_dev_auth\" must not be enabled in release builds; remove it from production dependencies or CI"
+);
+
 use crate::auth_context::TenantContext;
 use crate::error::DataError;
 use futures::future::BoxFuture;
@@ -186,7 +191,7 @@ fn parse_tenant_from_token(token: &str) -> Option<String> {
         }
     }
 
-    #[cfg(feature = "test-utils")]
+    #[cfg(any(feature = "test-utils", feature = "enable_dev_auth"))]
     if let Some(tenant_id) = token.strip_prefix("dev-token:") {
         // Special dev token for tests/debug with tenant ID
         if !tenant_id.is_empty() {
@@ -194,7 +199,7 @@ fn parse_tenant_from_token(token: &str) -> Option<String> {
         }
     }
 
-    #[cfg(not(feature = "test-utils"))]
+    #[cfg(not(any(feature = "test-utils", feature = "enable_dev_auth")))]
     if token.starts_with("dev-token:") {
         warn!("dev-token encountered in non-test build; parsing rejected");
         return None;
@@ -399,7 +404,7 @@ mod tests {
         }
     }
 
-    #[cfg(not(feature = "test-utils"))]
+    #[cfg(not(any(feature = "test-utils", feature = "enable_dev_auth")))]
     mod production_parsing {
         use super::*;
 

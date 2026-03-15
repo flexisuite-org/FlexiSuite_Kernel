@@ -45,4 +45,5 @@ ed25519-dalek = { workspace = true }
 rand = "0.8"
 
 [features]
+enable_dev_auth = ["kernel-data/enable_dev_auth"]
 test-utils = ["kernel-data/test-utils"]

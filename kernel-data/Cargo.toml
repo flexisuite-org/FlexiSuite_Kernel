@@ -39,4 +39,6 @@ testcontainers-modules = { version = "0.3", features = ["postgres"] }
 kernel-data = { path = ".", features = ["test-utils"] }
 
 [features]
+default = []
+enable_dev_auth = []
 test-utils = ["sea-orm/mock"]

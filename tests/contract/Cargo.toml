@@ -43,4 +43,4 @@ test-utils = ["kernel-core/test-utils", "kernel-api/test-utils"]
 # Enables dev authentication path (X-Tenant-Id/X-User-Id headers) for local development and testing.
 # When enabled, tests use debug headers instead of real PASETO tokens.
 # CI/release tests should run without this feature to exercise the real Bearer token path.
-dev-auth = ["kernel-api/test-utils"]
+dev-auth = ["kernel-api/enable_dev_auth"]
