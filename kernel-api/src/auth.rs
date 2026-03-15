@@ -1,6 +1,6 @@
-#[cfg(all(not(test), not(debug_assertions), feature = "test-utils"))]
+#[cfg(all(not(test), not(debug_assertions), feature = "enable_dev_auth"))]
 compile_error!(
-    "feature \"test-utils\" must not be enabled in release builds; remove it from production dependencies or CI"
+    "feature \"enable_dev_auth\" must not be enabled in release builds; remove it from production dependencies or CI"
 );
 use axum::{
     body::Body,
@@ -43,7 +43,7 @@ struct PasetoFooter {
     kid: String,
 }
 
-/// REQ-AUTH-SOURCE: Extract TenantContext from token or dev-headers (test-only build path)
+/// REQ-AUTH-SOURCE: Extract TenantContext from token or dev-headers (test-only or explicit dev-auth build path)
 pub async fn auth_middleware(
     State(db): State<Arc<DatabaseConnection>>,
     mut req: Request<Body>,
@@ -72,7 +72,7 @@ pub async fn auth_middleware(
             }
         }
     } else {
-        #[cfg(any(test, feature = "test-utils"))]
+        #[cfg(any(test, feature = "enable_dev_auth"))]
         {
             if let Some(tenant_id_header) = req.headers().get("X-Tenant-Id") {
                 let tenant_id_str = tenant_id_header.to_str().map_err(|_| {
@@ -103,13 +103,13 @@ pub async fn auth_middleware(
                 )
             } else {
                 tracing::warn!(
-                    "Missing Authorization header (and no X-Tenant-Id for debug bypass)"
+                    "Missing Authorization header (and no X-Tenant-Id for development auth)"
                 );
                 return Err(StatusCode::UNAUTHORIZED);
             }
         }
 
-        #[cfg(not(any(test, feature = "test-utils")))]
+        #[cfg(not(any(test, feature = "enable_dev_auth")))]
         {
             tracing::warn!("Missing Authorization header");
             return Err(StatusCode::UNAUTHORIZED);
@@ -214,10 +214,10 @@ fn insert_dynamic_revoked_kid(raw_kid: &str, source: &'static str) {
         return;
     }
 
-    if raw_kid.as_bytes().len() > MAX_KID_BYTES {
+    if raw_kid.len() > MAX_KID_BYTES {
         tracing::warn!(
             source = source,
-            raw_len = raw_kid.as_bytes().len(),
+            raw_len = raw_kid.len(),
             max_len = MAX_KID_BYTES,
             "KID revocation listener: payload too large; ignored"
         );
@@ -232,10 +232,10 @@ fn insert_dynamic_revoked_kid(raw_kid: &str, source: &'static str) {
         );
         return;
     }
-    if trimmed.as_bytes().len() > MAX_KID_BYTES {
+    if trimmed.len() > MAX_KID_BYTES {
         tracing::warn!(
             source = source,
-            kid_len = trimmed.as_bytes().len(),
+            kid_len = trimmed.len(),
             max_len = MAX_KID_BYTES,
             "KID revocation listener: KID too large after trim; ignored"
         );

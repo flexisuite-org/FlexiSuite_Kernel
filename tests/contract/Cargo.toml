@@ -37,10 +37,14 @@ ed25519-dalek = { workspace = true }
 rand = "0.8"
 uuid = { version = "1", features = ["v7", "serde"] }
 sea-orm = { version = "1.1.19", features = ["mock", "runtime-tokio-rustls"] }
+redis = { version = "1.0.3", features = ["tokio-comp"] }
+twox-hash = { workspace = true }
+testcontainers = "0.27"
+testcontainers-modules = { version = "0.15", features = ["redis"] }
 
 [features]
 test-utils = ["kernel-core/test-utils", "kernel-api/test-utils"]
 # Enables dev authentication path (X-Tenant-Id/X-User-Id headers) for local development and testing.
 # When enabled, tests use debug headers instead of real PASETO tokens.
 # CI/release tests should run without this feature to exercise the real Bearer token path.
-dev-auth = ["kernel-api/test-utils"]
+dev-auth = ["kernel-api/enable_dev_auth"]

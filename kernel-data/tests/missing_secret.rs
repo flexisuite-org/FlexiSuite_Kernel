@@ -12,15 +12,13 @@ use common::auth::TestAuth;
 use kernel_data::connection::with_tenant_tx;
 use migration::MigratorTrait;
 use sea_orm::{ConnectionTrait, Database};
-use testcontainers::{RunnableImage, clients};
+use testcontainers::{ImageExt, runners::AsyncRunner};
 use testcontainers_modules::postgres::Postgres;
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_auth_failures() {
-    let docker = clients::Cli::default();
-    let image = RunnableImage::from(Postgres::default()).with_tag("15-alpine");
-    let node = docker.run(image);
-    let port = node.get_host_port_ipv4(5432);
+    let node = Postgres::default().with_tag("15-alpine").start().await.expect("start postgres");
+    let port = node.get_host_port_ipv4(5432).await.expect("get port");
     let connection_string = format!("postgres://postgres:postgres@127.0.0.1:{}/postgres", port);
 
     let db = Database::connect(&connection_string)

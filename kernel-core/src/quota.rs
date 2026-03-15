@@ -37,11 +37,11 @@ impl QuotaViolation {
             }
             QuotaLayer::TenantBudget => {
                 // Client-facing retries follow non-zero minimum and hard one-year ceiling.
-                self.retry_after_s.max(1).min(31_536_000)
+                self.retry_after_s.clamp(1, 31_536_000)
             }
             QuotaLayer::ApiRateLimit => {
                 // Guard: Cap at 1 year (31,536,000s) to prevent overflow/abuse
-                self.retry_after_s.max(1).min(31_536_000)
+                self.retry_after_s.clamp(1, 31_536_000)
             }
         };
         headers.push(("Retry-After".to_string(), value.to_string()));

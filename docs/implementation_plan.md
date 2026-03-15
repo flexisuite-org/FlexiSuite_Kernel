@@ -458,6 +458,7 @@ KMS (Key Management Service) を前提とした鍵ライフサイクルを規定
   - `action_id` と `idempotency_key` の対応はサーバー側で保持し、クライアントに複合キー再構築を要求してはならない **(MUST NOT)**。
 - **Result Inquiry**: 重い処理やすぐにリトライできない場合のために、`GET /actions/{action_id}` エンドポイントを提供し、処理結果（`PENDING | COMPLETED | FAILED`）を返却**しなければならない (MUST)**。
 - **Server Behavior**: サーバーは `action_id` と `idempotency_key` の処理結果を **24時間** 保持し、同一キーかつ同一ハッシュの再送に対しては既存 `action_id` の結果を返す（処理の再実行をしない）。
+- **Backend Requirement**: multi-instance 本番構成では、冪等性ストアは共有バックエンド（Redis 等）を使用しなければならない **(MUST)**。`InMemoryIdempotencyStore` へのフォールバックは `REQUIRE_REDIS=false` を明示したローカル開発用途に限定し、本番構成で暗黙に許容してはならない **(MUST NOT)**。
 
 ---
 
@@ -504,8 +505,9 @@ RETURNING last_seq;
   - `UNIQUE(entity_id, entity_seq) WHERE order_mode = 'entity'`
   - `UNIQUE(causality_key, causality_seq) WHERE order_mode = 'causality'`
 - **ルーティング規約 (v1で有効)**:
-  - `order_mode = "entity"` のイベントは `events:{hash(entity_id) % N}` にルーティングする。
-  - `order_mode = "causality"` のイベントは `events:{hash(causality_key) % N}` にルーティングする。
+  - `order_mode = "entity"` のイベントは `events:{hash(format!("{}:e:{}", tenant_id, entity_id)) % N}` にルーティングする。
+  - `order_mode = "causality"` のイベントは `events:{hash(format!("{}:c:{}", tenant_id, causality_key)) % N}` にルーティングする。
+  - **シャード入力の固定**: マルチテナント間の完全な隔離と名前空間（Entity/Causality）の競合回避のため、シャード計算の入力文字列は `{tenant_id}:{prefix}:{key}` 形式を強制する。
   - 同一 `entity_id` で `entity` モードと `causality` モードを混在させてはならない **(MUST NOT)**。
   - `causality` モードを採用した `entity_id` は、全イベントで同一 `causality_key` を使用**しなければならない (MUST)**。
 
@@ -862,7 +864,7 @@ Kernelはエラー発生時や診断要求に対し、以下の構造化デー�
 - **Goal**: `kernel-core` で定義した契約ロジックを Axum ミドルウェアとして統合し、HTTP フローで強制する。
 - **Middleware Chain**: `Auth` → `Idempotency` → `Quota` の順で適用。
 - **Security Policy (REQ-AUTH-SEC)**:
-  - `X-Tenant-Id` ヘッダは `dev_only` (cfg(debug_assertions)) とし、Release ビルドではトークン検証のみを信頼する。
+  - `X-Tenant-Id` / `X-User-Id` ヘッダは `dev_only` (`feature = "enable_dev_auth"`) とし、既定機能に含めてはならない **(MUST NOT)**。Release ビルドでは当該 feature を有効化してはならず、トークン検証のみを信頼する **(MUST)**。
   - `401 Unauthorized` (Identity 未確定) と `403 Forbidden` (権限/テナント境界不足) を厳格に使い分ける。
 - **Idempotency Scope**: `(tenant, method, target, key)` の複合キーで 24h 保持。
 - **Quota Priority**: `System Hard Limit` (1-30s clip) → `Tenant` → `API` の順で短絡評価。
