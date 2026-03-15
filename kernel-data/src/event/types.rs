@@ -261,7 +261,7 @@ mod tests {
 
     #[test]
     fn test_calculate_shard_golden_vectors() {
-        // These values are pinned to the current behavior of XxHash64 and SHARD_COUNT=4
+        // These values are pinned to the current behavior of XxHash64 and SHARD_COUNT=64
         // to detect any accidental changes in hashing or partitioning.
         let cases = [
             ("tenant-1:e:entity-1", 21),

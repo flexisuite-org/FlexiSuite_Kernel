@@ -369,7 +369,7 @@ impl RedisConsumer {
         // We use COUNT 1 to act as a "liveness signal" while keeping memory spike predictable
         // (~SHARD_COUNT events max).
         let blocking_options =
-            Self::build_read_options(consumer_group, consumer_name, 1, Some(self.block_timeout), true);
+            Self::build_read_options(consumer_group, consumer_name, 1, Some(self.block_timeout), false);
 
         let key_strs: Vec<&str> = keys.iter().map(|s| s.as_str()).collect();
         let id_strs: Vec<&str> = vec![">"; keys.len()];
