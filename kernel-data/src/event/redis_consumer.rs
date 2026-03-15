@@ -12,7 +12,11 @@ use redis::streams::{
 use redis::{AsyncCommands, Client, RedisError};
 #[cfg(test)]
 use std::hash::Hasher;
-use std::time::Duration;
+use std::sync::{
+    Arc,
+    atomic::{AtomicUsize, Ordering as AtomicOrdering},
+};
+use std::time::{Duration, Instant};
 use tracing::{instrument, warn};
 #[cfg(test)]
 use twox_hash::XxHash64;
@@ -21,6 +25,7 @@ use twox_hash::XxHash64;
 pub struct RedisConsumer {
     connection_manager: ConnectionManager,
     block_timeout: Duration,
+    next_poll_start_shard: Arc<AtomicUsize>,
 }
 
 impl RedisConsumer {
@@ -33,6 +38,7 @@ impl RedisConsumer {
         Ok(Self {
             connection_manager,
             block_timeout: Self::DEFAULT_BLOCK_TIMEOUT,
+            next_poll_start_shard: Arc::new(AtomicUsize::new(0)),
         })
     }
 
@@ -47,6 +53,7 @@ impl RedisConsumer {
         Ok(Self {
             connection_manager,
             block_timeout,
+            next_poll_start_shard: Arc::new(AtomicUsize::new(0)),
         })
     }
 
@@ -85,6 +92,21 @@ impl RedisConsumer {
             .collect()
     }
 
+    fn stream_keys_for_tenant_ordered(
+        tenant_id: &TenantId,
+        stream_base: &str,
+        start_shard: usize,
+    ) -> Vec<String> {
+        let shard_count =
+            usize::try_from(SHARD_COUNT).expect("SHARD_COUNT must fit into usize for iteration");
+        (0..shard_count)
+            .map(|offset| {
+                let shard = ((start_shard + offset) % shard_count) as u64;
+                Self::stream_key_for_shard(tenant_id, stream_base, shard)
+            })
+            .collect()
+    }
+
     fn decode_stream_entry(stream_key: &str, stream_id: &StreamId) -> Result<Delivery, EventError> {
         let payload = stream_id.get::<String>("data").ok_or_else(|| {
             EventError::Consumer(format!(
@@ -120,6 +142,16 @@ impl RedisConsumer {
             .iter()
             .map(|stream_id| Self::decode_stream_entry(stream_key, stream_id))
             .collect()
+    }
+
+    fn build_read_options(
+        consumer_group: &str,
+        consumer_name: &str,
+        max_count: usize,
+    ) -> StreamReadOptions {
+        StreamReadOptions::default()
+            .group(consumer_group, consumer_name)
+            .count(max_count)
     }
 
     fn validate_retry_policy(policy: &RetryPolicy) -> Result<(), EventError> {
@@ -165,7 +197,7 @@ impl RedisConsumer {
         for key in Self::stream_keys_for_tenant(tenant_id, stream_base) {
             let mut conn = self.connection_manager.clone();
             let create_group: Result<(), RedisError> =
-                conn.xgroup_create_mkstream(&key, consumer_group, "$").await;
+                conn.xgroup_create_mkstream(&key, consumer_group, "0").await;
             if let Err(error) = create_group {
                 if Self::is_busy_group_error(&error) {
                     continue;
@@ -186,24 +218,44 @@ impl RedisConsumer {
         consumer_name: &str,
         max_count: usize,
     ) -> Result<Vec<Delivery>, EventError> {
-        let keys = Self::stream_keys_for_tenant(tenant_id, stream_base);
-        let ids = vec![">"; keys.len()];
-        let options = StreamReadOptions::default()
-            .group(consumer_group, consumer_name)
-            .count(max_count)
-            .block(self.block_timeout.as_millis() as usize);
+        let shard_count =
+            usize::try_from(SHARD_COUNT).expect("SHARD_COUNT must fit into usize for iteration");
+        let start_shard = self
+            .next_poll_start_shard
+            .fetch_add(1, AtomicOrdering::Relaxed)
+            % shard_count;
+        let keys = Self::stream_keys_for_tenant_ordered(tenant_id, stream_base, start_shard);
+        let deadline = Instant::now() + self.block_timeout;
 
-        let mut conn = self.connection_manager.clone();
-        let reply: StreamReadReply =
-            conn.xread_options(&keys, &ids, &options)
-                .await
-                .map_err(|e| {
-                    EventError::Consumer(format!("failed to read stream group entries: {e}"))
-                })?;
-        if reply.keys.is_empty() {
-            return Ok(Vec::new());
+        loop {
+            let mut deliveries = Vec::new();
+
+            for key in &keys {
+                if deliveries.len() >= max_count {
+                    break;
+                }
+
+                let remaining = max_count - deliveries.len();
+                let options = Self::build_read_options(consumer_group, consumer_name, remaining);
+                let mut conn = self.connection_manager.clone();
+                let reply: StreamReadReply = conn
+                    .xread_options(&[key.as_str()], &[">"], &options)
+                    .await
+                    .map_err(|e| {
+                        EventError::Consumer(format!("failed to read stream group entries: {e}"))
+                    })?;
+                if reply.keys.is_empty() {
+                    continue;
+                }
+                deliveries.extend(Self::decode_stream_read(reply)?);
+            }
+
+            if !deliveries.is_empty() || Instant::now() >= deadline {
+                return Ok(deliveries);
+            }
+
+            tokio::time::sleep(Duration::from_millis(25)).await;
         }
-        Self::decode_stream_read(reply)
     }
 
     async fn claim_pending_once(

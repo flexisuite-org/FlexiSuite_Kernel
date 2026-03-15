@@ -78,6 +78,63 @@ fn calculate_shard(key: &str) -> u64 {
     hasher.finish() % SHARD_COUNT
 }
 
+async fn publish_entity_event(
+    producer: &RedisProducer,
+    tenant_id: &TenantId,
+    stream_base: &str,
+    entity_id: Uuid,
+    seq: u64,
+    event_type: &str,
+) {
+    producer
+        .publish(
+            stream_base,
+            EventEnvelope {
+                event_id: Uuid::now_v7(),
+                tenant_id: tenant_id.clone(),
+                order_mode: OrderMode::Entity {
+                    entity_id,
+                    seq: Some(seq),
+                },
+                payload: serde_json::json!({ "seq": seq }),
+                created_at: Utc::now(),
+                event_type: event_type.to_string(),
+            },
+        )
+        .await
+        .expect("publish event");
+}
+
+fn find_distinct_entity_shards(tenant_id: &TenantId) -> ((Uuid, u64), (Uuid, u64)) {
+    let first_entity_id = Uuid::now_v7();
+    let first_shard = calculate_shard(
+        &OrderMode::Entity {
+            entity_id: first_entity_id,
+            seq: Some(1),
+        }
+        .shard_input(tenant_id),
+    );
+
+    for _ in 0..1024 {
+        let second_entity_id = Uuid::now_v7();
+        let second_shard = calculate_shard(
+            &OrderMode::Entity {
+                entity_id: second_entity_id,
+                seq: Some(1),
+            }
+            .shard_input(tenant_id),
+        );
+        if second_shard != first_shard {
+            return (
+                (first_entity_id, first_shard),
+                (second_entity_id, second_shard),
+            );
+        }
+    }
+
+    panic!("failed to find distinct shards for contract test");
+}
+
 #[tokio::test]
 async fn test_claim_pending_failover_preserves_ordering() {
     let (_redis, client) = start_redis_server().await;
@@ -189,5 +246,126 @@ async fn test_claim_pending_failover_preserves_ordering() {
     assert_eq!(
         pending, 2,
         "claimed deliveries must remain pending until acked"
+    );
+}
+
+#[tokio::test]
+async fn test_poll_recovers_existing_backlog_when_consumer_group_is_missing() {
+    let (_redis, client) = start_redis_server().await;
+    let producer = RedisProducer::new(client.clone()).await.expect("producer");
+    let consumer = RedisConsumer::new(client.clone()).await.expect("consumer");
+
+    let tenant_id = TenantId::new("tenant-backlog").unwrap();
+    let entity_id = Uuid::now_v7();
+    let stream_base = "events";
+    let consumer_group = "group-backlog";
+
+    publish_entity_event(
+        &producer,
+        &tenant_id,
+        stream_base,
+        entity_id,
+        1,
+        "contract.backlog",
+    )
+    .await;
+    publish_entity_event(
+        &producer,
+        &tenant_id,
+        stream_base,
+        entity_id,
+        2,
+        "contract.backlog",
+    )
+    .await;
+
+    let deliveries = consumer
+        .poll(&tenant_id, stream_base, consumer_group, "consumer-1", 10)
+        .await
+        .expect("poll should recover pre-existing backlog");
+
+    assert_eq!(
+        deliveries.len(),
+        2,
+        "backlog should remain visible after group creation"
+    );
+    assert_eq!(
+        deliveries
+            .iter()
+            .map(|delivery| delivery.event.order_mode.seq().unwrap())
+            .collect::<Vec<_>>(),
+        vec![1, 2],
+        "backlog should be delivered in-order after creating the consumer group",
+    );
+}
+
+#[tokio::test]
+async fn test_poll_never_exceeds_max_count_across_multiple_shards() {
+    let (_redis, client) = start_redis_server().await;
+    let producer = RedisProducer::new(client.clone()).await.expect("producer");
+    let consumer = RedisConsumer::new(client.clone()).await.expect("consumer");
+
+    let tenant_id = TenantId::new("tenant-max-count").unwrap();
+    let stream_base = "events";
+    let consumer_group = "group-max-count";
+    let ((entity_a, _), (entity_b, _)) = find_distinct_entity_shards(&tenant_id);
+
+    publish_entity_event(
+        &producer,
+        &tenant_id,
+        stream_base,
+        entity_a,
+        1,
+        "contract.max-count",
+    )
+    .await;
+    publish_entity_event(
+        &producer,
+        &tenant_id,
+        stream_base,
+        entity_b,
+        1,
+        "contract.max-count",
+    )
+    .await;
+
+    let first_batch = consumer
+        .poll(&tenant_id, stream_base, consumer_group, "consumer-1", 1)
+        .await
+        .expect("first poll");
+    assert_eq!(
+        first_batch.len(),
+        1,
+        "poll(max_count=1) must not over-deliver"
+    );
+    consumer
+        .ack(
+            &tenant_id,
+            &first_batch[0].stream_key,
+            consumer_group,
+            &first_batch[0].delivery_id,
+        )
+        .await
+        .expect("ack first delivery");
+
+    let second_batch = consumer
+        .poll(&tenant_id, stream_base, consumer_group, "consumer-1", 1)
+        .await
+        .expect("second poll");
+    assert_eq!(
+        second_batch.len(),
+        1,
+        "remaining shard delivery should arrive in the next poll"
+    );
+    assert_ne!(
+        first_batch[0]
+            .event
+            .order_mode
+            .tenant_scoped_ordering_key(&tenant_id),
+        second_batch[0]
+            .event
+            .order_mode
+            .tenant_scoped_ordering_key(&tenant_id),
+        "the two polls should observe different ordering keys from different shards",
     );
 }
