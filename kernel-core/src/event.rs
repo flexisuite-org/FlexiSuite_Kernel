@@ -141,6 +141,9 @@ impl GapTracker {
             }
             Ordering::Greater => {
                 if let Some(active_gap) = self.active_gap.as_ref() {
+                    // Protocol: Subsequent out-of-order deliveries are deferred.
+                    // Callers should buffer these and re-feed them to observe_delivery
+                    // only after the current active gap is closed.
                     return Ok(DeliveryResolution::Deferred(active_gap.clone()));
                 }
                 let gap = GapObservation {
@@ -282,9 +285,7 @@ impl GapTracker {
             // We use GapRecoveryState::Recovering explicitly to guarantee transition to Normal,
             // safely bypassing the current state (e.g. GapDetected) which would incorrectly transition
             // to RebuildRequired if we mistakenly passed outbox_has_missing_seq=false.
-            //
-            // Mention: gap_started_at and active_gap are cleared here and this choice is deliberate 
-            // to ensure the state machine progresses correctly when the gap is filled.
+            // This is intentional as the GapTracker's responsibility for the specific gap is complete.
             self.state = progress_gap_recovery(GapRecoveryState::Recovering, false);
             self.gap_started_at = None;
             self.active_gap = None;

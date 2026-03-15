@@ -211,6 +211,9 @@ impl RedisConsumer {
     ) -> Result<(), EventError> {
         for key in Self::stream_keys_for_tenant(tenant_id, stream_base) {
             let mut conn = self.connection_manager.clone();
+            // Reliability Trade-off: Starting from "0" ensures at-least-once delivery by replaying
+            // the full stream backlog. In a NOGROUP recovery scenario for an existing stream,
+            // this can trigger a massive redelivery of historical events.
             let create_group: Result<(), RedisError> =
                 conn.xgroup_create_mkstream(&key, consumer_group, "0").await;
             if let Err(error) = create_group {
