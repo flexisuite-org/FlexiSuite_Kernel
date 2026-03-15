@@ -505,8 +505,9 @@ RETURNING last_seq;
   - `UNIQUE(entity_id, entity_seq) WHERE order_mode = 'entity'`
   - `UNIQUE(causality_key, causality_seq) WHERE order_mode = 'causality'`
 - **ルーティング規約 (v1で有効)**:
-  - `order_mode = "entity"` のイベントは `events:{hash(entity_id) % N}` にルーティングする。
-  - `order_mode = "causality"` のイベントは `events:{hash(causality_key) % N}` にルーティングする。
+  - `order_mode = "entity"` のイベントは `events:{hash(format!("{}:e:{}", tenant_id, entity_id)) % N}` にルーティングする。
+  - `order_mode = "causality"` のイベントは `events:{hash(format!("{}:c:{}", tenant_id, causality_key)) % N}` にルーティングする。
+  - **シャード入力の固定**: マルチテナント間の完全な隔離と名前空間（Entity/Causality）の競合回避のため、シャード計算の入力文字列は `{tenant_id}:{prefix}:{key}` 形式を強制する。
   - 同一 `entity_id` で `entity` モードと `causality` モードを混在させてはならない **(MUST NOT)**。
   - `causality` モードを採用した `entity_id` は、全イベントで同一 `causality_key` を使用**しなければならない (MUST)**。
 
