@@ -12,7 +12,7 @@ fn entity_ordering_key(
 ) -> kernel_core::event::TenantScopedOrderingKey {
     OrderMode::Entity {
         entity_id,
-        seq: Some(1),
+        seq: None,
     }
     .tenant_scoped_ordering_key(tenant_id)
 }
