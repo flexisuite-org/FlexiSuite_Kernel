@@ -564,8 +564,6 @@ impl ReliableConsumer for RedisConsumer {
         policy: RetryPolicy,
     ) -> Result<(), EventError> {
         validate_stream_key(stream_key, tenant_id)?;
-        self.ensure_consumer_groups_cached(tenant_id, "nack_stream", consumer_group)
-            .await?;
 
         match policy {
             RetryPolicy::Immediate => Ok(()),
@@ -674,8 +672,9 @@ mod tests {
     #[test]
     fn test_validate_retry_policy_allows_immediate_retry() {
         // validate_retry_policy only rejects delayed retries that require a queue.
-        // RedisConsumer::nack still rejects RetryPolicy::Immediate to avoid
-        // reordering pending stream entries.
+        // RedisConsumer::nack treats RetryPolicy::Immediate as a no-op
+        // since re-queuing within Redis Streams is not natively supported
+        // without affecting message order.
         let err = RedisConsumer::validate_retry_policy(&RetryPolicy::Immediate);
         assert!(err.is_ok());
     }
