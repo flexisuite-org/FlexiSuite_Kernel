@@ -201,6 +201,10 @@ impl RedisConsumer {
         error.code() == Some("BUSYGROUP")
     }
 
+    fn is_nogroup_error(error: &RedisError) -> bool {
+        error.code() == Some("NOGROUP")
+    }
+
     fn consumer_group_cache_key(
         tenant_id: &TenantId,
         stream_base: &str,
@@ -282,24 +286,25 @@ impl RedisConsumer {
                 conn.xread_options(&[key.as_str()], &[">"], &options).await;
 
             if let Err(error) = &reply
-                && error.code() == Some("NOGROUP") {
-                    tracing::warn!(
-                        tenant_id = %tenant_id,
-                        stream_key = %key,
-                        consumer_group = %consumer_group,
-                        "NOGROUP error detected during poll_once; evicting cache and recreating consumer group"
-                    );
-                    let cache_key =
-                        Self::consumer_group_cache_key(tenant_id, stream_base, consumer_group);
-                    self.ensured_consumer_groups.lock().await.remove(&cache_key);
-                    self.ensure_consumer_groups_cached(tenant_id, stream_base, consumer_group)
-                        .await?;
+                && error.code() == Some("NOGROUP")
+            {
+                tracing::warn!(
+                    tenant_id = %tenant_id,
+                    stream_key = %key,
+                    consumer_group = %consumer_group,
+                    "NOGROUP error detected during poll_once; evicting cache and recreating consumer group"
+                );
+                let cache_key =
+                    Self::consumer_group_cache_key(tenant_id, stream_base, consumer_group);
+                self.ensured_consumer_groups.lock().await.remove(&cache_key);
+                self.ensure_consumer_groups_cached(tenant_id, stream_base, consumer_group)
+                    .await?;
 
-                    let mut retry_conn = self.connection_manager.clone();
-                    reply = retry_conn
-                        .xread_options(&[key.as_str()], &[">"], &options)
-                        .await;
-                }
+                let mut retry_conn = self.connection_manager.clone();
+                reply = retry_conn
+                    .xread_options(&[key.as_str()], &[">"], &options)
+                    .await;
+            }
 
             let reply = reply.map_err(|e| {
                 EventError::Consumer(format!("failed to read stream group entries: {e}"))
@@ -329,24 +334,24 @@ impl RedisConsumer {
             .await;
 
         if let Err(error) = &blocking_reply
-            && error.code() == Some("NOGROUP") {
-                tracing::warn!(
-                    tenant_id = %tenant_id,
-                    stream_key = %blocking_key,
-                    consumer_group = %consumer_group,
-                    "NOGROUP error detected during blocking poll_once; evicting cache and recreating consumer group"
-                );
-                let cache_key =
-                    Self::consumer_group_cache_key(tenant_id, stream_base, consumer_group);
-                self.ensured_consumer_groups.lock().await.remove(&cache_key);
-                self.ensure_consumer_groups_cached(tenant_id, stream_base, consumer_group)
-                    .await?;
+            && error.code() == Some("NOGROUP")
+        {
+            tracing::warn!(
+                tenant_id = %tenant_id,
+                stream_key = %blocking_key,
+                consumer_group = %consumer_group,
+                "NOGROUP error detected during blocking poll_once; evicting cache and recreating consumer group"
+            );
+            let cache_key = Self::consumer_group_cache_key(tenant_id, stream_base, consumer_group);
+            self.ensured_consumer_groups.lock().await.remove(&cache_key);
+            self.ensure_consumer_groups_cached(tenant_id, stream_base, consumer_group)
+                .await?;
 
-                let mut retry_conn = self.connection_manager.clone();
-                blocking_reply = retry_conn
-                    .xread_options(&[blocking_key.as_str()], &[">"], &blocking_options)
-                    .await;
-            }
+            let mut retry_conn = self.connection_manager.clone();
+            blocking_reply = retry_conn
+                .xread_options(&[blocking_key.as_str()], &[">"], &blocking_options)
+                .await;
+        }
 
         let blocking_reply = blocking_reply.map_err(|e| {
             EventError::Consumer(format!("failed to read stream group entries: {e}"))
@@ -365,24 +370,25 @@ impl RedisConsumer {
                 conn.xread_options(&[key.as_str()], &[">"], &options).await;
 
             if let Err(error) = &reply
-                && error.code() == Some("NOGROUP") {
-                    tracing::warn!(
-                        tenant_id = %tenant_id,
-                        stream_key = %key,
-                        consumer_group = %consumer_group,
-                        "NOGROUP error detected during fallback poll_once; evicting cache and recreating consumer group"
-                    );
-                    let cache_key =
-                        Self::consumer_group_cache_key(tenant_id, stream_base, consumer_group);
-                    self.ensured_consumer_groups.lock().await.remove(&cache_key);
-                    self.ensure_consumer_groups_cached(tenant_id, stream_base, consumer_group)
-                        .await?;
+                && error.code() == Some("NOGROUP")
+            {
+                tracing::warn!(
+                    tenant_id = %tenant_id,
+                    stream_key = %key,
+                    consumer_group = %consumer_group,
+                    "NOGROUP error detected during fallback poll_once; evicting cache and recreating consumer group"
+                );
+                let cache_key =
+                    Self::consumer_group_cache_key(tenant_id, stream_base, consumer_group);
+                self.ensured_consumer_groups.lock().await.remove(&cache_key);
+                self.ensure_consumer_groups_cached(tenant_id, stream_base, consumer_group)
+                    .await?;
 
-                    let mut retry_conn = self.connection_manager.clone();
-                    reply = retry_conn
-                        .xread_options(&[key.as_str()], &[">"], &options)
-                        .await;
-                }
+                let mut retry_conn = self.connection_manager.clone();
+                reply = retry_conn
+                    .xread_options(&[key.as_str()], &[">"], &options)
+                    .await;
+            }
 
             let reply = reply.map_err(|e| {
                 EventError::Consumer(format!("failed to read stream group entries: {e}"))
@@ -439,31 +445,32 @@ impl RedisConsumer {
                     .await;
 
                 if let Err(error) = &reply
-                    && error.code() == Some("NOGROUP") {
-                        tracing::warn!(
-                            tenant_id = %tenant_id,
-                            stream_key = %key,
-                            consumer_group = %consumer_group,
-                            "NOGROUP error detected during claim_pending_once; evicting cache and recreating consumer group"
-                        );
-                        let cache_key =
-                            Self::consumer_group_cache_key(tenant_id, stream_base, consumer_group);
-                        self.ensured_consumer_groups.lock().await.remove(&cache_key);
-                        self.ensure_consumer_groups_cached(tenant_id, stream_base, consumer_group)
-                            .await?;
+                    && error.code() == Some("NOGROUP")
+                {
+                    tracing::warn!(
+                        tenant_id = %tenant_id,
+                        stream_key = %key,
+                        consumer_group = %consumer_group,
+                        "NOGROUP error detected during claim_pending_once; evicting cache and recreating consumer group"
+                    );
+                    let cache_key =
+                        Self::consumer_group_cache_key(tenant_id, stream_base, consumer_group);
+                    self.ensured_consumer_groups.lock().await.remove(&cache_key);
+                    self.ensure_consumer_groups_cached(tenant_id, stream_base, consumer_group)
+                        .await?;
 
-                        let mut retry_conn = self.connection_manager.clone();
-                        reply = retry_conn
-                            .xautoclaim_options(
-                                &key,
-                                consumer_group,
-                                consumer_name,
-                                min_idle_ms,
-                                &next_stream_id,
-                                StreamAutoClaimOptions::default().count(remaining.min(100)),
-                            )
-                            .await;
-                    }
+                    let mut retry_conn = self.connection_manager.clone();
+                    reply = retry_conn
+                        .xautoclaim_options(
+                            &key,
+                            consumer_group,
+                            consumer_name,
+                            min_idle_ms,
+                            &next_stream_id,
+                            StreamAutoClaimOptions::default().count(remaining.min(100)),
+                        )
+                        .await;
+                }
 
                 let reply = reply.map_err(|e| {
                     EventError::Consumer(format!("failed to claim pending entries: {e}"))
@@ -537,13 +544,25 @@ impl ReliableConsumer for RedisConsumer {
         validate_stream_key(stream_key, tenant_id)?;
 
         let mut conn = self.connection_manager.clone();
-        let acked: i32 = conn
-            .xack(stream_key, consumer_group, &[delivery_id])
-            .await
-            .map_err(|e| {
-                EventError::Consumer(format!("failed to acknowledge stream entry: {e}"))
-            })?;
-        Self::handle_ack_result(acked, stream_key, delivery_id)
+        let reply: Result<i32, RedisError> =
+            conn.xack(stream_key, consumer_group, &[delivery_id]).await;
+
+        match reply {
+            Ok(acked) => Self::handle_ack_result(acked, stream_key, delivery_id),
+            Err(e) if Self::is_nogroup_error(&e) => {
+                tracing::warn!(
+                    tenant_id = %tenant_id,
+                    stream_key = stream_key,
+                    consumer_group = consumer_group,
+                    delivery_id = delivery_id,
+                    "NOGROUP error during ack; treating as idempotent success since pending state formulation is lost"
+                );
+                Ok(())
+            }
+            Err(e) => Err(EventError::Consumer(format!(
+                "failed to acknowledge stream entry: {e}"
+            ))),
+        }
     }
 
     #[instrument(skip(self, policy), fields(tenant_id = %tenant_id, stream_key = stream_key, consumer_group = consumer_group, delivery_id = delivery_id))]
@@ -756,7 +775,7 @@ mod tests {
         }
 
         // At this point, `next_poll_start_shard` has advanced 10 times.
-        // Since `SHARD_COUNT = 8`, it has successfully wrapped around.
+        // Since `SHARD_COUNT = 64`, it has successfully wrapped around (or at least advanced properly).
         Ok(())
     }
 }

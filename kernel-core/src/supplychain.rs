@@ -100,16 +100,19 @@ pub fn verify_manifest(
     }
 
     if let Some(nbf) = trusted_key.not_before
-        && now.saturating_add(CLOCK_DRIFT_TOLERANCE_SECONDS) < nbf {
-            metrics::counter!("verification_result", "result" => "KeyNotYetValid", "flow" => "manifest").increment(1);
-            return VerificationResult::KeyNotYetValid;
-        }
+        && now.saturating_add(CLOCK_DRIFT_TOLERANCE_SECONDS) < nbf
+    {
+        metrics::counter!("verification_result", "result" => "KeyNotYetValid", "flow" => "manifest").increment(1);
+        return VerificationResult::KeyNotYetValid;
+    }
 
     if let Some(exp) = trusted_key.not_after
-        && now > exp.saturating_add(CLOCK_DRIFT_TOLERANCE_SECONDS) {
-            metrics::counter!("verification_result", "result" => "KeyExpired", "flow" => "manifest").increment(1);
-            return VerificationResult::KeyExpired;
-        }
+        && now > exp.saturating_add(CLOCK_DRIFT_TOLERANCE_SECONDS)
+    {
+        metrics::counter!("verification_result", "result" => "KeyExpired", "flow" => "manifest")
+            .increment(1);
+        return VerificationResult::KeyExpired;
+    }
 
     if !trusted_key.alg.trim().eq_ignore_ascii_case("ed25519") {
         metrics::counter!("verification_result", "result" => "SignatureAlgorithmMismatch", "flow" => "manifest")
