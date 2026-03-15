@@ -136,6 +136,11 @@ impl RedisConsumer {
         stream_key: &str,
         delivery_id: &str,
     ) -> Result<(), EventError> {
+        if acked == 0 {
+            return Err(EventError::Consumer(format!(
+                "failed to acknowledge stream entry {delivery_id} on {stream_key}: Redis reported that no pending entry matched the provided consumer group"
+            )));
+        }
         if acked < 0 {
             return Err(EventError::Consumer(format!(
                 "failed to acknowledge stream entry {delivery_id} on {stream_key}: Redis reported a negative acknowledgement count"
@@ -452,7 +457,13 @@ mod tests {
 
     #[test]
     fn test_handle_ack_result_rejects_zero_counts() {
-        assert!(RedisConsumer::handle_ack_result(0, "tenant-1:events:4", "1-0").is_ok());
+        let err = RedisConsumer::handle_ack_result(0, "tenant-1:events:4", "1-0")
+            .expect_err("zero ack count must fail");
+        assert!(matches!(err, EventError::Consumer(_)));
+    }
+
+    #[test]
+    fn test_handle_ack_result_accepts_positive_counts() {
         assert!(RedisConsumer::handle_ack_result(1, "tenant-1:events:4", "1-0").is_ok());
     }
 

@@ -28,6 +28,7 @@ pub enum DeliveryResolution {
     Apply,
     Duplicate,
     GapDetected(GapObservation),
+    Deferred(GapObservation),
 }
 
 #[derive(Debug, Clone)]
@@ -114,10 +115,7 @@ impl GapTracker {
             }
             Ordering::Greater => {
                 if let Some(active_gap) = self.active_gap.as_ref() {
-                    return Err(EventError::Consumer(format!(
-                        "delivery {} observed while gap recovery is already tracking expected sequence {} -> {}",
-                        delivery.delivery_id, active_gap.expected_seq, active_gap.actual_seq
-                    )));
+                    return Ok(DeliveryResolution::Deferred(active_gap.clone()));
                 }
                 let gap = GapObservation {
                     ordering_key: self.ordering_key.clone(),
@@ -674,11 +672,15 @@ mod tests {
             other => panic!("unexpected resolution: {other:?}"),
         };
 
-        let err = tracker
+        let deferred = tracker
             .observe_delivery(&second_delivery, Instant::now())
-            .expect_err("subsequent out-of-order deliveries must not replace the active gap");
+            .expect("subsequent out-of-order deliveries should be deferred");
 
-        assert!(matches!(err, EventError::Consumer(_)));
+        assert!(matches!(
+            deferred,
+            DeliveryResolution::Deferred(gap)
+                if gap.expected_seq == active_gap.expected_seq && gap.actual_seq == active_gap.actual_seq
+        ));
         let replay = EventEnvelope {
             event_id: Uuid::now_v7(),
             tenant_id: first_delivery.event.tenant_id.clone(),
@@ -693,6 +695,63 @@ mod tests {
         tracker
             .confirm_gap_replay(&active_gap, &replay, Instant::now())
             .expect("original gap must remain active for replay confirmation");
+    }
+
+    #[test]
+    fn test_gap_tracker_allows_multiple_future_deliveries_while_gap_is_active() {
+        let tenant_id = TenantId::new("tenant-1").unwrap();
+        let entity_id = Uuid::now_v7();
+        let ordering_key = OrderMode::Entity {
+            entity_id,
+            seq: Some(1),
+        }
+        .tenant_scoped_ordering_key(&tenant_id);
+        let mut tracker = GapTracker::new(ordering_key, 3);
+        let first_delivery = Delivery {
+            delivery_id: "1-0".to_string(),
+            stream_key: "tenant-1:events:0".to_string(),
+            event: EventEnvelope {
+                event_id: Uuid::now_v7(),
+                tenant_id: tenant_id.clone(),
+                order_mode: OrderMode::Entity {
+                    entity_id,
+                    seq: Some(8),
+                },
+                payload: Value::Null,
+                created_at: Utc::now(),
+                event_type: "entity.updated".to_string(),
+            },
+        };
+        let second_delivery = Delivery {
+            delivery_id: "2-0".to_string(),
+            stream_key: "tenant-1:events:0".to_string(),
+            event: EventEnvelope {
+                event_id: Uuid::now_v7(),
+                tenant_id,
+                order_mode: OrderMode::Entity {
+                    entity_id,
+                    seq: Some(9),
+                },
+                payload: Value::Null,
+                created_at: Utc::now(),
+                event_type: "entity.updated".to_string(),
+            },
+        };
+
+        let observed = tracker
+            .observe_delivery(&first_delivery, Instant::now())
+            .expect("first out-of-order delivery must open the gap");
+        assert!(matches!(observed, DeliveryResolution::GapDetected(_)));
+
+        let deferred = tracker
+            .observe_delivery(&second_delivery, Instant::now())
+            .expect("later out-of-order deliveries should remain deferred while recovering");
+        assert!(matches!(
+            deferred,
+            DeliveryResolution::Deferred(gap) if gap.expected_seq == 3 && gap.actual_seq == 8
+        ));
+        assert_eq!(tracker.expected_seq(), 3);
+        assert_eq!(tracker.state(), GapRecoveryState::GapDetected);
     }
 
     #[tokio::test]

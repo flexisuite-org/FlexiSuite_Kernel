@@ -204,3 +204,55 @@ async fn test_gap_tracker_requests_rebuild_after_timeout_when_outbox_missing() {
             if ordering_key.logical_key() == entity_id.to_string()
     ));
 }
+
+#[tokio::test]
+async fn test_gap_tracker_defers_later_future_deliveries_while_gap_is_active() {
+    let tenant_id = TenantId::new("tenant-1").unwrap();
+    let entity_id = Uuid::now_v7();
+    let mut tracker = GapTracker::new(entity_ordering_key(&tenant_id, entity_id), 3);
+    let first_delivery = Delivery {
+        delivery_id: "1-0".to_string(),
+        stream_key: "tenant-1:events:0".to_string(),
+        event: kernel_core::event::EventEnvelope {
+            event_id: Uuid::now_v7(),
+            tenant_id: tenant_id.clone(),
+            order_mode: OrderMode::Entity {
+                entity_id,
+                seq: Some(8),
+            },
+            payload: Value::Null,
+            created_at: chrono::Utc::now(),
+            event_type: "entity.updated".to_string(),
+        },
+    };
+    let second_delivery = Delivery {
+        delivery_id: "2-0".to_string(),
+        stream_key: "tenant-1:events:0".to_string(),
+        event: kernel_core::event::EventEnvelope {
+            event_id: Uuid::now_v7(),
+            tenant_id,
+            order_mode: OrderMode::Entity {
+                entity_id,
+                seq: Some(9),
+            },
+            payload: Value::Null,
+            created_at: chrono::Utc::now(),
+            event_type: "entity.updated".to_string(),
+        },
+    };
+
+    let detected = tracker.observe_delivery(&first_delivery, Instant::now()).unwrap();
+    assert!(matches!(
+        detected,
+        kernel_core::event::DeliveryResolution::GapDetected(_)
+    ));
+
+    let deferred = tracker
+        .observe_delivery(&second_delivery, Instant::now())
+        .unwrap();
+    assert!(matches!(
+        deferred,
+        kernel_core::event::DeliveryResolution::Deferred(gap)
+            if gap.expected_seq == 3 && gap.actual_seq == 8
+    ));
+}
