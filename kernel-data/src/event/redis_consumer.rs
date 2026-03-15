@@ -257,6 +257,39 @@ impl RedisConsumer {
         Ok(())
     }
 
+    async fn recover_nogroup_and_retry<T, F, Fut>(
+        &self,
+        tenant_id: &TenantId,
+        stream_base: &str,
+        stream_key: &str,
+        consumer_group: &str,
+        operation_name: &str,
+        reply: Result<T, RedisError>,
+        retry_op: F,
+    ) -> Result<Result<T, RedisError>, EventError>
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = Result<T, RedisError>>,
+    {
+        if let Err(error) = &reply {
+            if error.code() == Some("NOGROUP") {
+                tracing::warn!(
+                    tenant_id = %tenant_id,
+                    stream_key = %stream_key,
+                    consumer_group = %consumer_group,
+                    "NOGROUP error detected during {}; evicting cache and recreating consumer group",
+                    operation_name
+                );
+                let cache_key = Self::consumer_group_cache_key(tenant_id, stream_base, consumer_group);
+                self.ensured_consumer_groups.lock().await.remove(&cache_key);
+                self.ensure_consumer_groups_cached(tenant_id, stream_base, consumer_group).await?;
+
+                return Ok(retry_op().await);
+            }
+        }
+        Ok(reply)
+    }
+
     async fn poll_once(
         &self,
         tenant_id: &TenantId,
@@ -282,29 +315,23 @@ impl RedisConsumer {
             let remaining = max_count - deliveries.len();
             let options = Self::build_read_options(consumer_group, consumer_name, remaining, None);
             let mut conn = self.connection_manager.clone();
-            let mut reply: Result<StreamReadReply, RedisError> =
+            let reply: Result<StreamReadReply, RedisError> =
                 conn.xread_options(&[key.as_str()], &[">"], &options).await;
 
-            if let Err(error) = &reply
-                && error.code() == Some("NOGROUP")
-            {
-                tracing::warn!(
-                    tenant_id = %tenant_id,
-                    stream_key = %key,
-                    consumer_group = %consumer_group,
-                    "NOGROUP error detected during poll_once; evicting cache and recreating consumer group"
-                );
-                let cache_key =
-                    Self::consumer_group_cache_key(tenant_id, stream_base, consumer_group);
-                self.ensured_consumer_groups.lock().await.remove(&cache_key);
-                self.ensure_consumer_groups_cached(tenant_id, stream_base, consumer_group)
-                    .await?;
-
-                let mut retry_conn = self.connection_manager.clone();
-                reply = retry_conn
-                    .xread_options(&[key.as_str()], &[">"], &options)
-                    .await;
-            }
+            let reply = self
+                .recover_nogroup_and_retry(
+                    tenant_id,
+                    stream_base,
+                    key.as_str(),
+                    consumer_group,
+                    "poll_once",
+                    reply,
+                    || async {
+                        let mut retry_conn = self.connection_manager.clone();
+                        retry_conn.xread_options(&[key.as_str()], &[">"], &options).await
+                    },
+                )
+                .await?;
 
             let reply = reply.map_err(|e| {
                 EventError::Consumer(format!("failed to read stream group entries: {e}"))
@@ -329,29 +356,26 @@ impl RedisConsumer {
             Some(self.block_timeout),
         );
         let mut conn = self.connection_manager.clone();
-        let mut blocking_reply: Result<StreamReadReply, RedisError> = conn
+        let blocking_reply: Result<StreamReadReply, RedisError> = conn
             .xread_options(&[blocking_key.as_str()], &[">"], &blocking_options)
             .await;
 
-        if let Err(error) = &blocking_reply
-            && error.code() == Some("NOGROUP")
-        {
-            tracing::warn!(
-                tenant_id = %tenant_id,
-                stream_key = %blocking_key,
-                consumer_group = %consumer_group,
-                "NOGROUP error detected during blocking poll_once; evicting cache and recreating consumer group"
-            );
-            let cache_key = Self::consumer_group_cache_key(tenant_id, stream_base, consumer_group);
-            self.ensured_consumer_groups.lock().await.remove(&cache_key);
-            self.ensure_consumer_groups_cached(tenant_id, stream_base, consumer_group)
-                .await?;
-
-            let mut retry_conn = self.connection_manager.clone();
-            blocking_reply = retry_conn
-                .xread_options(&[blocking_key.as_str()], &[">"], &blocking_options)
-                .await;
-        }
+        let blocking_reply = self
+            .recover_nogroup_and_retry(
+                tenant_id,
+                stream_base,
+                blocking_key.as_str(),
+                consumer_group,
+                "blocking poll_once",
+                blocking_reply,
+                || async {
+                    let mut retry_conn = self.connection_manager.clone();
+                    retry_conn
+                        .xread_options(&[blocking_key.as_str()], &[">"], &blocking_options)
+                        .await
+                },
+            )
+            .await?;
 
         let blocking_reply = blocking_reply.map_err(|e| {
             EventError::Consumer(format!("failed to read stream group entries: {e}"))
@@ -366,29 +390,23 @@ impl RedisConsumer {
             let remaining = max_count - deliveries.len();
             let options = Self::build_read_options(consumer_group, consumer_name, remaining, None);
             let mut conn = self.connection_manager.clone();
-            let mut reply: Result<StreamReadReply, RedisError> =
+            let reply: Result<StreamReadReply, RedisError> =
                 conn.xread_options(&[key.as_str()], &[">"], &options).await;
 
-            if let Err(error) = &reply
-                && error.code() == Some("NOGROUP")
-            {
-                tracing::warn!(
-                    tenant_id = %tenant_id,
-                    stream_key = %key,
-                    consumer_group = %consumer_group,
-                    "NOGROUP error detected during fallback poll_once; evicting cache and recreating consumer group"
-                );
-                let cache_key =
-                    Self::consumer_group_cache_key(tenant_id, stream_base, consumer_group);
-                self.ensured_consumer_groups.lock().await.remove(&cache_key);
-                self.ensure_consumer_groups_cached(tenant_id, stream_base, consumer_group)
-                    .await?;
-
-                let mut retry_conn = self.connection_manager.clone();
-                reply = retry_conn
-                    .xread_options(&[key.as_str()], &[">"], &options)
-                    .await;
-            }
+            let reply = self
+                .recover_nogroup_and_retry(
+                    tenant_id,
+                    stream_base,
+                    key.as_str(),
+                    consumer_group,
+                    "fallback poll_once",
+                    reply,
+                    || async {
+                        let mut retry_conn = self.connection_manager.clone();
+                        retry_conn.xread_options(&[key.as_str()], &[">"], &options).await
+                    },
+                )
+                .await?;
 
             let reply = reply.map_err(|e| {
                 EventError::Consumer(format!("failed to read stream group entries: {e}"))
@@ -433,7 +451,7 @@ impl RedisConsumer {
 
                 let remaining = max_count - claimed.len();
                 let mut conn = self.connection_manager.clone();
-                let mut reply: Result<StreamAutoClaimReply, RedisError> = conn
+                let reply: Result<StreamAutoClaimReply, RedisError> = conn
                     .xautoclaim_options(
                         &key,
                         consumer_group,
@@ -444,33 +462,29 @@ impl RedisConsumer {
                     )
                     .await;
 
-                if let Err(error) = &reply
-                    && error.code() == Some("NOGROUP")
-                {
-                    tracing::warn!(
-                        tenant_id = %tenant_id,
-                        stream_key = %key,
-                        consumer_group = %consumer_group,
-                        "NOGROUP error detected during claim_pending_once; evicting cache and recreating consumer group"
-                    );
-                    let cache_key =
-                        Self::consumer_group_cache_key(tenant_id, stream_base, consumer_group);
-                    self.ensured_consumer_groups.lock().await.remove(&cache_key);
-                    self.ensure_consumer_groups_cached(tenant_id, stream_base, consumer_group)
-                        .await?;
-
-                    let mut retry_conn = self.connection_manager.clone();
-                    reply = retry_conn
-                        .xautoclaim_options(
-                            &key,
-                            consumer_group,
-                            consumer_name,
-                            min_idle_ms,
-                            &next_stream_id,
-                            StreamAutoClaimOptions::default().count(remaining.min(100)),
-                        )
-                        .await;
-                }
+                let reply = self
+                    .recover_nogroup_and_retry(
+                        tenant_id,
+                        stream_base,
+                        &key,
+                        consumer_group,
+                        "claim_pending_once",
+                        reply,
+                        || async {
+                            let mut retry_conn = self.connection_manager.clone();
+                            retry_conn
+                                .xautoclaim_options(
+                                    &key,
+                                    consumer_group,
+                                    consumer_name,
+                                    min_idle_ms,
+                                    &next_stream_id,
+                                    StreamAutoClaimOptions::default().count(remaining.min(100)),
+                                )
+                                .await
+                        },
+                    )
+                    .await?;
 
                 let reply = reply.map_err(|e| {
                     EventError::Consumer(format!("failed to claim pending entries: {e}"))
@@ -746,39 +760,68 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore] // Requires local Redis running
     async fn test_claim_pending_once_round_robin() -> Result<(), EventError> {
         let redis_url = std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1/".into());
         let client = redis::Client::open(redis_url.clone())
             .map_err(|e| EventError::Consumer(format!("failed to open redis client: {e}")))?;
-        let consumer = RedisConsumer::new(client).await?;
+        let consumer = RedisConsumer::new(client.clone()).await?;
 
         let tenant_id = TenantId::new("tenant-round-robin").unwrap();
         let stream_base = "test_round_robin_stream";
         let consumer_group = "test_group";
         let consumer_name = "test_consumer";
 
+        // Teardown before setup
+        let mut conn = client.get_connection_manager().await.unwrap();
+        for key in RedisConsumer::stream_keys_for_tenant(&tenant_id, stream_base) {
+            let _: () = redis::cmd("DEL").arg(&key).query_async(&mut conn).await.unwrap();
+        }
+
         consumer
             .ensure_consumer_groups_cached(&tenant_id, stream_base, consumer_group)
             .await?;
 
-        // 1. Manually insert one event into every shard.
-        // SHARD_COUNT is internal, so we just use the public abstractions or replicate the hashing.
-        // A simpler way to test the rotation of `claim_pending_once` is to observe `stream_keys_for_tenant_ordered` behavior implicitly.
-        // Wait, claim_pending_once doesn't actually produce deliveries if there are no pending messages.
-        // This test only verifies that calling it multiple times doesn't error out and that the rotation counter increments.
-        // A fully reliable integration test of "it reads from different shards" would require injecting predictable pending messages across shards, which is complex.
-        // Instead, we verify that subsequent calls don't panic or error out, validating the basic mechanics.
+        let keys = RedisConsumer::stream_keys_for_tenant_ordered(&tenant_id, stream_base, 0);
+        let key1 = &keys[0];
+        let key2 = &keys[1];
 
-        for _ in 0..10 {
+        // Seed pending entries in at least two different shards.
+        let mut event_a = sample_event();
+        event_a.tenant_id = tenant_id.clone();
+        let payload_a = serde_json::to_string(&event_a).unwrap();
+        let _: () = redis::cmd("XADD").arg(key1).arg("*").arg("data").arg(&payload_a).query_async(&mut conn).await.unwrap();
+
+        let mut event_b = sample_event();
+        event_b.tenant_id = tenant_id.clone();
+        let payload_b = serde_json::to_string(&event_b).unwrap();
+        let _: () = redis::cmd("XADD").arg(key2).arg("*").arg("data").arg(&payload_b).query_async(&mut conn).await.unwrap();
+
+        // Have "other_consumer" read them to put them in PEL
+        let _: () = redis::cmd("XREADGROUP")
+            .arg("GROUP").arg(consumer_group).arg("other_consumer")
+            .arg("STREAMS").arg(key1).arg(key2)
+            .arg(">").arg(">")
+            .query_async(&mut conn).await.unwrap();
+
+        let mut seen_streams = std::collections::HashSet::new();
+        // Since it loops through SHARD_COUNT, we try just enough times to cover both shards.
+        for _ in 0..(SHARD_COUNT + 5) {
             let res = consumer
                 .claim_pending_once(&tenant_id, stream_base, consumer_group, consumer_name, 0, 1)
                 .await?;
-            assert!(res.is_empty(), "expected no pending messages");
+            for delivery in res {
+                seen_streams.insert(delivery.stream_key);
+            }
+        }
+        
+        assert!(seen_streams.contains(key1.as_str()), "missing key1");
+        assert!(seen_streams.contains(key2.as_str()), "missing key2");
+
+        // Clean up
+        for key in RedisConsumer::stream_keys_for_tenant(&tenant_id, stream_base) {
+            let _: () = redis::cmd("DEL").arg(&key).query_async(&mut conn).await.unwrap();
         }
 
-        // At this point, `next_poll_start_shard` has advanced 10 times.
-        // Since `SHARD_COUNT = 64`, it has successfully wrapped around (or at least advanced properly).
         Ok(())
     }
 }

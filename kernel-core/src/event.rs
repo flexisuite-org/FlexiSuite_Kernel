@@ -171,9 +171,16 @@ impl GapTracker {
 
         let maybe_missing = lookup_missing(gap.clone()).await?;
         if let Some(event) = maybe_missing {
-            self.state = progress_gap_recovery(self.state, true);
-            self.gap_started_at = Some(now); // リプレイ完了を待つためにタイムアウト基準をリセット
-            return Ok(Some(GapRecoveryAction::ReplayApply { gap, event }));
+            let replay_key = event
+                .order_mode
+                .tenant_scoped_ordering_key(&event.tenant_id);
+            let replay_seq = event.order_mode.seq();
+
+            if replay_key == gap.ordering_key && replay_seq == Some(gap.expected_seq) {
+                self.state = progress_gap_recovery(self.state, true);
+                self.gap_started_at = Some(now); // リプレイ完了を待つためにタイムアウト基準をリセット
+                return Ok(Some(GapRecoveryAction::ReplayApply { gap, event }));
+            }
         }
 
         self.state = GapRecoveryState::RebuildRequired;
