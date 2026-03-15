@@ -44,7 +44,10 @@ impl RedisConsumer {
             connection_manager,
             block_timeout: Self::DEFAULT_BLOCK_TIMEOUT,
             next_poll_start_shard: Arc::new(AtomicUsize::new(0)),
-            ensured_consumer_groups: Cache::new(2048), // Bounded to 2048 entries to prevent DoS
+            ensured_consumer_groups: Cache::builder()
+                .max_capacity(2048)
+                .time_to_live(Duration::from_secs(600)) // 10 minutes TTL to detect externally deleted groups
+                .build(),
             nogroup_recovery_start_id: "0".to_string(),
         })
     }
@@ -62,7 +65,10 @@ impl RedisConsumer {
             connection_manager,
             block_timeout,
             next_poll_start_shard: Arc::new(AtomicUsize::new(0)),
-            ensured_consumer_groups: Cache::new(2048),
+            ensured_consumer_groups: Cache::builder()
+                .max_capacity(2048)
+                .time_to_live(Duration::from_secs(600))
+                .build(),
             nogroup_recovery_start_id: nogroup_recovery_start_id.unwrap_or_else(|| "0".to_string()),
         })
     }
@@ -172,12 +178,14 @@ impl RedisConsumer {
     }
 
     fn validate_retry_policy(policy: &RetryPolicy) -> Result<(), EventError> {
-        if let RetryPolicy::BackoffUntil(retry_at) = policy {
-            return Err(EventError::Consumer(format!(
-                "RetryPolicy::BackoffUntil({retry_at}) is not supported by RedisConsumer without a delayed retry queue"
-            )));
+        match policy {
+            RetryPolicy::Immediate => Err(EventError::Consumer(
+                "RetryPolicy::Immediate is not natively supported by RedisConsumer; messages remain in PEL for reclamation".to_string(),
+            )),
+            RetryPolicy::BackoffUntil(retry_at) => Err(EventError::Consumer(format!(
+                "RetryPolicy::BackoffUntil({retry_at}) is not supported by RedisConsumer without a delayed retry queue",
+            ))),
         }
-        Ok(())
     }
 
     fn handle_ack_result(
@@ -329,8 +337,9 @@ impl RedisConsumer {
                 break;
             }
 
+            let remaining = max_count.saturating_sub(deliveries.len());
             let options =
-                Self::build_read_options(consumer_group, consumer_name, max_count, None, false);
+                Self::build_read_options(consumer_group, consumer_name, remaining, None, false);
             let mut conn = self.connection_manager.clone();
             let reply: Result<StreamReadReply, RedisError> =
                 conn.xread_options(&[key.as_str()], &[">"], &options).await;
@@ -355,19 +364,17 @@ impl RedisConsumer {
             let reply = reply.map_err(|e| {
                 EventError::Consumer(format!("failed to read stream group entries: {e}"))
             })?;
-            if reply.keys.is_empty() {
-                continue;
-            }
-            deliveries.extend(Self::decode_stream_read(reply)?);
+            let mut shard_deliveries = Self::decode_stream_read(reply)?;
+            deliveries.append(&mut shard_deliveries);
         }
 
         if !deliveries.is_empty() {
+            deliveries.truncate(max_count);
             return Ok(deliveries);
         }
 
-        // Phase 2: Hybrid Blocking. Listen on ALL shards concurrently to fulfill 500ms SLA.
-        // We use COUNT 1 to act as a "liveness signal" while keeping memory spike predictable
-        // (~SHARD_COUNT events max).
+        // Phase 2: Blocking Fallback. Read from a single shard to provide fair coverage over time.
+        // pass false to NOACK to ensure at-least-once delivery.
         let blocking_options =
             Self::build_read_options(consumer_group, consumer_name, 1, Some(self.block_timeout), false);
 
@@ -376,7 +383,7 @@ impl RedisConsumer {
 
         let mut conn = self.connection_manager.clone();
         let reply: Result<StreamReadReply, RedisError> = conn
-            .xread_options(&key_strs, &id_strs, &blocking_options)
+            .xread_options(&key_strs[0..1], &id_strs[0..1], &blocking_options)
             .await;
 
         let reply = self
@@ -390,7 +397,7 @@ impl RedisConsumer {
                 || async {
                     let mut retry_conn = self.connection_manager.clone();
                     retry_conn
-                        .xread_options(&key_strs, &id_strs, &blocking_options)
+                        .xread_options(&key_strs[0..1], &id_strs[0..1], &blocking_options)
                         .await
                 },
             )
@@ -404,9 +411,7 @@ impl RedisConsumer {
             return Ok(Vec::new());
         }
 
-        let mut deliveries = Self::decode_stream_read(reply)?;
-        // Final safeguard: Strictly respect max_count
-        deliveries.truncate(max_count);
+        let deliveries = Self::decode_stream_read(reply)?;
         Ok(deliveries)
     }
 
@@ -589,11 +594,7 @@ impl ReliableConsumer for RedisConsumer {
     ) -> Result<(), EventError> {
         validate_stream_key(stream_key, tenant_id)?;
         Self::validate_retry_policy(&policy)?;
-
-        match policy {
-            RetryPolicy::Immediate => Ok(()),
-            _ => unreachable!("validate_retry_policy should have caught other variants"),
-        }
+        Ok(())
     }
 
     #[instrument(skip(self), fields(tenant_id = %tenant_id, stream_base = stream_base, consumer_group = consumer_group, consumer_name = consumer_name))]
@@ -692,13 +693,11 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_retry_policy_allows_immediate_retry() {
-        // validate_retry_policy only rejects delayed retries that require a queue.
-        // RedisConsumer::nack treats RetryPolicy::Immediate as a no-op
-        // since re-queuing within Redis Streams is not natively supported
-        // without affecting message order.
+    fn test_validate_retry_policy_rejects_all_without_queue() {
+        // RedisConsumer does not natively support nack/retry triggers.
+        // All policies are rejected to force reliance on PEL reclamation.
         let err = RedisConsumer::validate_retry_policy(&RetryPolicy::Immediate);
-        assert!(err.is_ok());
+        assert!(err.is_err());
     }
 
     #[test]

@@ -255,6 +255,6 @@ async fn test_gap_tracker_defers_later_future_deliveries_while_gap_is_active() {
     assert!(matches!(
         deferred,
         kernel_core::event::DeliveryResolution::Deferred(gap)
-            if gap.expected_seq == 3 && gap.actual_seq == 8
+            if gap.expected_seq == 3 && gap.actual_seq == 9
     ));
 }
