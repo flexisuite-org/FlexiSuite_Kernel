@@ -458,6 +458,9 @@ mod tests {
 
     #[test]
     fn test_validate_retry_policy_allows_immediate_retry() {
+        // validate_retry_policy only rejects delayed retries that require a queue.
+        // RedisConsumer::nack still rejects RetryPolicy::Immediate to avoid
+        // reordering pending stream entries.
         let err = RedisConsumer::validate_retry_policy(&RetryPolicy::Immediate);
         assert!(err.is_ok());
     }

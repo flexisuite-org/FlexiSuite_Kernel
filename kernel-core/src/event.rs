@@ -113,6 +113,12 @@ impl GapTracker {
                 Ok(DeliveryResolution::Apply)
             }
             Ordering::Greater => {
+                if let Some(active_gap) = self.active_gap.as_ref() {
+                    return Err(EventError::Consumer(format!(
+                        "delivery {} observed while gap recovery is already tracking expected sequence {} -> {}",
+                        delivery.delivery_id, active_gap.expected_seq, active_gap.actual_seq
+                    )));
+                }
                 let gap = GapObservation {
                     ordering_key: self.ordering_key.clone(),
                     expected_seq: self.expected_seq,
@@ -617,6 +623,76 @@ mod tests {
 
         assert!(matches!(err, EventError::Consumer(_)));
         assert_eq!(tracker.state(), GapRecoveryState::RebuildRequired);
+    }
+
+    #[test]
+    fn test_gap_tracker_keeps_first_gap_active_when_later_out_of_order_delivery_arrives() {
+        let tenant_id = TenantId::new("tenant-1").unwrap();
+        let entity_id = Uuid::now_v7();
+        let ordering_key = OrderMode::Entity {
+            entity_id,
+            seq: Some(1),
+        }
+        .tenant_scoped_ordering_key(&tenant_id);
+        let mut tracker = GapTracker::new(ordering_key, 3);
+        let first_delivery = Delivery {
+            delivery_id: "1-0".to_string(),
+            stream_key: "tenant-1:events:0".to_string(),
+            event: EventEnvelope {
+                event_id: Uuid::now_v7(),
+                tenant_id: tenant_id.clone(),
+                order_mode: OrderMode::Entity {
+                    entity_id,
+                    seq: Some(8),
+                },
+                payload: Value::Null,
+                created_at: Utc::now(),
+                event_type: "entity.updated".to_string(),
+            },
+        };
+        let second_delivery = Delivery {
+            delivery_id: "2-0".to_string(),
+            stream_key: "tenant-1:events:0".to_string(),
+            event: EventEnvelope {
+                event_id: Uuid::now_v7(),
+                tenant_id,
+                order_mode: OrderMode::Entity {
+                    entity_id,
+                    seq: Some(5),
+                },
+                payload: Value::Null,
+                created_at: Utc::now(),
+                event_type: "entity.updated".to_string(),
+            },
+        };
+
+        let first_observed = tracker
+            .observe_delivery(&first_delivery, Instant::now())
+            .expect("first out-of-order delivery must open the gap");
+        let active_gap = match first_observed {
+            DeliveryResolution::GapDetected(gap) => gap,
+            other => panic!("unexpected resolution: {other:?}"),
+        };
+
+        let err = tracker
+            .observe_delivery(&second_delivery, Instant::now())
+            .expect_err("subsequent out-of-order deliveries must not replace the active gap");
+
+        assert!(matches!(err, EventError::Consumer(_)));
+        let replay = EventEnvelope {
+            event_id: Uuid::now_v7(),
+            tenant_id: first_delivery.event.tenant_id.clone(),
+            order_mode: OrderMode::Entity {
+                entity_id,
+                seq: Some(3),
+            },
+            payload: Value::Null,
+            created_at: Utc::now(),
+            event_type: "entity.updated".to_string(),
+        };
+        tracker
+            .confirm_gap_replay(&active_gap, &replay, Instant::now())
+            .expect("original gap must remain active for replay confirmation");
     }
 
     #[tokio::test]
