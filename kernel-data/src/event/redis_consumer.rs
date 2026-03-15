@@ -179,9 +179,7 @@ impl RedisConsumer {
 
     fn validate_retry_policy(policy: &RetryPolicy) -> Result<(), EventError> {
         match policy {
-            RetryPolicy::Immediate => Err(EventError::Consumer(
-                "RetryPolicy::Immediate is not natively supported by RedisConsumer; messages remain in PEL for reclamation".to_string(),
-            )),
+            RetryPolicy::Immediate => Ok(()),
             RetryPolicy::BackoffUntil(retry_at) => Err(EventError::Consumer(format!(
                 "RetryPolicy::BackoffUntil({retry_at}) is not supported by RedisConsumer without a delayed retry queue",
             ))),
@@ -693,10 +691,13 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_retry_policy_rejects_all_without_queue() {
-        // RedisConsumer does not natively support nack/retry triggers.
-        // All policies are rejected to force reliance on PEL reclamation.
-        let err = RedisConsumer::validate_retry_policy(&RetryPolicy::Immediate);
+    fn test_validate_retry_policy_behavior() {
+        // Immediate is treated as a supported no-op (leave in PEL)
+        let ok = RedisConsumer::validate_retry_policy(&RetryPolicy::Immediate);
+        assert!(ok.is_ok());
+
+        // Others (delayed) are rejected because we have no delay queue logic
+        let err = RedisConsumer::validate_retry_policy(&RetryPolicy::BackoffUntil(chrono::Utc::now()));
         assert!(err.is_err());
     }
 
