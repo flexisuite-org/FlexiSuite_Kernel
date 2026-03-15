@@ -260,6 +260,27 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_calculate_shard_golden_vectors() {
+        // These values are pinned to the current behavior of XxHash64 and SHARD_COUNT=4
+        // to detect any accidental changes in hashing or partitioning.
+        let cases = [
+            ("tenant-1:e:entity-1", 21),
+            ("tenant-1:e:entity-2", 45),
+            ("tenant-2:c:causality-1", 26),
+            ("tenant-3:e:user-99", 30),
+        ];
+
+        for (input, expected_shard) in cases {
+            assert_eq!(
+                calculate_shard(input),
+                expected_shard,
+                "shard mismatch for input: {}",
+                input
+            );
+        }
+    }
+
+    #[test]
     fn test_validate_stream_key() {
         let tenant_id = TenantId::new("tenant_a").expect("Valid tenant ID");
 

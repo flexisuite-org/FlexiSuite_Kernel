@@ -17,6 +17,10 @@ use std::sync::{
 };
 use std::time::Duration;
 use tracing::{instrument, warn};
+#[cfg(test)]
+use testcontainers::{runners::AsyncRunner, ImageExt};
+#[cfg(test)]
+use testcontainers_modules::redis::{Redis, REDIS_PORT};
 
 #[derive(Clone)]
 pub struct RedisConsumer {
@@ -150,10 +154,14 @@ impl RedisConsumer {
         consumer_name: &str,
         max_count: usize,
         block_timeout: Option<Duration>,
+        noack: bool,
     ) -> StreamReadOptions {
-        let options = StreamReadOptions::default()
+        let mut options = StreamReadOptions::default()
             .group(consumer_group, consumer_name)
             .count(max_count);
+        if noack {
+            options = options.noack();
+        }
         match block_timeout {
             Some(timeout) => {
                 let block_ms = usize::try_from(timeout.as_millis()).unwrap_or(usize::MAX);
@@ -321,8 +329,8 @@ impl RedisConsumer {
                 break;
             }
 
-            let remaining = max_count - deliveries.len();
-            let options = Self::build_read_options(consumer_group, consumer_name, remaining, None);
+            let options =
+                Self::build_read_options(consumer_group, consumer_name, max_count, None, false);
             let mut conn = self.connection_manager.clone();
             let reply: Result<StreamReadReply, RedisError> =
                 conn.xread_options(&[key.as_str()], &[">"], &options).await;
@@ -361,7 +369,7 @@ impl RedisConsumer {
         // We use COUNT 1 to act as a "liveness signal" while keeping memory spike predictable
         // (~SHARD_COUNT events max).
         let blocking_options =
-            Self::build_read_options(consumer_group, consumer_name, 1, Some(self.block_timeout));
+            Self::build_read_options(consumer_group, consumer_name, 1, Some(self.block_timeout), true);
 
         let key_strs: Vec<&str> = keys.iter().map(|s| s.as_str()).collect();
         let id_strs: Vec<&str> = vec![">"; keys.len()];
@@ -747,8 +755,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_claim_pending_once_round_robin() -> Result<(), EventError> {
-        let redis_url = std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1/".into());
-        let client = redis::Client::open(redis_url.clone())
+        let node = Redis::default()
+            .with_tag("7.2-alpine")
+            .start()
+            .await
+            .expect("start redis");
+        let port = node.get_host_port_ipv4(REDIS_PORT).await.expect("get port");
+        let redis_url = format!("redis://127.0.0.1:{port}/");
+        let client = redis::Client::open(redis_url)
             .map_err(|e| EventError::Consumer(format!("failed to open redis client: {e}")))?;
         let consumer = RedisConsumer::new(client.clone()).await?;
 
