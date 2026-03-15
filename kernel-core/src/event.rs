@@ -140,7 +140,13 @@ impl GapTracker {
                 Ok(DeliveryResolution::Apply)
             }
             Ordering::Greater => {
-                if let Some(active_gap) = self.active_gap.as_ref() {
+                if let Some(active_gap) = self.active_gap.as_mut() {
+                    // Update actual_seq to the maximum sequence seen so far across all out-of-order deliveries
+                    // while this gap remains active. This ensures the caller knows the full extent of the gap.
+                    if delivery_seq > active_gap.actual_seq {
+                        active_gap.actual_seq = delivery_seq;
+                    }
+
                     // Protocol: Subsequent out-of-order deliveries are deferred.
                     // Callers should buffer these and re-feed them to observe_delivery
                     // only after the current active gap is closed.
@@ -984,7 +990,7 @@ mod tests {
             .expect("later out-of-order deliveries should remain deferred while recovering");
         assert!(matches!(
             deferred,
-            DeliveryResolution::Deferred(gap) if gap.expected_seq == 3 && gap.actual_seq == 8
+            DeliveryResolution::Deferred(gap) if gap.expected_seq == 3 && gap.actual_seq == 9
         ));
         assert_eq!(tracker.expected_seq(), 3);
         assert_eq!(tracker.state(), GapRecoveryState::GapDetected);
@@ -1520,5 +1526,76 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("missing ordering sequence"));
+    }
+    #[test]
+    fn test_gap_tracker_refeeds_deferred_deliveries_after_gap_closure() {
+        let tenant_id = TenantId::new("tenant-1").unwrap();
+        let entity_id = Uuid::now_v7();
+        let ordering_key = OrderMode::Entity {
+            entity_id,
+            seq: Some(1),
+        }
+        .tenant_scoped_ordering_key(&tenant_id);
+        let mut tracker = GapTracker::new(ordering_key.clone(), 3);
+
+        // 1. Out-of-order arrival (seq=5) -> GapDetected (expected 3)
+        let delivery_5 = mock_delivery_entity(&tenant_id, entity_id, 5);
+        let res = tracker.observe_delivery(&delivery_5, Instant::now()).unwrap();
+        assert!(matches!(res, DeliveryResolution::GapDetected(gap) if gap.expected_seq == 3 && gap.actual_seq == 5));
+
+        // 2. Further out-of-order (seq=6) -> Deferred (actual_seq updated to 6)
+        let delivery_6 = mock_delivery_entity(&tenant_id, entity_id, 6);
+        let res = tracker.observe_delivery(&delivery_6, Instant::now()).unwrap();
+        assert!(matches!(res, DeliveryResolution::Deferred(gap) if gap.actual_seq == 6));
+
+        // 3. Replay arrival (seq=3) -> confirm_gap_replay (expected becomes 4)
+        let replay_3 = delivery_3_mock(&tenant_id, entity_id, 3);
+        let active_gap = tracker.active_gap.clone().unwrap();
+        tracker.confirm_gap_replay(&active_gap, &replay_3, Instant::now()).unwrap();
+        assert_eq!(tracker.expected_seq(), 4);
+
+        // 4. Natural arrival (seq=4) -> Apply (expected becomes 5)
+        let delivery_4 = mock_delivery_entity(&tenant_id, entity_id, 4);
+        let res = tracker.observe_delivery(&delivery_4, Instant::now()).unwrap();
+        assert!(matches!(res, DeliveryResolution::Apply));
+        assert_eq!(tracker.expected_seq(), 5);
+
+        // 5. Gap should be closed now because expected_seq (5) reached the first out-of-order point.
+        // Re-feeding buffered delivery_5 -> Apply (expected becomes 6)
+        let res = tracker.observe_delivery(&delivery_5, Instant::now()).unwrap();
+        assert!(matches!(res, DeliveryResolution::Apply));
+        assert_eq!(tracker.expected_seq(), 6);
+
+        // 6. Re-feeding buffered delivery_6 -> Apply (expected becomes 7)
+        let res = tracker.observe_delivery(&delivery_6, Instant::now()).unwrap();
+        assert!(matches!(res, DeliveryResolution::Apply));
+        assert_eq!(tracker.expected_seq(), 7);
+        assert!(tracker.active_gap.is_none());
+    }
+
+    fn mock_delivery_entity(tenant_id: &TenantId, entity_id: Uuid, seq: u64) -> Delivery {
+        Delivery {
+            delivery_id: format!("{}-0", seq),
+            stream_key: format!("{}:events:0", tenant_id),
+            event: EventEnvelope {
+                event_id: Uuid::now_v7(),
+                tenant_id: tenant_id.clone(),
+                order_mode: OrderMode::Entity { entity_id, seq: Some(seq) },
+                payload: Value::Null,
+                created_at: Utc::now(),
+                event_type: "entity.updated".to_string(),
+            },
+        }
+    }
+
+    fn delivery_3_mock(tenant_id: &TenantId, entity_id: Uuid, seq: u64) -> EventEnvelope {
+        EventEnvelope {
+            event_id: Uuid::now_v7(),
+            tenant_id: tenant_id.clone(),
+            order_mode: OrderMode::Entity { entity_id, seq: Some(seq) },
+            payload: Value::Null,
+            created_at: Utc::now(),
+            event_type: "entity.updated".to_string(),
+        }
     }
 }

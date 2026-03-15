@@ -24,6 +24,9 @@ pub struct RedisConsumer {
     block_timeout: Duration,
     next_poll_start_shard: Arc<AtomicUsize>,
     ensured_consumer_groups: Cache<String, ()>,
+    /// The Redis stream ID to use when creating a missing consumer group during NOGROUP recovery.
+    /// "0" replays the full stream history (at-least-once), "$" starts with new messages only.
+    nogroup_recovery_start_id: String,
 }
 
 impl RedisConsumer {
@@ -38,12 +41,14 @@ impl RedisConsumer {
             block_timeout: Self::DEFAULT_BLOCK_TIMEOUT,
             next_poll_start_shard: Arc::new(AtomicUsize::new(0)),
             ensured_consumer_groups: Cache::new(2048), // Bounded to 2048 entries to prevent DoS
+            nogroup_recovery_start_id: "0".to_string(),
         })
     }
 
     pub async fn new_with_config(
         client: Client,
         block_timeout: Duration,
+        nogroup_recovery_start_id: Option<String>,
     ) -> Result<Self, EventError> {
         Self::validate_block_timeout(block_timeout)?;
         let connection_manager = client.get_connection_manager().await.map_err(|e| {
@@ -54,6 +59,7 @@ impl RedisConsumer {
             block_timeout,
             next_poll_start_shard: Arc::new(AtomicUsize::new(0)),
             ensured_consumer_groups: Cache::new(2048),
+            nogroup_recovery_start_id: nogroup_recovery_start_id.unwrap_or_else(|| "0".to_string()),
         })
     }
 
@@ -208,14 +214,16 @@ impl RedisConsumer {
         tenant_id: &TenantId,
         stream_base: &str,
         consumer_group: &str,
+        start_id: &str,
     ) -> Result<(), EventError> {
         for key in Self::stream_keys_for_tenant(tenant_id, stream_base) {
             let mut conn = self.connection_manager.clone();
             // Reliability Trade-off: Starting from "0" ensures at-least-once delivery by replaying
             // the full stream backlog. In a NOGROUP recovery scenario for an existing stream,
             // this can trigger a massive redelivery of historical events.
+            // Using "$" would skip the backlog and only receive new messages.
             let create_group: Result<(), RedisError> =
-                conn.xgroup_create_mkstream(&key, consumer_group, "0").await;
+                conn.xgroup_create_mkstream(&key, consumer_group, start_id).await;
             if let Err(error) = create_group {
                 if Self::is_busy_group_error(&error) {
                     continue;
@@ -241,9 +249,13 @@ impl RedisConsumer {
         // Design note: Intentionally skipping a strict lock before calling ensure_consumer_groups
         // (which does network I/O) to avoid blocking other concurrent polls. The underlying
         // XGROUP CREATE operation is idempotent, so concurrent redundant calls are benign.
-
-        self.ensure_consumer_groups(tenant_id, stream_base, consumer_group)
-            .await?;
+        self.ensure_consumer_groups(
+            tenant_id,
+            stream_base,
+            consumer_group,
+            &self.nogroup_recovery_start_id,
+        )
+        .await?;
 
         self.ensured_consumer_groups.insert(cache_key, ()).await;
         Ok(())

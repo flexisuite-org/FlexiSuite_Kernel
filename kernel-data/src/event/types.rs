@@ -181,6 +181,12 @@ pub trait ReliableConsumer: Send + Sync {
     /// `stream_base` is a logical stream name (e.g., `orders`) and MUST NOT include tenant prefix.
     /// Implementations MUST scope by `tenant_id` and internally fan-out across shards
     /// (e.g., `{tenant_id}:{stream}:0`..`{tenant_id}:{stream}:63`).
+    ///
+    /// ### Out-of-order Protocol
+    /// If an implementation uses `GapTracker`, deliveries returning `DeliveryResolution::Deferred`
+    /// MUST be buffered by the caller. These buffered deliveries MUST be re-processed (re-fed to
+    /// `observe_delivery`) only AFTER the corresponding gap is successfully closed (indicated by
+    /// a successful `confirm_gap_replay` or a subsequent natural `Ordering::Equal` match).
     async fn poll(
         &self,
         tenant_id: &TenantId,
