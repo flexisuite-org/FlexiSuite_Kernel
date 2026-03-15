@@ -1,9 +1,5 @@
-use std::fs;
 use std::hash::Hasher;
-use std::net::TcpListener;
-use std::path::PathBuf;
-use std::process::{Child, Command, Stdio};
-use std::time::Duration;
+use std::sync::OnceLock;
 
 use chrono::Utc;
 use kernel_core::auth::TenantId;
@@ -11,65 +7,25 @@ use kernel_core::event::{
     EventEnvelope, OrderMode, ReliableConsumer, ReliableProducer, SHARD_COUNT,
 };
 use kernel_data::event::{RedisConsumer, RedisProducer};
+use testcontainers::{RunnableImage, clients};
+use testcontainers_modules::redis::{REDIS_PORT, Redis};
 use twox_hash::XxHash64;
 use uuid::Uuid;
 
-struct RedisServerGuard {
-    child: Child,
-    data_dir: PathBuf,
+type RedisNode = testcontainers::Container<'static, Redis>;
+
+fn get_docker_client() -> &'static clients::Cli {
+    static DOCKER: OnceLock<&'static clients::Cli> = OnceLock::new();
+    DOCKER.get_or_init(|| Box::leak(Box::new(clients::Cli::default())))
 }
 
-impl Drop for RedisServerGuard {
-    fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-        let _ = fs::remove_dir_all(&self.data_dir);
-    }
-}
-
-fn reserve_local_port() -> u16 {
-    let listener = TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
-    let port = listener.local_addr().expect("local addr").port();
-    drop(listener);
-    port
-}
-
-async fn start_redis_server() -> (RedisServerGuard, redis::Client) {
-    let port = reserve_local_port();
-    let data_dir = PathBuf::from(format!("/tmp/flexisuite-redis-contract-{}", Uuid::now_v7()));
-    fs::create_dir_all(&data_dir).expect("create redis temp dir");
-
-    let child = Command::new("redis-server")
-        .arg("--port")
-        .arg(port.to_string())
-        .arg("--bind")
-        .arg("127.0.0.1")
-        .arg("--save")
-        .arg("")
-        .arg("--appendonly")
-        .arg("no")
-        .arg("--dir")
-        .arg(&data_dir)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("spawn redis-server");
-
-    let guard = RedisServerGuard { child, data_dir };
+async fn start_redis_server() -> (RedisNode, redis::Client) {
+    let docker = get_docker_client();
+    let node = docker.run(RunnableImage::from(Redis::default()).with_tag("7.2-alpine"));
+    let port = node.get_host_port_ipv4(REDIS_PORT);
     let client =
         redis::Client::open(format!("redis://127.0.0.1:{port}/")).expect("create redis client");
-
-    for _ in 0..50 {
-        if let Ok(mut conn) = client.get_multiplexed_async_connection().await {
-            let ping: redis::RedisResult<String> = redis::cmd("PING").query_async(&mut conn).await;
-            if ping.as_deref() == Ok("PONG") {
-                return (guard, client);
-            }
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-
-    panic!("redis-server did not become ready in time");
+    (node, client)
 }
 
 fn calculate_shard(key: &str) -> u64 {

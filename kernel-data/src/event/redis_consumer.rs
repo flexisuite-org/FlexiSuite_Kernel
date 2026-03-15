@@ -10,13 +10,15 @@ use redis::streams::{
     StreamReadReply,
 };
 use redis::{AsyncCommands, Client, RedisError};
+use std::collections::HashSet;
 #[cfg(test)]
 use std::hash::Hasher;
 use std::sync::{
     Arc,
     atomic::{AtomicUsize, Ordering as AtomicOrdering},
 };
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use tokio::sync::Mutex;
 use tracing::{instrument, warn};
 #[cfg(test)]
 use twox_hash::XxHash64;
@@ -26,6 +28,7 @@ pub struct RedisConsumer {
     connection_manager: ConnectionManager,
     block_timeout: Duration,
     next_poll_start_shard: Arc<AtomicUsize>,
+    ensured_consumer_groups: Arc<Mutex<HashSet<String>>>,
 }
 
 impl RedisConsumer {
@@ -39,6 +42,7 @@ impl RedisConsumer {
             connection_manager,
             block_timeout: Self::DEFAULT_BLOCK_TIMEOUT,
             next_poll_start_shard: Arc::new(AtomicUsize::new(0)),
+            ensured_consumer_groups: Arc::new(Mutex::new(HashSet::new())),
         })
     }
 
@@ -54,6 +58,7 @@ impl RedisConsumer {
             connection_manager,
             block_timeout,
             next_poll_start_shard: Arc::new(AtomicUsize::new(0)),
+            ensured_consumer_groups: Arc::new(Mutex::new(HashSet::new())),
         })
     }
 
@@ -148,10 +153,18 @@ impl RedisConsumer {
         consumer_group: &str,
         consumer_name: &str,
         max_count: usize,
+        block_timeout: Option<Duration>,
     ) -> StreamReadOptions {
-        StreamReadOptions::default()
+        let options = StreamReadOptions::default()
             .group(consumer_group, consumer_name)
-            .count(max_count)
+            .count(max_count);
+        match block_timeout {
+            Some(timeout) => {
+                let block_ms = usize::try_from(timeout.as_millis()).unwrap_or(usize::MAX);
+                options.block(block_ms)
+            }
+            None => options,
+        }
     }
 
     fn validate_retry_policy(policy: &RetryPolicy) -> Result<(), EventError> {
@@ -188,6 +201,14 @@ impl RedisConsumer {
         error.code() == Some("BUSYGROUP")
     }
 
+    fn consumer_group_cache_key(
+        tenant_id: &TenantId,
+        stream_base: &str,
+        consumer_group: &str,
+    ) -> String {
+        format!("{tenant_id}:{stream_base}:{consumer_group}")
+    }
+
     async fn ensure_consumer_groups(
         &self,
         tenant_id: &TenantId,
@@ -210,6 +231,28 @@ impl RedisConsumer {
         Ok(())
     }
 
+    async fn ensure_consumer_groups_cached(
+        &self,
+        tenant_id: &TenantId,
+        stream_base: &str,
+        consumer_group: &str,
+    ) -> Result<(), EventError> {
+        let cache_key = Self::consumer_group_cache_key(tenant_id, stream_base, consumer_group);
+        {
+            let ensured = self.ensured_consumer_groups.lock().await;
+            if ensured.contains(&cache_key) {
+                return Ok(());
+            }
+        }
+
+        self.ensure_consumer_groups(tenant_id, stream_base, consumer_group)
+            .await?;
+
+        let mut ensured = self.ensured_consumer_groups.lock().await;
+        ensured.insert(cache_key);
+        Ok(())
+    }
+
     async fn poll_once(
         &self,
         tenant_id: &TenantId,
@@ -225,37 +268,71 @@ impl RedisConsumer {
             .fetch_add(1, AtomicOrdering::Relaxed)
             % shard_count;
         let keys = Self::stream_keys_for_tenant_ordered(tenant_id, stream_base, start_shard);
-        let deadline = Instant::now() + self.block_timeout;
+        let mut deliveries = Vec::new();
 
-        loop {
-            let mut deliveries = Vec::new();
-
-            for key in &keys {
-                if deliveries.len() >= max_count {
-                    break;
-                }
-
-                let remaining = max_count - deliveries.len();
-                let options = Self::build_read_options(consumer_group, consumer_name, remaining);
-                let mut conn = self.connection_manager.clone();
-                let reply: StreamReadReply = conn
-                    .xread_options(&[key.as_str()], &[">"], &options)
-                    .await
-                    .map_err(|e| {
-                        EventError::Consumer(format!("failed to read stream group entries: {e}"))
-                    })?;
-                if reply.keys.is_empty() {
-                    continue;
-                }
-                deliveries.extend(Self::decode_stream_read(reply)?);
+        for key in &keys {
+            if deliveries.len() >= max_count {
+                break;
             }
 
-            if !deliveries.is_empty() || Instant::now() >= deadline {
-                return Ok(deliveries);
+            let remaining = max_count - deliveries.len();
+            let options = Self::build_read_options(consumer_group, consumer_name, remaining, None);
+            let mut conn = self.connection_manager.clone();
+            let reply: StreamReadReply = conn
+                .xread_options(&[key.as_str()], &[">"], &options)
+                .await
+                .map_err(|e| {
+                    EventError::Consumer(format!("failed to read stream group entries: {e}"))
+                })?;
+            if reply.keys.is_empty() {
+                continue;
             }
-
-            tokio::time::sleep(Duration::from_millis(25)).await;
+            deliveries.extend(Self::decode_stream_read(reply)?);
         }
+
+        if !deliveries.is_empty() {
+            return Ok(deliveries);
+        }
+
+        let Some(blocking_key) = keys.first() else {
+            return Ok(Vec::new());
+        };
+        let blocking_options = Self::build_read_options(
+            consumer_group,
+            consumer_name,
+            max_count,
+            Some(self.block_timeout),
+        );
+        let mut conn = self.connection_manager.clone();
+        let blocking_reply: StreamReadReply = conn
+            .xread_options(&[blocking_key.as_str()], &[">"], &blocking_options)
+            .await
+            .map_err(|e| {
+                EventError::Consumer(format!("failed to read stream group entries: {e}"))
+            })?;
+        let mut deliveries = Self::decode_stream_read(blocking_reply)?;
+
+        for key in keys.iter().skip(1) {
+            if deliveries.len() >= max_count {
+                break;
+            }
+
+            let remaining = max_count - deliveries.len();
+            let options = Self::build_read_options(consumer_group, consumer_name, remaining, None);
+            let mut conn = self.connection_manager.clone();
+            let reply: StreamReadReply = conn
+                .xread_options(&[key.as_str()], &[">"], &options)
+                .await
+                .map_err(|e| {
+                    EventError::Consumer(format!("failed to read stream group entries: {e}"))
+                })?;
+            if reply.keys.is_empty() {
+                continue;
+            }
+            deliveries.extend(Self::decode_stream_read(reply)?);
+        }
+
+        Ok(deliveries)
     }
 
     async fn claim_pending_once(
@@ -342,31 +419,17 @@ impl ReliableConsumer for RedisConsumer {
             return Ok(Vec::new());
         }
 
-        match self
-            .poll_once(
-                tenant_id,
-                stream_base,
-                consumer_group,
-                consumer_name,
-                max_count,
-            )
-            .await
-        {
-            Ok(deliveries) => Ok(deliveries),
-            Err(EventError::Consumer(message)) if message.contains("NOGROUP") => {
-                self.ensure_consumer_groups(tenant_id, stream_base, consumer_group)
-                    .await?;
-                self.poll_once(
-                    tenant_id,
-                    stream_base,
-                    consumer_group,
-                    consumer_name,
-                    max_count,
-                )
-                .await
-            }
-            Err(error) => Err(error),
-        }
+        self.ensure_consumer_groups_cached(tenant_id, stream_base, consumer_group)
+            .await?;
+
+        self.poll_once(
+            tenant_id,
+            stream_base,
+            consumer_group,
+            consumer_name,
+            max_count,
+        )
+        .await
     }
 
     #[instrument(skip(self), fields(tenant_id = %tenant_id, stream_key = stream_key, consumer_group = consumer_group, delivery_id = delivery_id))]
@@ -425,33 +488,18 @@ impl ReliableConsumer for RedisConsumer {
             return Ok(Vec::new());
         }
 
-        match self
-            .claim_pending_once(
-                tenant_id,
-                stream_base,
-                consumer_group,
-                consumer_name,
-                min_idle_ms,
-                max_count,
-            )
-            .await
-        {
-            Ok(deliveries) => Ok(deliveries),
-            Err(EventError::Consumer(message)) if message.contains("NOGROUP") => {
-                self.ensure_consumer_groups(tenant_id, stream_base, consumer_group)
-                    .await?;
-                self.claim_pending_once(
-                    tenant_id,
-                    stream_base,
-                    consumer_group,
-                    consumer_name,
-                    min_idle_ms,
-                    max_count,
-                )
-                .await
-            }
-            Err(error) => Err(error),
-        }
+        self.ensure_consumer_groups_cached(tenant_id, stream_base, consumer_group)
+            .await?;
+
+        self.claim_pending_once(
+            tenant_id,
+            stream_base,
+            consumer_group,
+            consumer_name,
+            min_idle_ms,
+            max_count,
+        )
+        .await
     }
 }
 
