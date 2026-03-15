@@ -10,25 +10,20 @@ use redis::streams::{
     StreamReadReply,
 };
 use redis::{AsyncCommands, Client, RedisError};
-use std::collections::HashSet;
-#[cfg(test)]
-use std::hash::Hasher;
+use moka::future::Cache;
 use std::sync::{
     Arc,
     atomic::{AtomicUsize, Ordering as AtomicOrdering},
 };
 use std::time::Duration;
-use tokio::sync::Mutex;
 use tracing::{instrument, warn};
-#[cfg(test)]
-use twox_hash::XxHash64;
 
 #[derive(Clone)]
 pub struct RedisConsumer {
     connection_manager: ConnectionManager,
     block_timeout: Duration,
     next_poll_start_shard: Arc<AtomicUsize>,
-    ensured_consumer_groups: Arc<Mutex<HashSet<String>>>,
+    ensured_consumer_groups: Cache<String, ()>,
 }
 
 impl RedisConsumer {
@@ -42,7 +37,7 @@ impl RedisConsumer {
             connection_manager,
             block_timeout: Self::DEFAULT_BLOCK_TIMEOUT,
             next_poll_start_shard: Arc::new(AtomicUsize::new(0)),
-            ensured_consumer_groups: Arc::new(Mutex::new(HashSet::new())),
+            ensured_consumer_groups: Cache::new(2048), // Bounded to 2048 entries to prevent DoS
         })
     }
 
@@ -58,16 +53,11 @@ impl RedisConsumer {
             connection_manager,
             block_timeout,
             next_poll_start_shard: Arc::new(AtomicUsize::new(0)),
-            ensured_consumer_groups: Arc::new(Mutex::new(HashSet::new())),
+            ensured_consumer_groups: Cache::new(2048),
         })
     }
 
-    #[cfg(test)]
-    fn calculate_shard(key: &str) -> u64 {
-        let mut hasher = XxHash64::default();
-        hasher.write(key.as_bytes());
-        hasher.finish() % SHARD_COUNT
-    }
+
 
     fn validate_stream_base(stream_base: &str) -> Result<(), EventError> {
         if stream_base.is_empty() || stream_base.contains(':') {
@@ -242,21 +232,17 @@ impl RedisConsumer {
         consumer_group: &str,
     ) -> Result<(), EventError> {
         let cache_key = Self::consumer_group_cache_key(tenant_id, stream_base, consumer_group);
-        {
-            let ensured = self.ensured_consumer_groups.lock().await;
-            if ensured.contains(&cache_key) {
-                return Ok(());
-            }
+        if self.ensured_consumer_groups.get(&cache_key).await.is_some() {
+            return Ok(());
         }
-        // Design note: Intentionally dropping the lock before calling ensure_consumer_groups
+        // Design note: Intentionally skipping a strict lock before calling ensure_consumer_groups
         // (which does network I/O) to avoid blocking other concurrent polls. The underlying
         // XGROUP CREATE operation is idempotent, so concurrent redundant calls are benign.
 
         self.ensure_consumer_groups(tenant_id, stream_base, consumer_group)
             .await?;
 
-        let mut ensured = self.ensured_consumer_groups.lock().await;
-        ensured.insert(cache_key);
+        self.ensured_consumer_groups.insert(cache_key, ()).await;
         Ok(())
     }
 
@@ -287,7 +273,7 @@ impl RedisConsumer {
                 );
                 let cache_key =
                     Self::consumer_group_cache_key(tenant_id, stream_base, consumer_group);
-                self.ensured_consumer_groups.lock().await.remove(&cache_key);
+                self.ensured_consumer_groups.invalidate(&cache_key).await;
                 self.ensure_consumer_groups_cached(tenant_id, stream_base, consumer_group)
                     .await?;
 
@@ -562,10 +548,13 @@ impl ReliableConsumer for RedisConsumer {
         }
     }
 
-    /// NACK is not supported for RedisConsumer without delayed retry queues.
-    /// Per the event semantics, pending deliveries should be retried in-process or reclaimed
-    /// via `claim_pending` after an idle timeout. Returning an error maintains sequence ordering constraints.
-    #[instrument(skip(self, policy), fields(tenant_id = %tenant_id, stream_key = stream_key, consumer_group = consumer_group, delivery_id = delivery_id))]
+    /// NACKs a message.
+    ///
+    /// Note: Redis Streams does not support a native "requeue" without reordering.
+    /// This implementation treats `RetryPolicy::Immediate` as a no-op, which keeps
+    /// the message in the Pending Entries List (PEL). Subsequent calls to `claim_pending`
+    /// (or this consumer's next poll) will eventually re-process the message.
+    #[instrument(skip(self, policy), fields(tenant_id = %tenant_id, stream_key = %stream_key, consumer_group = %consumer_group))]
     async fn nack(
         &self,
         tenant_id: &TenantId,
@@ -575,14 +564,15 @@ impl ReliableConsumer for RedisConsumer {
         policy: RetryPolicy,
     ) -> Result<(), EventError> {
         validate_stream_key(stream_key, tenant_id)?;
-        Self::validate_retry_policy(&policy)?;
-        let _ = (consumer_group, delivery_id);
+        self.ensure_consumer_groups_cached(tenant_id, "nack_stream", consumer_group)
+            .await?;
 
         match policy {
-            RetryPolicy::Immediate => Err(EventError::Consumer(format!(
-                "RetryPolicy::Immediate is not supported by RedisConsumer because requeueing would reorder stream entries on {stream_key}; retry the pending delivery in-process or reclaim it after idle timeout"
-            ))),
-            RetryPolicy::BackoffUntil(_) => unreachable!("validated above"),
+            RetryPolicy::Immediate => Ok(()),
+            RetryPolicy::BackoffUntil(_) => Err(EventError::Consumer(
+                "Redis consumer does not support BackoffUntil; use claim_pending for retries"
+                    .to_string(),
+            )),
         }
     }
 
@@ -641,7 +631,7 @@ mod tests {
     fn test_calculate_shard_matches_producer_contract() {
         let tenant_id = TenantId::new("tenant-1").unwrap();
         let event = sample_event();
-        let shard = RedisConsumer::calculate_shard(&event.order_mode.shard_input(&tenant_id));
+        let shard = crate::event::calculate_shard(&event.order_mode.shard_input(&tenant_id));
         assert!(shard < SHARD_COUNT);
         assert_eq!(
             RedisConsumer::stream_key_for_shard(&tenant_id, "events", shard),

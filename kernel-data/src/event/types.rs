@@ -62,7 +62,14 @@ impl TenantScopedOrderingKey {
     }
 
     pub fn shard_input(&self) -> String {
-        format!("{}:{}", self.tenant_id, self.logical_key())
+        match &self.ordering {
+            OrderingKey::Entity { entity_id } => format!("{}:e:{}", self.tenant_id, entity_id),
+            OrderingKey::Causality { key } => format!("{}:c:{}", self.tenant_id, key),
+        }
+    }
+
+    pub fn shard(&self) -> u64 {
+        calculate_shard(&self.shard_input())
     }
 }
 
@@ -89,6 +96,10 @@ impl OrderMode {
 
     pub fn shard_input(&self, tenant_id: &TenantId) -> String {
         self.tenant_scoped_ordering_key(tenant_id).shard_input()
+    }
+
+    pub fn shard(&self, tenant_id: &TenantId) -> u64 {
+        self.tenant_scoped_ordering_key(tenant_id).shard()
     }
 
     pub fn seq(&self) -> Option<u64> {
@@ -136,6 +147,16 @@ pub fn validate_stream_key(stream_key: &str, tenant_id: &TenantId) -> Result<(),
         )));
     }
     Ok(())
+}
+
+/// Authoritative sharding algorithm for FlexiSuite events.
+/// Uses XxHash64 for high-performance deterministic hashing.
+pub fn calculate_shard(key: &str) -> u64 {
+    use std::hash::Hasher;
+    use twox_hash::XxHash64;
+    let mut hasher = XxHash64::default();
+    hasher.write(key.as_bytes());
+    hasher.finish() % SHARD_COUNT
 }
 
 #[async_trait]
@@ -280,5 +301,16 @@ mod tests {
         assert_ne!(entity_key, causality_key);
         assert_eq!(entity_key.logical_key(), entity_id.to_string());
         assert_eq!(causality_key.logical_key(), entity_id.to_string());
+
+        // Verifying sharding contract: namespace separation MUST be reflected in shard_input
+        // even if logical_key is identical.
+        assert_ne!(
+            entity_key.shard_input(),
+            causality_key.shard_input(),
+            "namespace must be preserved in shard_input"
+        );
+
+        // While unlikely, shard() could collide due to mod 64.
+        // But shard_input() must be strictly different for isolation.
     }
 }

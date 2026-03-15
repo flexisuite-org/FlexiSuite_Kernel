@@ -1,37 +1,26 @@
-use std::hash::Hasher;
-use std::sync::OnceLock;
-
-use chrono::Utc;
 use kernel_core::auth::TenantId;
 use kernel_core::event::{
-    EventEnvelope, OrderMode, ReliableConsumer, ReliableProducer, SHARD_COUNT,
+    calculate_shard, EventEnvelope, OrderMode, ReliableConsumer, ReliableProducer,
 };
 use kernel_data::event::{RedisConsumer, RedisProducer};
-use testcontainers::{RunnableImage, clients};
-use testcontainers_modules::redis::{REDIS_PORT, Redis};
-use twox_hash::XxHash64;
+use testcontainers::{ContainerAsync, ImageExt};
+use testcontainers::runners::AsyncRunner;
+use testcontainers_modules::redis::{Redis, REDIS_PORT};
 use uuid::Uuid;
+use chrono::Utc;
 
-type RedisNode = testcontainers::Container<'static, Redis>;
-
-fn get_docker_client() -> &'static clients::Cli {
-    static DOCKER: OnceLock<&'static clients::Cli> = OnceLock::new();
-    DOCKER.get_or_init(|| Box::leak(Box::new(clients::Cli::default())))
-}
+type RedisNode = ContainerAsync<Redis>;
 
 async fn start_redis_server() -> (RedisNode, redis::Client) {
-    let docker = get_docker_client();
-    let node = docker.run(RunnableImage::from(Redis::default()).with_tag("7.2-alpine"));
-    let port = node.get_host_port_ipv4(REDIS_PORT);
+    let node = Redis::default().with_tag("7.2-alpine").start().await.expect("start redis");
+    let port = node.get_host_port_ipv4(REDIS_PORT).await.expect("get port");
     let client =
         redis::Client::open(format!("redis://127.0.0.1:{port}/")).expect("create redis client");
     (node, client)
 }
 
-fn calculate_shard(key: &str) -> u64 {
-    let mut hasher = XxHash64::default();
-    hasher.write(key.as_bytes());
-    hasher.finish() % SHARD_COUNT
+fn calculate_shard_local(key: &str) -> u64 {
+    calculate_shard(key)
 }
 
 async fn publish_entity_event(
@@ -63,7 +52,7 @@ async fn publish_entity_event(
 
 fn find_distinct_entity_shards(tenant_id: &TenantId) -> ((Uuid, u64), (Uuid, u64)) {
     let first_entity_id = Uuid::now_v7();
-    let first_shard = calculate_shard(
+    let first_shard = calculate_shard_local(
         &OrderMode::Entity {
             entity_id: first_entity_id,
             seq: Some(1),
@@ -73,7 +62,7 @@ fn find_distinct_entity_shards(tenant_id: &TenantId) -> ((Uuid, u64), (Uuid, u64
 
     for _ in 0..1024 {
         let second_entity_id = Uuid::now_v7();
-        let second_shard = calculate_shard(
+        let second_shard = calculate_shard_local(
             &OrderMode::Entity {
                 entity_id: second_entity_id,
                 seq: Some(1),
@@ -106,7 +95,7 @@ async fn test_claim_pending_failover_preserves_ordering() {
         seq: Some(1),
     }
     .shard_input(&tenant_id);
-    let shard = calculate_shard(&ordering_key);
+    let shard = calculate_shard_local(&ordering_key);
     let stream_key = format!("{tenant_id}:{stream_base}:{shard}");
 
     let mut admin = client
@@ -243,7 +232,7 @@ async fn test_poll_recovers_existing_backlog_when_consumer_group_is_missing() {
     assert_eq!(
         deliveries.len(),
         2,
-        "backlog should remain visible after group creation"
+        "backlog should remain visible after_group creation"
     );
     assert_eq!(
         deliveries

@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 
 pub use kernel_data::event::{
     Delivery, EventEnvelope, EventError, OrderMode, PublishAck, ReliableConsumer, ReliableProducer,
-    RetryPolicy, SHARD_COUNT, TenantScopedOrderingKey, validate_stream_key,
+    RetryPolicy, SHARD_COUNT, TenantScopedOrderingKey, calculate_shard, validate_stream_key,
 };
 use serde::{Deserialize, Serialize};
 
@@ -107,7 +107,12 @@ impl GapTracker {
         match delivery_seq.cmp(&self.expected_seq) {
             Ordering::Less => Ok(DeliveryResolution::Duplicate),
             Ordering::Equal => {
-                self.expected_seq = self.expected_seq.saturating_add(1);
+                self.expected_seq = self.expected_seq.checked_add(1).ok_or_else(|| {
+                    EventError::Consumer(format!(
+                        "sequence overflow for ordering key {:?}",
+                        self.ordering_key
+                    ))
+                })?;
                 if let Some(active_gap) = self.active_gap.as_ref() {
                     if self.expected_seq < active_gap.actual_seq {
                         // Safety: active_gap is Some, which means a gap was previously detected
@@ -183,6 +188,16 @@ impl GapTracker {
                 self.state = progress_gap_recovery(self.state, true);
                 self.gap_started_at = Some(now); // リプレイ完了を待つためにタイムアウト基準をリセット
                 return Ok(Some(GapRecoveryAction::ReplayApply { gap, event }));
+            } else {
+                tracing::error!(
+                    expected_key = ?gap.ordering_key,
+                    got_key = ?replay_key,
+                    expected_seq = gap.expected_seq,
+                    got_seq = ?replay_seq,
+                    event_id = %event.event_id,
+                    "recover_gap: mismatched event returned from lookup_missing"
+                );
+                // Fall through to RebuildRequired with explicit error log above.
             }
         }
 
@@ -243,7 +258,12 @@ impl GapTracker {
             ));
         }
 
-        self.expected_seq = self.expected_seq.saturating_add(1);
+        self.expected_seq = self.expected_seq.checked_add(1).ok_or_else(|| {
+            EventError::Consumer(format!(
+                "sequence overflow during gap replay for ordering key {:?}",
+                self.ordering_key
+            ))
+        })?;
         if self.expected_seq < active_gap.actual_seq {
             self.state = progress_gap_recovery(self.state, true);
             self.gap_started_at = Some(now);
@@ -257,6 +277,9 @@ impl GapTracker {
             // We use GapRecoveryState::Recovering explicitly to guarantee transition to Normal,
             // safely bypassing the current state (e.g. GapDetected) which would incorrectly transition
             // to RebuildRequired if we mistakenly passed outbox_has_missing_seq=false.
+            //
+            // Mention: gap_started_at and active_gap are cleared here and this choice is deliberate 
+            // to ensure the state machine progresses correctly when the gap is filled.
             self.state = progress_gap_recovery(GapRecoveryState::Recovering, false);
             self.gap_started_at = None;
             self.active_gap = None;

@@ -15,5 +15,6 @@ pub use redis_producer::RedisProducer;
 pub use repository::EventRepository;
 pub use types::{
     Delivery, EventEnvelope, EventError, OrderMode, OrderingKey, PublishAck, ReliableConsumer,
-    ReliableProducer, RetryPolicy, SHARD_COUNT, TenantScopedOrderingKey, validate_stream_key,
+    ReliableProducer, RetryPolicy, SHARD_COUNT, TenantScopedOrderingKey, calculate_shard,
+    validate_stream_key,
 };

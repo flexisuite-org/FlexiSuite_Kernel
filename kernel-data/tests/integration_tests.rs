@@ -22,24 +22,18 @@ use sea_orm::{
     TransactionTrait,
 };
 use std::sync::OnceLock;
-use testcontainers::{RunnableImage, clients};
+use testcontainers::ContainerAsync;
+use testcontainers::{ImageExt, runners::AsyncRunner};
 use testcontainers_modules::postgres::Postgres;
 use uuid::Uuid;
 
 const TEST_INTERNAL_SECRET: &str = "test_internal_secret_123";
 
-type PostgresNode = testcontainers::Container<'static, Postgres>;
-
-fn get_docker_client() -> &'static clients::Cli {
-    static DOCKER: OnceLock<&'static clients::Cli> = OnceLock::new();
-    DOCKER.get_or_init(|| Box::leak(Box::new(clients::Cli::default())))
-}
+type PostgresNode = ContainerAsync<Postgres>;
 
 async fn setup_test_db() -> (DatabaseConnection, PostgresNode) {
-    let docker = get_docker_client();
-    let image = RunnableImage::from(Postgres::default()).with_tag("15-alpine");
-    let node = docker.run(image);
-    let port = node.get_host_port_ipv4(5432);
+    let node = Postgres::default().with_tag("15-alpine").start().await.expect("start postgres");
+    let port = node.get_host_port_ipv4(5432).await.expect("get port");
     let connection_string = format!("postgres://postgres:postgres@127.0.0.1:{}/postgres", port);
 
     let db = Database::connect(&connection_string)
@@ -287,10 +281,8 @@ async fn test_delete_entity_contract() {
 #[tokio::test(flavor = "multi_thread")]
 #[ignore] // Requires Docker
 async fn test_migration_succeeds_without_flexi_role() {
-    let docker = clients::Cli::default();
-    let image = RunnableImage::from(Postgres::default()).with_tag("15-alpine");
-    let node = docker.run(image);
-    let port = node.get_host_port_ipv4(5432);
+    let node = Postgres::default().with_tag("15-alpine").start().await.expect("start postgres");
+    let port = node.get_host_port_ipv4(5432).await.expect("get port");
     let connection_string = format!("postgres://postgres:postgres@127.0.0.1:{}/postgres", port);
 
     let db = Database::connect(&connection_string)
@@ -352,10 +344,8 @@ async fn test_authorize_rejects_nonce_reuse() {
 #[tokio::test(flavor = "multi_thread")]
 #[ignore] // Requires Docker
 async fn test_authorized_tenant_id_rejects_manual_context_tampering() {
-    let docker = clients::Cli::default();
-    let image = RunnableImage::from(Postgres::default()).with_tag("15-alpine");
-    let node = docker.run(image);
-    let port = node.get_host_port_ipv4(5432);
+    let node = Postgres::default().with_tag("15-alpine").start().await.expect("start postgres");
+    let port = node.get_host_port_ipv4(5432).await.expect("get port");
     let connection_string = format!("postgres://postgres:postgres@127.0.0.1:{}/postgres", port);
 
     let db = Database::connect(&connection_string)
