@@ -1,7 +1,5 @@
-use sea_orm::{ActiveValue, ConnectionTrait, DatabaseConnection, DatabaseTransaction, EntityTrait, QueryTrait, TransactionTrait};
+use sea_orm::{ConnectionTrait, DatabaseConnection, DatabaseTransaction, TransactionTrait};
 use std::sync::Arc;
-use uuid::Uuid;
-use crate::entities::audit_log;
 
 /// A marker token that can only be constructed by the background task runner.
 /// This prevents API handlers from constructing a `KernelContext` directly.
@@ -71,7 +69,9 @@ impl KernelContext {
                 Ok(result)
             }
             Err(e) => {
-                let _ = txn.rollback().await;
+                if let Err(rb_err) = txn.rollback().await {
+                    tracing::error!("transaction rollback failed: {:?}", rb_err);
+                }
                 Err(e)
             }
         }
@@ -80,29 +80,25 @@ impl KernelContext {
     /// Logs an audit record for a privileged cross-tenant operation.
     ///
     /// Because `KernelContext` operates across tenants or operates on system-level
-    /// maintenance tasks, it uses a generic `system` tenant context in the audit log
-    /// and ensures the background operation has a trace.
+    /// maintenance tasks, it delegates the audit record insertion to the
+    /// `flexi.log_privileged_audit` `SECURITY DEFINER` function, which writes into
+    /// `audit_logs` under the `system` tenant context and `kernel_admin` actor ID.
     pub async fn log_privileged_audit(
-        &self,
         txn: &DatabaseTransaction,
         action: String,
         resource: String,
         details: serde_json::Value,
     ) -> Result<(), sea_orm::DbErr> {
-        let log = audit_log::ActiveModel {
-            id: ActiveValue::Set(Uuid::now_v7().to_string()),
-            tenant_id: ActiveValue::Set("system".to_string()),
-            actor_id: ActiveValue::Set("kernel_admin".to_string()),
-            action: ActiveValue::Set(action),
-            resource: ActiveValue::Set(resource),
-            details: ActiveValue::Set(details),
-            ip_address: ActiveValue::NotSet,
-            user_agent: ActiveValue::Set(Some("kernel-background-runner".to_string())),
-            created_at: ActiveValue::Set(chrono::Utc::now().into()),
-            archived_at: ActiveValue::NotSet,
-        };
-
-        let stmt = audit_log::Entity::insert(log).build(txn.get_database_backend());
+        use sea_orm::{DbBackend, Statement};
+        let stmt = Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "SELECT flexi.log_privileged_audit($1, $2, $3)",
+            [
+                action.into(),
+                resource.into(),
+                details.into(),
+            ],
+        );
         txn.execute(stmt).await?;
         Ok(())
     }
@@ -111,8 +107,10 @@ impl KernelContext {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::entities::audit_log;
     use sea_orm::{DatabaseBackend, MockDatabase, MockExecResult, TransactionTrait};
     use serde_json::json;
+    use uuid::Uuid;
 
     #[tokio::test]
     async fn test_kernel_context_with_tx_success() {
@@ -125,7 +123,7 @@ mod tests {
                 MockExecResult {
                     last_insert_id: 0,
                     rows_affected: 1,
-                }, // insert
+                }, // function call execute
                 MockExecResult {
                     last_insert_id: 0,
                     rows_affected: 0,
@@ -187,12 +185,10 @@ mod tests {
         let db = Arc::new(db);
         let ctx = KernelContext::new(BackgroundRunnerToken::new(), db);
 
-        let ctx_clone = ctx.clone();
         let result = ctx
             .with_tx(|txn| {
-                let ctx_inner = ctx_clone.clone();
                 Box::pin(async move {
-                    ctx_inner.log_privileged_audit(
+                    KernelContext::log_privileged_audit(
                         txn,
                         "test_action".to_string(),
                         "test_resource".to_string(),

@@ -29,6 +29,7 @@ struct ObjectLockConfig {
 #[derive(Clone)]
 struct AppConfig {
     database_url: String,
+    kernel_database_url: String,
     s3_bucket: String,
     region_name: String,
     interval_secs: u64,
@@ -95,9 +96,16 @@ async fn main() -> Result<()> {
     let db = std::sync::Arc::new(
         Database::connect(&config.database_url)
             .await
-            .context("failed to connect database")?,
+            .context("failed to connect primary database")?,
     );
-    info!("Connected to database");
+    info!("Connected to primary database");
+
+    let kernel_db = std::sync::Arc::new(
+        Database::connect(&config.kernel_database_url)
+            .await
+            .context("failed to connect kernel admin database")?,
+    );
+    info!("Connected to kernel admin database");
 
     use kernel_core::auth::SystemTenantContext;
     let init_ctx = TenantContext::from(SystemTenantContext).with_db(db.clone());
@@ -123,7 +131,7 @@ async fn main() -> Result<()> {
             }
             _ = interval.tick(), if !shutdown_requested => {
                 info!("Starting archive cycle...");
-                match run_archive_cycle(&db, &s3_client, &config).await {
+                match run_archive_cycle(&db, &kernel_db, &s3_client, &config).await {
                     Ok(()) => info!("Archive cycle completed."),
                     Err(e) => error!("Archive cycle failed: {}", e),
                 }
@@ -141,6 +149,8 @@ async fn main() -> Result<()> {
 
 fn load_config() -> Result<AppConfig> {
     let database_url = env::var("DATABASE_URL").context("DATABASE_URL must be set")?;
+    let kernel_database_url = env::var("KERNEL_DATABASE_URL")
+        .unwrap_or_else(|_| database_url.clone());
     let s3_bucket = env::var("AUDIT_LOG_BUCKET").context("AUDIT_LOG_BUCKET must be set")?;
 
     let region_name = match env::var("AWS_REGION") {
@@ -190,6 +200,7 @@ fn load_config() -> Result<AppConfig> {
 
     Ok(AppConfig {
         database_url,
+        kernel_database_url,
         s3_bucket,
         region_name,
         interval_secs,
@@ -255,13 +266,14 @@ fn parse_object_lock_config() -> Result<Option<ObjectLockConfig>> {
 
 async fn run_archive_cycle(
     db: &std::sync::Arc<DatabaseConnection>,
+    kernel_db: &std::sync::Arc<DatabaseConnection>,
     s3: &Client,
     config: &AppConfig,
 ) -> Result<()> {
     use kernel_core::auth::SystemTenantContext;
     use kernel_data::kernel_context::create_background_runner_context;
 
-    let kernel_ctx = create_background_runner_context(db.clone());
+    let kernel_ctx = create_background_runner_context(kernel_db.clone());
 
     let system_ctx = TenantContext::from(SystemTenantContext).with_db(db.clone());
     KeyManager::rotate_keys(&system_ctx)
@@ -382,11 +394,9 @@ async fn run_archive_cycle(
                 "archived_entity_history_count": eh_count,
                 "archived_audit_log_count": al_count,
             });
-            let kernel_ctx_clone = kernel_ctx.clone();
             if let Err(e) = kernel_ctx.with_tx(|txn| {
-                let inner_ctx = kernel_ctx_clone.clone();
                 Box::pin(async move {
-                    inner_ctx.log_privileged_audit(
+                    kernel_data::kernel_context::KernelContext::log_privileged_audit(
                         txn,
                         "kernel_archiver.archive_records".to_string(),
                         "system:archive".to_string(),
