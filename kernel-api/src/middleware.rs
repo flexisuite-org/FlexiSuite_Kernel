@@ -1209,7 +1209,8 @@ impl RedisQuotaStore {
                 if string.match(key, ":cb$") then
                     local retry_after = 30 -- fixed backoff for circuit breaker
                     redis.call("HSET", key, "state", "open", "until", now + retry_after)
-                    redis.call("PEXPIRE", key, 60000)
+                    -- PEXPIRE is coupled to the 30s backoff; must be > 30s to prevent silent reset
+                    redis.call("PEXPIRE", key, 120000)
                     return {0, retry_after}
                 else
                     local required = cost - filled

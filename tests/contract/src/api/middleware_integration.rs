@@ -207,6 +207,7 @@ pub async fn setup_app_with_config_and_db(
     db: sea_orm::DatabaseConnection,
 ) -> axum::Router {
     config.require_redis = false;
+    config.allow_mock_quota = true;
     let state = if let Some(s) = store {
         MiddlewareState::with_store(
             config,
