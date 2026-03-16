@@ -511,6 +511,7 @@ async fn test_quota_evaluation_priority_and_clipping() {
     let idempotency_key = "quota-test-key-no-test-utils";
 
     let req = builder
+        .header("X-Mock-Quota-CircuitBreaker", "true")
         .header("X-Mock-Quota-System", "true")
         .header("X-Mock-Quota-Tenant", "true")
         .header("Idempotency-Key", idempotency_key)

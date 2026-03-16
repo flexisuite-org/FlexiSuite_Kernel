@@ -53,6 +53,7 @@ pub struct TenantQuotaOverride {
     pub system_hard_limit: Option<QuotaLayerConfig>,
     pub tenant_budget: Option<QuotaLayerConfig>,
     pub api_rate_limit: Option<QuotaLayerConfig>,
+    pub circuit_breaker: Option<QuotaLayerConfig>,
 }
 
 #[derive(Clone, Debug)]
@@ -60,6 +61,7 @@ pub struct QuotaConfig {
     pub system_hard_limit: QuotaLayerConfig,
     pub tenant_budget: QuotaLayerConfig,
     pub api_rate_limit: QuotaLayerConfig,
+    pub circuit_breaker: QuotaLayerConfig,
     pub tenant_overrides: HashMap<String, TenantQuotaOverride>,
 }
 
@@ -171,6 +173,11 @@ impl Default for MiddlewareConfig {
                     rate: get_env_f64("QUOTA_API_RATE_LIMIT_RATE", 16.666),
                     capacity: get_env_f64("QUOTA_API_RATE_LIMIT_CAPACITY", 100.0),
                     cost: get_env_f64("QUOTA_API_RATE_LIMIT_COST", 1.0),
+                },
+                circuit_breaker: QuotaLayerConfig {
+                    rate: get_env_f64("QUOTA_CIRCUIT_BREAKER_RATE", 10.0),
+                    capacity: get_env_f64("QUOTA_CIRCUIT_BREAKER_CAPACITY", 100.0),
+                    cost: get_env_f64("QUOTA_CIRCUIT_BREAKER_COST", 1.0),
                 },
                 tenant_overrides: HashMap::new(),
             },
@@ -1157,6 +1164,21 @@ impl RedisQuotaStore {
             local cost = tonumber(ARGV[3])
             local now = tonumber(ARGV[4])
 
+            -- Circuit breaker logic
+            if string.match(key, ":cb$") then
+                local cb_state = redis.call("HGET", key, "state")
+                local cb_until = tonumber(redis.call("HGET", key, "until"))
+
+                if cb_state == "open" then
+                    if now < cb_until then
+                        return {0, cb_until - now}
+                    else
+                        redis.call("HSET", key, "state", "half-open")
+                        cb_state = "half-open"
+                    end
+                end
+            end
+
             local tokens = tonumber(redis.call("HGET", key, "tokens"))
             local last_refill = tonumber(redis.call("HGET", key, "last_refill"))
 
@@ -1170,13 +1192,26 @@ impl RedisQuotaStore {
 
             if filled >= cost then
                 local new_tokens = filled - cost
-                redis.call("HSET", key, "tokens", new_tokens, "last_refill", now)
+
+                if string.match(key, ":cb$") then
+                    redis.call("HSET", key, "tokens", new_tokens, "last_refill", now, "state", "closed")
+                else
+                    redis.call("HSET", key, "tokens", new_tokens, "last_refill", now)
+                end
+
                 redis.call("PEXPIRE", key, 60000)
                 return {1, new_tokens}
             else
-                local required = cost - filled
-                local retry_after = required / rate
-                return {0, retry_after}
+                if string.match(key, ":cb$") then
+                    local retry_after = 30 -- fixed backoff for circuit breaker
+                    redis.call("HSET", key, "state", "open", "until", now + retry_after)
+                    redis.call("PEXPIRE", key, 60000)
+                    return {0, retry_after}
+                else
+                    local required = cost - filled
+                    local retry_after = required / rate
+                    return {0, retry_after}
+                end
             end
         "#,
         );
@@ -1187,12 +1222,27 @@ impl RedisQuotaStore {
             local idx = 3
             local keys = {}
             local new_tokens = {}
+            local is_cb = {}
 
             for i = 1, n do
                 local key = KEYS[i]
                 local rate = tonumber(ARGV[idx])
                 local capacity = tonumber(ARGV[idx + 1])
                 local cost = tonumber(ARGV[idx + 2])
+
+                is_cb[i] = string.match(key, ":cb$") ~= nil
+
+                if is_cb[i] then
+                    local cb_state = redis.call("HGET", key, "state")
+                    local cb_until = tonumber(redis.call("HGET", key, "until"))
+                    if cb_state == "open" then
+                        if now < cb_until then
+                            return {0, i, cb_until - now}
+                        else
+                            redis.call("HSET", key, "state", "half-open")
+                        end
+                    end
+                end
 
                 local tokens = tonumber(redis.call("HGET", key, "tokens"))
                 local last_refill = tonumber(redis.call("HGET", key, "last_refill"))
@@ -1204,8 +1254,15 @@ impl RedisQuotaStore {
                 local delta = math.max(0, now - last_refill)
                 local filled = math.min(capacity, tokens + (delta * rate))
                 if filled < cost then
-                    local retry_after = (cost - filled) / rate
-                    return {0, i, retry_after}
+                    if is_cb[i] then
+                        local retry_after = 30
+                        redis.call("HSET", key, "state", "open", "until", now + retry_after)
+                        redis.call("PEXPIRE", key, 60000)
+                        return {0, i, retry_after}
+                    else
+                        local retry_after = (cost - filled) / rate
+                        return {0, i, retry_after}
+                    end
                 end
 
                 keys[i] = key
@@ -1214,7 +1271,11 @@ impl RedisQuotaStore {
             end
 
             for i = 1, n do
-                redis.call("HSET", keys[i], "tokens", new_tokens[i], "last_refill", now)
+                if is_cb[i] then
+                    redis.call("HSET", keys[i], "tokens", new_tokens[i], "last_refill", now, "state", "closed")
+                else
+                    redis.call("HSET", keys[i], "tokens", new_tokens[i], "last_refill", now)
+                end
                 redis.call("PEXPIRE", keys[i], 60000)
             end
 
@@ -1272,7 +1333,16 @@ impl RedisQuotaStore {
                 s.push_str(":api");
                 Some((s, q.rate, q.capacity, q.cost))
             }
-            QuotaLayer::CircuitBreaker => None,
+            QuotaLayer::CircuitBreaker => {
+                let q = tenant_override
+                    .and_then(|o| o.circuit_breaker)
+                    .unwrap_or(self.quota.circuit_breaker);
+                let mut s = String::with_capacity(128);
+                s.push_str("quota:{global}:tenant:");
+                append_sha256_hex(tenant_id_str.as_bytes(), &mut s);
+                s.push_str(":cb");
+                Some((s, q.rate, q.capacity, q.cost))
+            }
         }
     }
 }
@@ -1811,6 +1881,15 @@ pub async fn quota_middleware(req: Request<Body>, next: Next) -> Result<Response
 
     #[cfg(any(test, feature = "test-utils"))]
     {
+        if parts.headers.contains_key("X-Mock-Quota-CircuitBreaker") {
+            let violation = QuotaViolation {
+                layer: QuotaLayer::CircuitBreaker,
+                retry_after_s: 30,
+            };
+            warn!("Circuit Breaker exceeded (Mock)");
+            return Err(violation_to_response(&violation));
+        }
+
         if parts.headers.contains_key("X-Mock-Quota-System") {
             let violation = QuotaViolation {
                 layer: QuotaLayer::SystemHardLimit,
@@ -1844,6 +1923,7 @@ pub async fn quota_middleware(req: Request<Body>, next: Next) -> Result<Response
         .check_and_update_multi(
             tenant_ctx.tenant_id(),
             &[
+                QuotaLayer::CircuitBreaker,
                 QuotaLayer::SystemHardLimit,
                 QuotaLayer::TenantBudget,
                 QuotaLayer::ApiRateLimit,
