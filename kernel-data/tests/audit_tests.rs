@@ -236,7 +236,7 @@ async fn test_kernel_context_log_privileged_audit_integration() {
 
     // Roles
     db.execute_unprepared("DO $$ BEGIN IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = 'flexi') THEN CREATE ROLE flexi; END IF; END $$;").await.expect("Failed to create role flexi");
-    db.execute_unprepared("DO $$ BEGIN IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = 'flexi_kernel_admin') THEN CREATE ROLE flexi_kernel_admin; END IF; END $$;").await.expect("Failed to create role flexi_kernel_admin");
+    db.execute_unprepared("DO $$ BEGIN IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = 'flexi_kernel_admin') THEN CREATE ROLE flexi_kernel_admin LOGIN PASSWORD 'admin_pass'; END IF; END $$;").await.expect("Failed to create role flexi_kernel_admin");
     db.execute_unprepared("DO $$ BEGIN IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = 'flexi_test_unprivileged') THEN CREATE ROLE flexi_test_unprivileged LOGIN PASSWORD 'password'; END IF; END $$;").await.expect("Failed to create unprivileged role");
 
     // Migrations
@@ -244,8 +244,12 @@ async fn test_kernel_context_log_privileged_audit_integration() {
         .await
         .expect("Failed to run migrations");
 
-    let kernel_db_string = format!("postgres://postgres:postgres@127.0.0.1:{}/postgres", port);
+    let kernel_db_string = format!("postgres://flexi_kernel_admin:admin_pass@127.0.0.1:{}/postgres", port);
     let kernel_db = Arc::new(Database::connect(&kernel_db_string).await.expect("Failed to connect admin db"));
+
+    // Ensure the flexi_kernel_admin role has USAGE on schema flexi and can access audit_logs
+    db.execute_unprepared("GRANT USAGE ON SCHEMA flexi TO flexi_kernel_admin;").await.expect("grant usage");
+    db.execute_unprepared("GRANT SELECT ON flexi.audit_logs TO flexi_kernel_admin;").await.expect("grant select");
 
     // We can execute the SECURITY DEFINER function via KernelContext
     let kernel_ctx = create_background_runner_context(kernel_db.clone());
@@ -293,5 +297,10 @@ async fn test_kernel_context_log_privileged_audit_integration() {
     };
 
     let result = audit_log::Entity::insert(log).exec(&unpriv_db).await;
-    assert!(result.is_err(), "Unprivileged direct insert should fail due to RLS or permissions");
+    let err = result.unwrap_err();
+    assert!(
+        err.to_string().contains("permission denied") || err.to_string().contains("violates row-level security policy"),
+        "Unprivileged direct insert should fail due to RLS or permissions, but got: {:?}",
+        err
+    );
 }

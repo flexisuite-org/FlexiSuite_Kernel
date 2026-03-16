@@ -149,8 +149,13 @@ async fn main() -> Result<()> {
 
 fn load_config() -> Result<AppConfig> {
     let database_url = env::var("DATABASE_URL").context("DATABASE_URL must be set")?;
-    let kernel_database_url = env::var("KERNEL_DATABASE_URL")
-        .unwrap_or_else(|_| database_url.clone());
+    let kernel_database_url = match env::var("KERNEL_DATABASE_URL") {
+        Ok(url) => url,
+        Err(_) => {
+            warn!("KERNEL_DATABASE_URL not set. Falling back to DATABASE_URL. Privileged operations may fail if the database role lacks execute permissions for flexi.log_privileged_audit.");
+            database_url.clone()
+        }
+    };
     let s3_bucket = env::var("AUDIT_LOG_BUCKET").context("AUDIT_LOG_BUCKET must be set")?;
 
     let region_name = match env::var("AWS_REGION") {

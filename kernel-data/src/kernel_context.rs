@@ -43,7 +43,7 @@ impl KernelContext {
     /// Constructs a new `KernelContext`.
     /// Requires a `BackgroundRunnerToken` to ensure it is not called from
     /// normal API handlers.
-    pub fn new(_token: BackgroundRunnerToken, db: Arc<DatabaseConnection>) -> Self {
+    pub(crate) fn new(_token: BackgroundRunnerToken, db: Arc<DatabaseConnection>) -> Self {
         Self { db }
     }
 

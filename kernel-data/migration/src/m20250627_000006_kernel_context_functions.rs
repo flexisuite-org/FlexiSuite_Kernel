@@ -21,9 +21,12 @@ AS $$
 DECLARE
     v_id uuid;
 BEGIN
-    -- Use gen_random_uuid() for uuidv7-like or fallback to uuid-ossp if gen_random_uuid not generating v7
-    -- PostgreSQL 13+ supports gen_random_uuid() which generates v4. Let's rely on pg_catalog.gen_random_uuid()
+    -- Use gen_random_uuid() which generates UUIDv4 natively in Postgres 13+.
+    -- For an audit log this provides sufficient uniqueness.
     v_id := pg_catalog.gen_random_uuid();
+
+    -- Ensure the INSERT successfully passes RLS if the function owner lacks BYPASSRLS
+    PERFORM set_config('flexi.current_tenant', 'system', true);
 
     INSERT INTO flexi.audit_logs (
         id, tenant_id, actor_id, action, resource, details, ip_address, user_agent, created_at, archived_at
@@ -36,14 +39,20 @@ BEGIN
         p_details,
         NULL,
         'kernel-background-runner',
-        pg_catalog.current_timestamp,
+        now(),
         NULL
     );
 END;
 $$;
 
 REVOKE ALL ON FUNCTION flexi.log_privileged_audit(text, text, jsonb) FROM PUBLIC;
-GRANT EXECUTE ON FUNCTION flexi.log_privileged_audit(text, text, jsonb) TO flexi_kernel_admin;
+
+DO $$
+BEGIN
+    IF EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = 'flexi_kernel_admin') THEN
+        GRANT EXECUTE ON FUNCTION flexi.log_privileged_audit(text, text, jsonb) TO flexi_kernel_admin;
+    END IF;
+END $$;
         "#;
         db.execute_unprepared(sql).await?;
         Ok(())
