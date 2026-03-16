@@ -259,6 +259,10 @@ async fn run_archive_cycle(
     config: &AppConfig,
 ) -> Result<()> {
     use kernel_core::auth::SystemTenantContext;
+    use kernel_data::kernel_context::create_background_runner_context;
+
+    let kernel_ctx = create_background_runner_context(db.clone());
+
     let system_ctx = TenantContext::from(SystemTenantContext).with_db(db.clone());
     KeyManager::rotate_keys(&system_ctx)
         .await
@@ -349,6 +353,9 @@ async fn run_archive_cycle(
             continue;
         };
 
+        let eh_count = mark_plan.entity_history_ids.len();
+        let al_count = mark_plan.audit_log_ids.len();
+
         let mark_result = with_tenant_tx(db, &ctx, &mark_token, move |repo| {
             Box::pin(async move {
                 if !mark_plan.entity_history_ids.is_empty() {
@@ -369,6 +376,26 @@ async fn run_archive_cycle(
                 "Tenant {} failed to mark archived records: {}",
                 tenant_id, e
             );
+        } else {
+            let details = serde_json::json!({
+                "tenant_id": tenant_id.as_str(),
+                "archived_entity_history_count": eh_count,
+                "archived_audit_log_count": al_count,
+            });
+            let kernel_ctx_clone = kernel_ctx.clone();
+            if let Err(e) = kernel_ctx.with_tx(|txn| {
+                let inner_ctx = kernel_ctx_clone.clone();
+                Box::pin(async move {
+                    inner_ctx.log_privileged_audit(
+                        txn,
+                        "kernel_archiver.archive_records".to_string(),
+                        "system:archive".to_string(),
+                        details,
+                    ).await
+                })
+            }).await {
+                error!("Failed to log privileged audit for archive records: {}", e);
+            }
         }
     }
 

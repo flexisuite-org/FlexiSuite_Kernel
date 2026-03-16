@@ -43,3 +43,4 @@ kernel-data = { path = ".", features = ["test-utils"] }
 default = []
 enable_dev_auth = []
 test-utils = ["sea-orm/mock"]
+background_worker = []
