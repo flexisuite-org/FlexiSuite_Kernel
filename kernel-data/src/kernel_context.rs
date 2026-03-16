@@ -47,10 +47,6 @@ impl KernelContext {
         Self { db }
     }
 
-    /// Accesses the underlying database connection.
-    pub fn db(&self) -> &DatabaseConnection {
-        &self.db
-    }
 
     /// Executes a closure within a database transaction.
     ///

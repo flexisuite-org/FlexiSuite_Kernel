@@ -42,6 +42,9 @@ BEGIN
         now(),
         NULL
     );
+
+    -- Clear the GUC so it doesn't leak into subsequent queries in the same transaction
+    PERFORM set_config('flexi.current_tenant', '', true);
 END;
 $$;
 

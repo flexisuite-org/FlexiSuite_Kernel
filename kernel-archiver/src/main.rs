@@ -152,8 +152,13 @@ fn load_config() -> Result<AppConfig> {
     let kernel_database_url = match env::var("KERNEL_DATABASE_URL") {
         Ok(url) => url,
         Err(_) => {
-            warn!("KERNEL_DATABASE_URL not set. Falling back to DATABASE_URL. Privileged operations may fail if the database role lacks execute permissions for flexi.log_privileged_audit.");
-            database_url.clone()
+            let allow_fallback = env::var("KERNEL_DATABASE_URL_ALLOW_FALLBACK").unwrap_or_default();
+            if allow_fallback == "1" || allow_fallback.eq_ignore_ascii_case("true") {
+                warn!("KERNEL_DATABASE_URL not set. KERNEL_DATABASE_URL_ALLOW_FALLBACK is active. Falling back to DATABASE_URL. Privileged operations may fail if the database role lacks execute permissions for flexi.log_privileged_audit.");
+                database_url.clone()
+            } else {
+                return Err(anyhow!("KERNEL_DATABASE_URL must be set. Set KERNEL_DATABASE_URL_ALLOW_FALLBACK=true to override this requirement."));
+            }
         }
     };
     let s3_bucket = env::var("AUDIT_LOG_BUCKET").context("AUDIT_LOG_BUCKET must be set")?;
@@ -372,6 +377,13 @@ async fn run_archive_cycle(
 
         let eh_count = mark_plan.entity_history_ids.len();
         let al_count = mark_plan.audit_log_ids.len();
+        let details = serde_json::json!({
+            "tenant_id": tenant_id.as_str(),
+            "archived_entity_history_count": eh_count,
+            "archived_audit_log_count": al_count,
+        });
+
+        let kernel_ctx_clone = kernel_ctx.clone();
 
         let mark_result = with_tenant_tx(db, &ctx, &mark_token, move |repo| {
             Box::pin(async move {
@@ -383,6 +395,20 @@ async fn run_archive_cycle(
                     repo.mark_audit_logs_archived(mark_plan.audit_log_ids)
                         .await?;
                 }
+
+                // Make audit persistence part of the commit path to ensure atomicity.
+                // If this fails, the entire transaction will roll back.
+                kernel_ctx_clone.with_tx(|txn| {
+                    Box::pin(async move {
+                        kernel_data::kernel_context::KernelContext::log_privileged_audit(
+                            txn,
+                            "kernel_archiver.archive_records".to_string(),
+                            "system:archive".to_string(),
+                            details,
+                        ).await
+                    })
+                }).await.map_err(|e| kernel_data::DataError::DbError(e))?;
+
                 Ok(())
             })
         })
@@ -390,27 +416,9 @@ async fn run_archive_cycle(
 
         if let Err(e) = mark_result {
             error!(
-                "Tenant {} failed to mark archived records: {}",
+                "Tenant {} failed to mark archived records (or log audit): {}",
                 tenant_id, e
             );
-        } else {
-            let details = serde_json::json!({
-                "tenant_id": tenant_id.as_str(),
-                "archived_entity_history_count": eh_count,
-                "archived_audit_log_count": al_count,
-            });
-            if let Err(e) = kernel_ctx.with_tx(|txn| {
-                Box::pin(async move {
-                    kernel_data::kernel_context::KernelContext::log_privileged_audit(
-                        txn,
-                        "kernel_archiver.archive_records".to_string(),
-                        "system:archive".to_string(),
-                        details,
-                    ).await
-                })
-            }).await {
-                error!("Failed to log privileged audit for archive records: {}", e);
-            }
         }
     }
 
