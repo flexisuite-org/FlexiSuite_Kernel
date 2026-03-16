@@ -1169,7 +1169,6 @@ impl RedisQuotaStore {
 
             -- Circuit breaker logic: load-based burst protector
             local is_cb = string.match(key, ":cb$") ~= nil
-            local pending_half_open = false
 
             if is_cb then
                 local cb_state = redis.call("HGET", key, "state")
@@ -1180,8 +1179,7 @@ impl RedisQuotaStore {
                     if cb_until ~= nil and now < cb_until then
                         return {0, cb_until - now}
                     else
-                        pending_half_open = true
-                        cb_state = "half-open"
+                        -- Timeout expired, fall through to token check (acts as half-open probe)
                     end
                 end
             end
@@ -1212,8 +1210,8 @@ impl RedisQuotaStore {
                 if is_cb then
                     local retry_after = 30 -- circuit breaker backoff
                     redis.call("HSET", key, "state", "open", "until", now + retry_after)
-                    local ttl_ms = retry_after * 2 * 1000
-                    redis.call("PEXPIRE", key, ttl_ms)
+                    -- PEXPIRE is coupled to the 30s backoff; must be > 30s to prevent silent reset
+                    redis.call("PEXPIRE", key, 120000)
                     return {0, retry_after}
                 else
                     local required = cost - filled
@@ -1231,9 +1229,8 @@ impl RedisQuotaStore {
             local keys = {}
             local new_tokens = {}
             local is_cb = {}
-            local pending_half_open = {}
 
-            -- First pass: validation (no side effects)
+            -- First pass: validation (CB may write open state on failure before early return)
             for i = 1, n do
                 local key = KEYS[i]
                 local rate = tonumber(ARGV[idx])
@@ -1241,7 +1238,6 @@ impl RedisQuotaStore {
                 local cost = tonumber(ARGV[idx + 2])
 
                 is_cb[i] = string.match(key, ":cb$") ~= nil
-                pending_half_open[i] = false
 
                 -- Circuit breaker logic: load-based burst protector
                 if is_cb[i] then
@@ -1252,7 +1248,7 @@ impl RedisQuotaStore {
                         if cb_until ~= nil and now < cb_until then
                             return {0, i, cb_until - now}
                         else
-                            pending_half_open[i] = true
+                            -- Timeout expired, fall through to token check (acts as half-open probe)
                         end
                     end
                 end
@@ -1270,8 +1266,8 @@ impl RedisQuotaStore {
                     if is_cb[i] then
                         local retry_after = 30 -- circuit breaker backoff
                         redis.call("HSET", key, "state", "open", "until", now + retry_after)
-                        local ttl_ms = retry_after * 2 * 1000
-                        redis.call("PEXPIRE", key, ttl_ms)
+                        -- PEXPIRE is coupled to the 30s backoff; must be > 30s to prevent silent reset
+                        redis.call("PEXPIRE", key, 120000)
                         return {0, i, retry_after}
                     else
                         local retry_after = (cost - filled) / rate
@@ -1896,15 +1892,6 @@ pub async fn quota_middleware(req: Request<Body>, next: Next) -> Result<Response
 
     #[cfg(any(test, feature = "test-utils"))]
     {
-        if state.config.allow_mock_quota && parts.headers.contains_key("X-Mock-Quota-CircuitBreaker") {
-            let violation = QuotaViolation {
-                layer: QuotaLayer::CircuitBreaker,
-                retry_after_s: 30,
-            };
-            warn!("Circuit Breaker exceeded (Mock)");
-            return Err(violation_to_response(&violation));
-        }
-
         if state.config.allow_mock_quota && parts.headers.contains_key("X-Mock-Quota-System") {
             let violation = QuotaViolation {
                 layer: QuotaLayer::SystemHardLimit,
@@ -1931,6 +1918,15 @@ pub async fn quota_middleware(req: Request<Body>, next: Next) -> Result<Response
             warn!("API Rate Limit exceeded (Mock)");
             return Err(violation_to_response(&violation));
         }
+
+        if state.config.allow_mock_quota && parts.headers.contains_key("X-Mock-Quota-CircuitBreaker") {
+            let violation = QuotaViolation {
+                layer: QuotaLayer::CircuitBreaker,
+                retry_after_s: 30,
+            };
+            warn!("Circuit Breaker exceeded (Mock)");
+            return Err(violation_to_response(&violation));
+        }
     }
 
     if let Err(v) = state
@@ -1938,10 +1934,10 @@ pub async fn quota_middleware(req: Request<Body>, next: Next) -> Result<Response
         .check_and_update_multi(
             tenant_ctx.tenant_id(),
             &[
-                QuotaLayer::CircuitBreaker,
                 QuotaLayer::SystemHardLimit,
                 QuotaLayer::TenantBudget,
                 QuotaLayer::ApiRateLimit,
+                QuotaLayer::CircuitBreaker,
             ],
         )
         .await
