@@ -38,6 +38,7 @@ pub struct MiddlewareConfig {
     pub inflight_wait_timeout: Duration,
     pub redis_url: String,
     pub require_redis: bool,
+    pub allow_mock_quota: bool,
     pub quota: QuotaConfig,
 }
 
@@ -75,6 +76,7 @@ impl fmt::Debug for MiddlewareConfig {
             .field("inflight_wait_timeout", &self.inflight_wait_timeout)
             .field("redis_url", &"<redacted>")
             .field("require_redis", &self.require_redis)
+            .field("allow_mock_quota", &self.allow_mock_quota)
             .field("quota", &self.quota)
             .finish()
     }
@@ -158,6 +160,7 @@ impl Default for MiddlewareConfig {
             inflight_wait_timeout: get_env_duration("INFLIGHT_WAIT_TIMEOUT_SECS", 5),
             redis_url: get_env_string("REDIS_URL", "redis://127.0.0.1:6379"),
             require_redis: get_env_bool("REQUIRE_REDIS", true),
+            allow_mock_quota: get_env_bool("ALLOW_MOCK_QUOTA", false),
             quota: QuotaConfig {
                 system_hard_limit: QuotaLayerConfig {
                     rate: get_env_f64("QUOTA_SYSTEM_HARD_LIMIT_RATE", 1000.0),
@@ -1241,6 +1244,7 @@ impl RedisQuotaStore {
                         if cb_until ~= nil and now < cb_until then
                             return {0, i, cb_until - now}
                         else
+                            -- Note: This state transition happens even if a later layer fails.
                             redis.call("HSET", key, "state", "half-open")
                         end
                     end
@@ -1257,9 +1261,10 @@ impl RedisQuotaStore {
                 local filled = math.min(capacity, tokens + (delta * rate))
                 if filled < cost then
                     if is_cb[i] then
-                        local retry_after = 30
+                        local retry_after = 30 -- fixed backoff for circuit breaker
                         redis.call("HSET", key, "state", "open", "until", now + retry_after)
-                        redis.call("PEXPIRE", key, 60000)
+                        -- PEXPIRE is coupled to the 30s backoff; must be > 30s to prevent silent reset
+                        redis.call("PEXPIRE", key, 120000)
                         return {0, i, retry_after}
                     else
                         local retry_after = (cost - filled) / rate
@@ -1883,7 +1888,7 @@ pub async fn quota_middleware(req: Request<Body>, next: Next) -> Result<Response
 
     #[cfg(any(test, feature = "test-utils"))]
     {
-        if parts.headers.contains_key("X-Mock-Quota-CircuitBreaker") {
+        if state.config.allow_mock_quota && parts.headers.contains_key("X-Mock-Quota-CircuitBreaker") {
             let violation = QuotaViolation {
                 layer: QuotaLayer::CircuitBreaker,
                 retry_after_s: 30,
@@ -1892,7 +1897,7 @@ pub async fn quota_middleware(req: Request<Body>, next: Next) -> Result<Response
             return Err(violation_to_response(&violation));
         }
 
-        if parts.headers.contains_key("X-Mock-Quota-System") {
+        if state.config.allow_mock_quota && parts.headers.contains_key("X-Mock-Quota-System") {
             let violation = QuotaViolation {
                 layer: QuotaLayer::SystemHardLimit,
                 retry_after_s: 100,
@@ -1901,7 +1906,7 @@ pub async fn quota_middleware(req: Request<Body>, next: Next) -> Result<Response
             return Err(violation_to_response(&violation));
         }
 
-        if parts.headers.contains_key("X-Mock-Quota-Tenant") {
+        if state.config.allow_mock_quota && parts.headers.contains_key("X-Mock-Quota-Tenant") {
             let violation = QuotaViolation {
                 layer: QuotaLayer::TenantBudget,
                 retry_after_s: 5,
@@ -1910,7 +1915,7 @@ pub async fn quota_middleware(req: Request<Body>, next: Next) -> Result<Response
             return Err(violation_to_response(&violation));
         }
 
-        if parts.headers.contains_key("X-Mock-Quota-Api") {
+        if state.config.allow_mock_quota && parts.headers.contains_key("X-Mock-Quota-Api") {
             let violation = QuotaViolation {
                 layer: QuotaLayer::ApiRateLimit,
                 retry_after_s: 60,

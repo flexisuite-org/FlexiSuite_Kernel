@@ -33,7 +33,7 @@ impl QuotaViolation {
             }
             QuotaLayer::CircuitBreaker => {
                 // Circuit-breaker backoff must never be 0s.
-                self.retry_after_s.max(1)
+                self.retry_after_s.clamp(1, 31_536_000)
             }
             QuotaLayer::TenantBudget => {
                 // Client-facing retries follow non-zero minimum and hard one-year ceiling.

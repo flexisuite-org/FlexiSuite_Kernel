@@ -520,7 +520,7 @@ async fn test_quota_evaluation_priority_and_clipping() {
     let res = app.clone().oneshot(req).await.unwrap();
 
     // When test-utils is enabled, the mock quota middleware returns 503 SERVICE_UNAVAILABLE
-    // because the X-Mock-Quota-System header triggers a simulated quota violation.
+    // because the X-Mock-Quota-CircuitBreaker header triggers a simulated circuit breaker violation.
     // Without test-utils, the mock quota headers are ignored and the request succeeds with 201.
     #[cfg(all(feature = "dev-auth", feature = "test-utils"))]
     {
@@ -528,6 +528,26 @@ async fn test_quota_evaluation_priority_and_clipping() {
         let retry_after = res.headers().get("Retry-After").unwrap().to_str().unwrap();
         assert_eq!(retry_after, "30");
     }
+
+    // Now test SystemHardLimit clipping logic without CircuitBreaker
+    #[cfg(all(feature = "dev-auth", feature = "test-utils"))]
+    {
+        let req2 = Request::builder()
+            .uri("/test")
+            .method("POST")
+            .header("X-Tenant-Id", "tenant-1")
+            .header("X-User-Id", "user-1")
+            .header("X-Mock-Quota-System", "true")
+            .header("X-Mock-Quota-Tenant", "true")
+            .header("Idempotency-Key", "quota-test-key-system-clip")
+            .body(Body::empty())
+            .unwrap();
+        let res2 = app.clone().oneshot(req2).await.unwrap();
+        assert_eq!(res2.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let retry_after = res2.headers().get("Retry-After").unwrap().to_str().unwrap();
+        assert_eq!(retry_after, "30", "SystemHardLimit should be clamped to 30");
+    }
+
 
     #[cfg(all(feature = "dev-auth", not(feature = "test-utils")))]
     {
