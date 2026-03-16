@@ -1167,10 +1167,11 @@ impl RedisQuotaStore {
             -- Circuit breaker logic
             if string.match(key, ":cb$") then
                 local cb_state = redis.call("HGET", key, "state")
-                local cb_until = tonumber(redis.call("HGET", key, "until"))
+                local cb_until_raw = redis.call("HGET", key, "until")
+                local cb_until = tonumber(cb_until_raw)
 
                 if cb_state == "open" then
-                    if now < cb_until then
+                    if cb_until ~= nil and now < cb_until then
                         return {0, cb_until - now}
                     else
                         redis.call("HSET", key, "state", "half-open")
@@ -1234,9 +1235,10 @@ impl RedisQuotaStore {
 
                 if is_cb[i] then
                     local cb_state = redis.call("HGET", key, "state")
-                    local cb_until = tonumber(redis.call("HGET", key, "until"))
+                    local cb_until_raw = redis.call("HGET", key, "until")
+                    local cb_until = tonumber(cb_until_raw)
                     if cb_state == "open" then
-                        if now < cb_until then
+                        if cb_until ~= nil and now < cb_until then
                             return {0, i, cb_until - now}
                         else
                             redis.call("HSET", key, "state", "half-open")
