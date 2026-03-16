@@ -1167,8 +1167,11 @@ impl RedisQuotaStore {
             local cost = tonumber(ARGV[3])
             local now = tonumber(ARGV[4])
 
-            -- Circuit breaker logic
-            if string.match(key, ":cb$") then
+            -- Circuit breaker logic: load-based burst protector
+            local is_cb = string.match(key, ":cb$") ~= nil
+            local pending_half_open = false
+
+            if is_cb then
                 local cb_state = redis.call("HGET", key, "state")
                 local cb_until_raw = redis.call("HGET", key, "until")
                 local cb_until = tonumber(cb_until_raw)
@@ -1177,7 +1180,7 @@ impl RedisQuotaStore {
                     if cb_until ~= nil and now < cb_until then
                         return {0, cb_until - now}
                     else
-                        redis.call("HSET", key, "state", "half-open")
+                        pending_half_open = true
                         cb_state = "half-open"
                     end
                 end
@@ -1197,7 +1200,7 @@ impl RedisQuotaStore {
             if filled >= cost then
                 local new_tokens = filled - cost
 
-                if string.match(key, ":cb$") then
+                if is_cb then
                     redis.call("HSET", key, "tokens", new_tokens, "last_refill", now, "state", "closed")
                 else
                     redis.call("HSET", key, "tokens", new_tokens, "last_refill", now)
@@ -1206,11 +1209,11 @@ impl RedisQuotaStore {
                 redis.call("PEXPIRE", key, 60000)
                 return {1, new_tokens}
             else
-                if string.match(key, ":cb$") then
-                    local retry_after = 30 -- fixed backoff for circuit breaker
+                if is_cb then
+                    local retry_after = 30 -- circuit breaker backoff
                     redis.call("HSET", key, "state", "open", "until", now + retry_after)
-                    -- PEXPIRE is coupled to the 30s backoff; must be > 30s to prevent silent reset
-                    redis.call("PEXPIRE", key, 120000)
+                    local ttl_ms = retry_after * 2 * 1000
+                    redis.call("PEXPIRE", key, ttl_ms)
                     return {0, retry_after}
                 else
                     local required = cost - filled
@@ -1228,7 +1231,9 @@ impl RedisQuotaStore {
             local keys = {}
             local new_tokens = {}
             local is_cb = {}
+            local pending_half_open = {}
 
+            -- First pass: validation (no side effects)
             for i = 1, n do
                 local key = KEYS[i]
                 local rate = tonumber(ARGV[idx])
@@ -1236,7 +1241,9 @@ impl RedisQuotaStore {
                 local cost = tonumber(ARGV[idx + 2])
 
                 is_cb[i] = string.match(key, ":cb$") ~= nil
+                pending_half_open[i] = false
 
+                -- Circuit breaker logic: load-based burst protector
                 if is_cb[i] then
                     local cb_state = redis.call("HGET", key, "state")
                     local cb_until_raw = redis.call("HGET", key, "until")
@@ -1245,8 +1252,7 @@ impl RedisQuotaStore {
                         if cb_until ~= nil and now < cb_until then
                             return {0, i, cb_until - now}
                         else
-                            -- Note: This state transition happens even if a later layer fails.
-                            redis.call("HSET", key, "state", "half-open")
+                            pending_half_open[i] = true
                         end
                     end
                 end
@@ -1262,10 +1268,10 @@ impl RedisQuotaStore {
                 local filled = math.min(capacity, tokens + (delta * rate))
                 if filled < cost then
                     if is_cb[i] then
-                        local retry_after = 30 -- fixed backoff for circuit breaker
+                        local retry_after = 30 -- circuit breaker backoff
                         redis.call("HSET", key, "state", "open", "until", now + retry_after)
-                        -- PEXPIRE is coupled to the 30s backoff; must be > 30s to prevent silent reset
-                        redis.call("PEXPIRE", key, 120000)
+                        local ttl_ms = retry_after * 2 * 1000
+                        redis.call("PEXPIRE", key, ttl_ms)
                         return {0, i, retry_after}
                     else
                         local retry_after = (cost - filled) / rate
@@ -1278,6 +1284,7 @@ impl RedisQuotaStore {
                 idx = idx + 3
             end
 
+            -- Second pass: commit updates
             for i = 1, n do
                 if is_cb[i] then
                     redis.call("HSET", keys[i], "tokens", new_tokens[i], "last_refill", now, "state", "closed")
