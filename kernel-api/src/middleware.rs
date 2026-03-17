@@ -1178,6 +1178,14 @@ impl RedisQuotaStore {
     pub fn new(manager: redis::aio::ConnectionManager, quota: QuotaConfig) -> Self {
         let script = redis::Script::new(
             r#"
+            local function compute_refill_ttl_ms(rate, capacity, tokens)
+                local missing = math.max(0, capacity - tokens)
+                if missing <= 0 then
+                    return 1
+                end
+                return math.max(1, math.ceil((missing / rate) * 1000))
+            end
+
             local key = KEYS[1]
             local rate = tonumber(ARGV[1])
             local capacity = tonumber(ARGV[2])
@@ -1218,11 +1226,11 @@ impl RedisQuotaStore {
                 if is_cb then
                     redis.call("HSET", key, "tokens", new_tokens, "last_refill", now, "state", "closed")
                     redis.call("HDEL", key, "until")
+                    redis.call("PEXPIRE", key, compute_refill_ttl_ms(rate, capacity, new_tokens))
                 else
                     redis.call("HSET", key, "tokens", new_tokens, "last_refill", now)
+                    redis.call("PEXPIRE", key, 60000)
                 end
-
-                redis.call("PEXPIRE", key, 60000)
                 return {1, new_tokens}
             else
                 if is_cb then
@@ -1242,12 +1250,22 @@ impl RedisQuotaStore {
         );
         let script_multi = redis::Script::new(
             r#"
+            local function compute_refill_ttl_ms(rate, capacity, tokens)
+                local missing = math.max(0, capacity - tokens)
+                if missing <= 0 then
+                    return 1
+                end
+                return math.max(1, math.ceil((missing / rate) * 1000))
+            end
+
             local now = tonumber(ARGV[1])
             local n = tonumber(ARGV[2])
             local idx = 3
             local keys = {}
             local new_tokens = {}
             local is_cb = {}
+            local rates = {}
+            local capacities = {}
 
             -- First pass: validation (CB may write open state on failure before early return)
             for i = 1, n do
@@ -1257,6 +1275,8 @@ impl RedisQuotaStore {
                 local cost = tonumber(ARGV[idx + 2])
                 local backoff_s = tonumber(ARGV[idx + 3])
                 is_cb[i] = tonumber(ARGV[idx + 4]) == 1
+                rates[i] = rate
+                capacities[i] = capacity
 
                 -- Circuit breaker logic: load-based burst protector
                 if is_cb[i] then
@@ -1305,10 +1325,15 @@ impl RedisQuotaStore {
                 if is_cb[i] then
                     redis.call("HSET", keys[i], "tokens", new_tokens[i], "last_refill", now, "state", "closed")
                     redis.call("HDEL", keys[i], "until")
+                    redis.call(
+                        "PEXPIRE",
+                        keys[i],
+                        compute_refill_ttl_ms(rates[i], capacities[i], new_tokens[i])
+                    )
                 else
                     redis.call("HSET", keys[i], "tokens", new_tokens[i], "last_refill", now)
+                    redis.call("PEXPIRE", keys[i], 60000)
                 end
-                redis.call("PEXPIRE", keys[i], 60000)
             end
 
             return {1, 0, 0}
@@ -1389,7 +1414,8 @@ impl QuotaStore for RedisQuotaStore {
         tenant_id: &kernel_core::auth::TenantId,
         layer: QuotaLayer,
     ) -> Result<(), QuotaViolation> {
-        let Some((key, rate, capacity, cost, backoff_s, is_cb)) = self.layer_config(tenant_id, layer)
+        let Some((key, rate, capacity, cost, backoff_s, is_cb)) =
+            self.layer_config(tenant_id, layer)
         else {
             return Ok(());
         };
@@ -1443,9 +1469,10 @@ impl QuotaStore for RedisQuotaStore {
         let checks: Vec<(QuotaLayer, String, f64, f64, f64, f64, bool)> = layers
             .iter()
             .filter_map(|layer| {
-                self.layer_config(tenant_id, *layer).map(
-                    |(k, r, c, cost, backoff_s, is_cb)| (*layer, k, r, c, cost, backoff_s, is_cb),
-                )
+                self.layer_config(tenant_id, *layer)
+                    .map(|(k, r, c, cost, backoff_s, is_cb)| {
+                        (*layer, k, r, c, cost, backoff_s, is_cb)
+                    })
             })
             .collect();
 
@@ -2188,5 +2215,16 @@ mod tests {
             .expect("in-memory idempotency store must be active");
 
         assert!(matches!(acquired, IdempotencyAcquireResult::Acquired(_)));
+    }
+
+    #[test]
+    fn test_circuit_breaker_refill_ttl_covers_full_recovery_horizon() {
+        let rate = 0.5_f64;
+        let capacity = 120.0_f64;
+        let new_tokens = 0.0_f64;
+        let ttl_ms = ((capacity - new_tokens) / rate * 1000.0).ceil() as u64;
+
+        assert_eq!(ttl_ms, 240_000);
+        assert!(ttl_ms > 60_000);
     }
 }

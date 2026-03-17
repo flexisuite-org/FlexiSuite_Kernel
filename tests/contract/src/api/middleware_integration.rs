@@ -500,6 +500,9 @@ async fn test_idempotency_key_validation() {
 #[tokio::test]
 async fn test_quota_evaluation_priority_and_clipping() {
     let _ = tracing_subscriber::fmt::try_init();
+    #[cfg(all(feature = "dev-auth", feature = "test-utils"))]
+    let app = setup_app_with_db(mock_db_with_budget(2)).await;
+    #[cfg(not(all(feature = "dev-auth", feature = "test-utils")))]
     let app = setup_app().await;
 
     let mut builder = Request::builder().uri("/test").method("POST");
@@ -536,10 +539,15 @@ async fn test_quota_evaluation_priority_and_clipping() {
     {
         assert_eq!(res.status(), StatusCode::SERVICE_UNAVAILABLE);
         let retry_after = res.headers().get("Retry-After").unwrap().to_str().unwrap();
-        // Since X-Mock-Quota-System is now first, it triggers with its value (100) 
+        // Since X-Mock-Quota-System is now first, it triggers with its value (100)
         // which is then clamped to the system max of 30.
         assert_eq!(retry_after, "30");
-        let violation_type = res.headers().get("X-Violation-Type").unwrap().to_str().unwrap();
+        let violation_type = res
+            .headers()
+            .get("X-Violation-Type")
+            .unwrap()
+            .to_str()
+            .unwrap();
         assert_eq!(violation_type, "system_hard_limit");
     }
 
@@ -560,7 +568,12 @@ async fn test_quota_evaluation_priority_and_clipping() {
         assert_eq!(res2.status(), StatusCode::SERVICE_UNAVAILABLE);
         let retry_after = res2.headers().get("Retry-After").unwrap().to_str().unwrap();
         assert_eq!(retry_after, "30", "SystemHardLimit should be clamped to 30");
-        let violation_type = res2.headers().get("X-Violation-Type").unwrap().to_str().unwrap();
+        let violation_type = res2
+            .headers()
+            .get("X-Violation-Type")
+            .unwrap()
+            .to_str()
+            .unwrap();
         assert_eq!(violation_type, "system_hard_limit");
     }
 
@@ -573,6 +586,39 @@ async fn test_quota_evaluation_priority_and_clipping() {
     {
         assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
     }
+}
+
+#[tokio::test]
+#[cfg(all(feature = "dev-auth", feature = "test-utils"))]
+async fn test_quota_circuit_breaker_branch_contract() {
+    let _ = tracing_subscriber::fmt::try_init();
+    let app = setup_app_with_db(mock_db_with_budget(1)).await;
+
+    let req = Request::builder()
+        .uri("/test")
+        .method("POST")
+        .header("X-Tenant-Id", "tenant-1")
+        .header("X-User-Id", "user-1")
+        .header("X-Mock-Quota-CircuitBreaker", "true")
+        .header("Idempotency-Key", "quota-test-key-circuit-breaker")
+        .body(Body::empty())
+        .unwrap();
+
+    let res = app.clone().oneshot(req).await.unwrap();
+
+    assert_eq!(res.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        res.headers().get("Retry-After").unwrap().to_str().unwrap(),
+        "30"
+    );
+    assert_eq!(
+        res.headers()
+            .get("X-Violation-Type")
+            .unwrap()
+            .to_str()
+            .unwrap(),
+        "circuit_breaker"
+    );
 }
 
 #[tokio::test]
