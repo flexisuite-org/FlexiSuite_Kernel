@@ -177,12 +177,12 @@ fn default_mock_db() -> sea_orm::DatabaseConnection {
     // Tests expecting failure or specific DB behavior should use setup_app_with_db.
     #[cfg(feature = "dev-auth")]
     {
-        return mock_db_with_bridge_budget(20);
+        mock_db_with_bridge_budget(20)
     }
 
     #[cfg(not(feature = "dev-auth"))]
     {
-        return mock_db_with_budget(20);
+        mock_db_with_budget(20)
     }
 }
 
@@ -207,7 +207,10 @@ pub async fn setup_app_with_config_and_db(
     db: sea_orm::DatabaseConnection,
 ) -> axum::Router {
     config.require_redis = false;
-    config.allow_mock_quota = true;
+    #[cfg(feature = "test-utils")]
+    {
+        config.allow_mock_quota = true;
+    }
     let state = if let Some(s) = store {
         MiddlewareState::with_store(
             config,
@@ -548,7 +551,6 @@ async fn test_quota_evaluation_priority_and_clipping() {
         let retry_after = res2.headers().get("Retry-After").unwrap().to_str().unwrap();
         assert_eq!(retry_after, "30", "SystemHardLimit should be clamped to 30");
     }
-
 
     #[cfg(all(feature = "dev-auth", not(feature = "test-utils")))]
     {

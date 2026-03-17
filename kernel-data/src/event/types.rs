@@ -356,21 +356,26 @@ mod tests {
     fn test_shard_pinnnig_contract() {
         // This test pins the shard calculation to prevent silent routing changes.
         // If these values change, it BREAKS backward compatibility with existing Redis Streams.
-        
+
         let tenant_a = TenantId::new("tenant_a").unwrap();
         let entity_id = Uuid::parse_str("018e404b-7000-7000-8000-000000000001").unwrap();
-        
+
         // Entity: tenant_a:e:018e404b-7000-7000-8000-000000000001
         let entity_key = OrderingKey::Entity { entity_id };
         let scoped_e = TenantScopedOrderingKey {
             tenant_id: tenant_a.clone(),
             ordering: entity_key,
         };
-        assert_eq!(scoped_e.shard_input(), "tenant_a:e:018e404b-7000-7000-8000-000000000001");
+        assert_eq!(
+            scoped_e.shard_input(),
+            "tenant_a:e:018e404b-7000-7000-8000-000000000001"
+        );
         assert_eq!(scoped_e.shard(), 33); // Deterministic hash % 64
 
         // Causality: tenant_a:c:user_data_123
-        let causality_key = OrderingKey::Causality { key: "user_data_123".to_string() };
+        let causality_key = OrderingKey::Causality {
+            key: "user_data_123".to_string(),
+        };
         let scoped_c = TenantScopedOrderingKey {
             tenant_id: tenant_a,
             ordering: causality_key,

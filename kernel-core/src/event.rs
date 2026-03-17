@@ -1490,10 +1490,11 @@ mod tests {
 
         let res = tracker.observe_delivery(&delivery, start);
         assert!(res.is_err());
-        assert!(res
-            .unwrap_err()
-            .to_string()
-            .contains("sequence overflow for ordering key"));
+        assert!(
+            res.unwrap_err()
+                .to_string()
+                .contains("sequence overflow for ordering key")
+        );
     }
 
     #[test]
@@ -1527,10 +1528,11 @@ mod tests {
 
         let res = tracker.observe_delivery(&delivery, start);
         assert!(res.is_err());
-        assert!(res
-            .unwrap_err()
-            .to_string()
-            .contains("missing ordering sequence"));
+        assert!(
+            res.unwrap_err()
+                .to_string()
+                .contains("missing ordering sequence")
+        );
     }
     #[test]
     fn test_gap_tracker_refeeds_deferred_deliveries_after_gap_closure() {
@@ -1545,34 +1547,48 @@ mod tests {
 
         // 1. Out-of-order arrival (seq=5) -> GapDetected (expected 3)
         let delivery_5 = mock_delivery_entity(&tenant_id, entity_id, 5);
-        let res = tracker.observe_delivery(&delivery_5, Instant::now()).unwrap();
-        assert!(matches!(res, DeliveryResolution::GapDetected(gap) if gap.expected_seq == 3 && gap.actual_seq == 5));
+        let res = tracker
+            .observe_delivery(&delivery_5, Instant::now())
+            .unwrap();
+        assert!(
+            matches!(res, DeliveryResolution::GapDetected(gap) if gap.expected_seq == 3 && gap.actual_seq == 5)
+        );
 
         // 2. Further out-of-order (seq=6) -> Deferred (actual_seq updated to 6)
         let delivery_6 = mock_delivery_entity(&tenant_id, entity_id, 6);
-        let res = tracker.observe_delivery(&delivery_6, Instant::now()).unwrap();
+        let res = tracker
+            .observe_delivery(&delivery_6, Instant::now())
+            .unwrap();
         assert!(matches!(res, DeliveryResolution::Deferred(gap) if gap.actual_seq == 6));
 
         // 3. Replay arrival (seq=3) -> confirm_gap_replay (expected becomes 4)
         let replay_3 = delivery_3_mock(&tenant_id, entity_id, 3);
         let active_gap = tracker.active_gap.clone().unwrap();
-        tracker.confirm_gap_replay(&active_gap, &replay_3, Instant::now()).unwrap();
+        tracker
+            .confirm_gap_replay(&active_gap, &replay_3, Instant::now())
+            .unwrap();
         assert_eq!(tracker.expected_seq(), 4);
 
         // 4. Natural arrival (seq=4) -> Apply (expected becomes 5)
         let delivery_4 = mock_delivery_entity(&tenant_id, entity_id, 4);
-        let res = tracker.observe_delivery(&delivery_4, Instant::now()).unwrap();
+        let res = tracker
+            .observe_delivery(&delivery_4, Instant::now())
+            .unwrap();
         assert!(matches!(res, DeliveryResolution::Apply));
         assert_eq!(tracker.expected_seq(), 5);
 
         // 5. Gap should be closed now because expected_seq (5) reached the first out-of-order point.
         // Re-feeding buffered delivery_5 -> Apply (expected becomes 6)
-        let res = tracker.observe_delivery(&delivery_5, Instant::now()).unwrap();
+        let res = tracker
+            .observe_delivery(&delivery_5, Instant::now())
+            .unwrap();
         assert!(matches!(res, DeliveryResolution::Apply));
         assert_eq!(tracker.expected_seq(), 6);
 
         // 6. Re-feeding buffered delivery_6 -> Apply (expected becomes 7)
-        let res = tracker.observe_delivery(&delivery_6, Instant::now()).unwrap();
+        let res = tracker
+            .observe_delivery(&delivery_6, Instant::now())
+            .unwrap();
         assert!(matches!(res, DeliveryResolution::Apply));
         assert_eq!(tracker.expected_seq(), 7);
         assert!(tracker.active_gap.is_none());
@@ -1585,7 +1601,10 @@ mod tests {
             event: EventEnvelope {
                 event_id: Uuid::now_v7(),
                 tenant_id: tenant_id.clone(),
-                order_mode: OrderMode::Entity { entity_id, seq: Some(seq) },
+                order_mode: OrderMode::Entity {
+                    entity_id,
+                    seq: Some(seq),
+                },
                 payload: Value::Null,
                 created_at: Utc::now(),
                 event_type: "entity.updated".to_string(),
@@ -1597,7 +1616,10 @@ mod tests {
         EventEnvelope {
             event_id: Uuid::now_v7(),
             tenant_id: tenant_id.clone(),
-            order_mode: OrderMode::Entity { entity_id, seq: Some(seq) },
+            order_mode: OrderMode::Entity {
+                entity_id,
+                seq: Some(seq),
+            },
             payload: Value::Null,
             created_at: Utc::now(),
             event_type: "entity.updated".to_string(),

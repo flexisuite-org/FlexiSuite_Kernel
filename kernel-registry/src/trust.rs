@@ -172,6 +172,7 @@ pub mod tests {
     }
 
     impl MockTrustProvider {
+        #[allow(clippy::new_without_default)]
         pub fn new() -> Self {
             Self::with_version("v1")
         }

@@ -1,18 +1,22 @@
+use chrono::Utc;
 use kernel_core::auth::TenantId;
 use kernel_core::event::{
-    calculate_shard, EventEnvelope, OrderMode, ReliableConsumer, ReliableProducer,
+    EventEnvelope, OrderMode, ReliableConsumer, ReliableProducer, calculate_shard,
 };
 use kernel_data::event::{RedisConsumer, RedisProducer};
-use testcontainers::{ContainerAsync, ImageExt};
 use testcontainers::runners::AsyncRunner;
-use testcontainers_modules::redis::{Redis, REDIS_PORT};
+use testcontainers::{ContainerAsync, ImageExt};
+use testcontainers_modules::redis::{REDIS_PORT, Redis};
 use uuid::Uuid;
-use chrono::Utc;
 
 type RedisNode = ContainerAsync<Redis>;
 
 async fn start_redis_server() -> (RedisNode, redis::Client) {
-    let node = Redis::default().with_tag("7.2-alpine").start().await.expect("start redis");
+    let node = Redis::default()
+        .with_tag("7.2-alpine")
+        .start()
+        .await
+        .expect("start redis");
     let port = node.get_host_port_ipv4(REDIS_PORT).await.expect("get port");
     let client =
         redis::Client::open(format!("redis://127.0.0.1:{port}/")).expect("create redis client");
