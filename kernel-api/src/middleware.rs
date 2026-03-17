@@ -1227,6 +1227,7 @@ impl RedisQuotaStore {
             else
                 if is_cb then
                     local retry_after = math.ceil(backoff_s)
+                    retry_after = math.max(1, math.min(31536000, retry_after))
                     redis.call("HSET", key, "state", "open", "until", now + retry_after)
                     local ttl_ms = math.floor((retry_after * 1000) + 30000)
                     redis.call("PEXPIRE", key, ttl_ms)
@@ -1284,6 +1285,7 @@ impl RedisQuotaStore {
                 if filled < cost then
                     if is_cb[i] then
                         local retry_after = math.ceil(backoff_s)
+                        retry_after = math.max(1, math.min(31536000, retry_after))
                         redis.call("HSET", key, "state", "open", "until", now + retry_after)
                         local ttl_ms = math.floor((retry_after * 1000) + 30000)
                         redis.call("PEXPIRE", key, ttl_ms)
