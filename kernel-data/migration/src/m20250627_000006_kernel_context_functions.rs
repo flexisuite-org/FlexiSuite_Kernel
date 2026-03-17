@@ -27,6 +27,7 @@ BEGIN
 
     -- Ensure the INSERT successfully passes RLS if the function owner lacks BYPASSRLS
     PERFORM set_config('flexi.current_tenant', 'system', true);
+    PERFORM set_config('flexi.ctx_sig', encode(hmac('system', current_setting('flexi.hmac_secret', true), 'sha256'), 'hex'), true);
 
     INSERT INTO flexi.audit_logs (
         id, tenant_id, actor_id, action, resource, details, ip_address, user_agent, created_at, archived_at
@@ -43,8 +44,9 @@ BEGIN
         NULL
     );
 
-    -- Clear the GUC so it doesn't leak into subsequent queries in the same transaction
+    -- Clear the GUCs so they do not leak into subsequent queries in the same transaction
     PERFORM set_config('flexi.current_tenant', '', true);
+    PERFORM set_config('flexi.ctx_sig', '', true);
 END;
 $$;
 

@@ -383,8 +383,6 @@ async fn run_archive_cycle(
             "archived_audit_log_count": al_count,
         });
 
-        let kernel_ctx_clone = kernel_ctx.clone();
-
         let mark_result = with_tenant_tx(db, &ctx, &mark_token, move |repo| {
             Box::pin(async move {
                 if !mark_plan.entity_history_ids.is_empty() {
@@ -395,20 +393,6 @@ async fn run_archive_cycle(
                     repo.mark_audit_logs_archived(mark_plan.audit_log_ids)
                         .await?;
                 }
-
-                // Make audit persistence part of the commit path to ensure atomicity.
-                // If this fails, the entire transaction will roll back.
-                kernel_ctx_clone.with_tx(|txn| {
-                    Box::pin(async move {
-                        kernel_data::kernel_context::KernelContext::log_privileged_audit(
-                            txn,
-                            "kernel_archiver.archive_records".to_string(),
-                            "system:archive".to_string(),
-                            details,
-                        ).await
-                    })
-                }).await.map_err(|e| kernel_data::DataError::DbError(e))?;
-
                 Ok(())
             })
         })
@@ -416,9 +400,28 @@ async fn run_archive_cycle(
 
         if let Err(e) = mark_result {
             error!(
-                "Tenant {} failed to mark archived records (or log audit): {}",
+                "Tenant {} failed to mark archived records: {}",
                 tenant_id, e
             );
+        } else {
+            // Note: Audit logging and mark-as-archived are not atomic because they operate
+            // across two independent connections (db and kernel_db).
+            // A persistent failure here would result in the records being marked,
+            // but the privileged audit log not reflecting the intent.
+            // If the application necessitates, outbox reconciliation should be built.
+            if let Err(e) = kernel_ctx.with_tx(|txn| {
+                let inner_details = details.clone();
+                Box::pin(async move {
+                    kernel_data::kernel_context::KernelContext::log_privileged_audit(
+                        txn,
+                        "kernel_archiver.archive_records".to_string(),
+                        "system:archive".to_string(),
+                        inner_details,
+                    ).await
+                })
+            }).await {
+                error!("Failed to log privileged audit for archive records: {}", e);
+            }
         }
     }
 
