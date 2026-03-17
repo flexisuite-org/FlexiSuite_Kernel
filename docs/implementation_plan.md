@@ -418,10 +418,14 @@ KMS (Key Management Service) を前提とした鍵ライフサイクルを規定
 - **Global Hard Ceiling**:
   - Tier別プラン（Pro/Enterprise）で上記制限を緩和する場合でも、**システム全体の安定性を守るための「絶対上限 (System Hard Limit)」** を設け、これを突破することは**許可してはならない (MUST NOT)**。
 - **優先順位 (衝突解決順)**:
-  - 制御判定は `System Hard Limit` → `Tenant Budget` → `API Rate Limit` の順で評価**しなければならない (MUST)**。
+  - 制御判定は `System Hard Limit` → `Circuit Breaker` → `Tenant Budget` → `API Rate Limit` の順で評価**しなければならない (MUST)**。
   - 上位レイヤで拒否された場合、下位レイヤの判定は行わない（短絡評価）**しなければならない (MUST)**。
 - **制御動作**:
   - クォータ超過時は `Retry-After` ヘッダを付与し、以下の判定表に従って `429` または `503` を返却**しなければならない (MUST)**。
+  - **Atomicity & Side-effects**:
+    - マルチキーLuaスクリプトは原子性を保つため2フェーズで実行される。
+    - Circuit Breaker層をパスしても、その後のレイヤー（例: Tenant Budget）で拒否された場合、CBのトークンは消費されない。
+    - これにより、CBは「実際に受け入れられたリクエストの流量」に基づいてトリップする。
   - **HTTP判定表 (REQ-QUOTA-HTTP-CONTRACT)**:
 
 | 判定レイヤ | 返却コード | `Retry-After` 算出 |

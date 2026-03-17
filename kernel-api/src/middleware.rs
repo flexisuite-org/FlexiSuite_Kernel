@@ -1323,7 +1323,7 @@ impl RedisQuotaStore {
     }
 
     /// All quota keys intentionally use the `{global}` Redis Cluster hash tag so
-    /// `SystemHardLimit`, `TenantBudget`, and `ApiRateLimit` keys land in one slot and
+    /// `SystemHardLimit`, `CircuitBreaker`, `TenantBudget`, and `ApiRateLimit` keys land in one slot and
     /// can be updated atomically by the multi-key Lua script. This creates a hot slot;
     /// do not change hash tags without redesigning the atomicity strategy.
     fn layer_config(
@@ -1918,13 +1918,22 @@ pub async fn quota_middleware(req: Request<Body>, next: Next) -> Result<Response
     let state = match parts.extensions.get::<MiddlewareState>() {
         Some(s) => s,
         None => {
-            error!("MiddlewareState missing");
+            error!("MiddlewareState missing in extensions");
             return Err(StatusCode::INTERNAL_SERVER_ERROR.into_response());
         }
     };
 
     #[cfg(any(test, feature = "test-utils"))]
     {
+        if state.config.allow_mock_quota && parts.headers.contains_key("X-Mock-Quota-System") {
+            let violation = QuotaViolation {
+                layer: QuotaLayer::SystemHardLimit,
+                retry_after_s: 100,
+            };
+            warn!("System Hard Limit exceeded (Mock)");
+            return Err(violation_to_response(&violation));
+        }
+
         if state.config.allow_mock_quota
             && parts.headers.contains_key("X-Mock-Quota-CircuitBreaker")
         {
@@ -1933,15 +1942,6 @@ pub async fn quota_middleware(req: Request<Body>, next: Next) -> Result<Response
                 retry_after_s: 30,
             };
             warn!("Circuit Breaker exceeded (Mock)");
-            return Err(violation_to_response(&violation));
-        }
-
-        if state.config.allow_mock_quota && parts.headers.contains_key("X-Mock-Quota-System") {
-            let violation = QuotaViolation {
-                layer: QuotaLayer::SystemHardLimit,
-                retry_after_s: 100,
-            };
-            warn!("System Hard Limit exceeded (Mock)");
             return Err(violation_to_response(&violation));
         }
 
@@ -1969,8 +1969,8 @@ pub async fn quota_middleware(req: Request<Body>, next: Next) -> Result<Response
         .check_and_update_multi(
             tenant_ctx.tenant_id(),
             &[
-                QuotaLayer::CircuitBreaker,
                 QuotaLayer::SystemHardLimit,
+                QuotaLayer::CircuitBreaker,
                 QuotaLayer::TenantBudget,
                 QuotaLayer::ApiRateLimit,
             ],

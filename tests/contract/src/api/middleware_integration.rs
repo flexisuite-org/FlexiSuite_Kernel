@@ -143,8 +143,8 @@ pub fn mock_db_with_bridge_budget(auth_calls: usize) -> sea_orm::DatabaseConnect
                 role_id: Uuid::new_v4(),
                 resource: "test".to_string(),
                 action: "write".to_string(),
-                created_at: now.into(),
-                updated_at: now.into(),
+                created_at: now.fixed_offset(),
+                updated_at: now.fixed_offset(),
             },
             permission::Model {
                 id: Uuid::new_v4(),
@@ -152,8 +152,8 @@ pub fn mock_db_with_bridge_budget(auth_calls: usize) -> sea_orm::DatabaseConnect
                 role_id: Uuid::new_v4(),
                 resource: "action".to_string(),
                 action: "read".to_string(),
-                created_at: now.into(),
-                updated_at: now.into(),
+                created_at: now.fixed_offset(),
+                updated_at: now.fixed_offset(),
             },
             permission::Model {
                 id: Uuid::new_v4(),
@@ -161,8 +161,8 @@ pub fn mock_db_with_bridge_budget(auth_calls: usize) -> sea_orm::DatabaseConnect
                 role_id: Uuid::new_v4(),
                 resource: "diagnostics".to_string(),
                 action: "read".to_string(),
-                created_at: now.into(),
-                updated_at: now.into(),
+                created_at: now.fixed_offset(),
+                updated_at: now.fixed_offset(),
             },
         ];
         db = db.append_query_results([perms]);
@@ -309,6 +309,7 @@ async fn test_health_is_public() {
 
 #[tokio::test]
 async fn test_auth_logic_401_403() {
+    let _ = tracing_subscriber::fmt::try_init();
     let app = setup_app().await;
 
     // 1. Missing auth context on protected endpoint -> 401
@@ -361,6 +362,7 @@ async fn test_auth_logic_401_403() {
 
 #[tokio::test]
 async fn test_rbac_fail_closed_with_empty_permissions_fixture() {
+    let _ = tracing_subscriber::fmt::try_init();
     let app = setup_app_with_db(mock_db_with_empty_permissions(1)).await;
 
     let mut builder = Request::builder()
@@ -392,6 +394,7 @@ async fn test_rbac_fail_closed_with_empty_permissions_fixture() {
 #[tokio::test]
 #[cfg(feature = "dev-auth")]
 async fn test_dev_auth_bridges_to_v2_token_for_db_authorization() {
+    let _ = tracing_subscriber::fmt::try_init();
     let app = setup_app_with_db(mock_db_with_bridge_budget(1)).await;
 
     let req = Request::builder()
@@ -410,6 +413,7 @@ async fn test_dev_auth_bridges_to_v2_token_for_db_authorization() {
 #[tokio::test]
 #[cfg(feature = "dev-auth")]
 async fn test_idempotency_conflict_scope_and_action_lookup() {
+    let _ = tracing_subscriber::fmt::try_init();
     let app = setup_app().await;
 
     // 1. Success first call
@@ -475,6 +479,7 @@ async fn test_idempotency_conflict_scope_and_action_lookup() {
 
 #[tokio::test]
 async fn test_idempotency_key_validation() {
+    let _ = tracing_subscriber::fmt::try_init();
     let app = setup_app().await;
 
     let too_long = "k".repeat(129);
@@ -494,6 +499,7 @@ async fn test_idempotency_key_validation() {
 
 #[tokio::test]
 async fn test_quota_evaluation_priority_and_clipping() {
+    let _ = tracing_subscriber::fmt::try_init();
     let app = setup_app().await;
 
     let mut builder = Request::builder().uri("/test").method("POST");
@@ -524,15 +530,17 @@ async fn test_quota_evaluation_priority_and_clipping() {
     let res = app.clone().oneshot(req).await.unwrap();
 
     // When test-utils is enabled, the mock quota middleware returns 503 SERVICE_UNAVAILABLE
-    // because the X-Mock-Quota-CircuitBreaker header triggers a simulated circuit breaker violation.
+    // because the X-Mock-Quota-System header takes priority over others and triggers a simulated violation.
     // Without test-utils, the mock quota headers are ignored and the request succeeds with 201.
     #[cfg(all(feature = "dev-auth", feature = "test-utils"))]
     {
         assert_eq!(res.status(), StatusCode::SERVICE_UNAVAILABLE);
         let retry_after = res.headers().get("Retry-After").unwrap().to_str().unwrap();
+        // Since X-Mock-Quota-System is now first, it triggers with its value (100) 
+        // which is then clamped to the system max of 30.
         assert_eq!(retry_after, "30");
         let violation_type = res.headers().get("X-Violation-Type").unwrap().to_str().unwrap();
-        assert_eq!(violation_type, "circuit_breaker");
+        assert_eq!(violation_type, "system_hard_limit");
     }
 
     // Now test SystemHardLimit clipping logic without CircuitBreaker
