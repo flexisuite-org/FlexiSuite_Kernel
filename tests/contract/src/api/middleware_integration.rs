@@ -531,6 +531,8 @@ async fn test_quota_evaluation_priority_and_clipping() {
         assert_eq!(res.status(), StatusCode::SERVICE_UNAVAILABLE);
         let retry_after = res.headers().get("Retry-After").unwrap().to_str().unwrap();
         assert_eq!(retry_after, "30");
+        let violation_type = res.headers().get("X-Violation-Type").unwrap().to_str().unwrap();
+        assert_eq!(violation_type, "circuit_breaker");
     }
 
     // Now test SystemHardLimit clipping logic without CircuitBreaker
@@ -550,6 +552,8 @@ async fn test_quota_evaluation_priority_and_clipping() {
         assert_eq!(res2.status(), StatusCode::SERVICE_UNAVAILABLE);
         let retry_after = res2.headers().get("Retry-After").unwrap().to_str().unwrap();
         assert_eq!(retry_after, "30", "SystemHardLimit should be clamped to 30");
+        let violation_type = res2.headers().get("X-Violation-Type").unwrap().to_str().unwrap();
+        assert_eq!(violation_type, "system_hard_limit");
     }
 
     #[cfg(all(feature = "dev-auth", not(feature = "test-utils")))]

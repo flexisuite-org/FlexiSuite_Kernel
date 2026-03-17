@@ -1226,9 +1226,9 @@ impl RedisQuotaStore {
                 return {1, new_tokens}
             else
                 if is_cb then
-                    local retry_after = backoff_s
+                    local retry_after = math.ceil(backoff_s)
                     redis.call("HSET", key, "state", "open", "until", now + retry_after)
-                    local ttl_ms = (retry_after * 1000) + 30000
+                    local ttl_ms = math.floor((retry_after * 1000) + 30000)
                     redis.call("PEXPIRE", key, ttl_ms)
                     return {0, retry_after}
                 else
@@ -1283,9 +1283,9 @@ impl RedisQuotaStore {
                 local filled = math.min(capacity, tokens + (delta * rate))
                 if filled < cost then
                     if is_cb[i] then
-                        local retry_after = backoff_s
+                        local retry_after = math.ceil(backoff_s)
                         redis.call("HSET", key, "state", "open", "until", now + retry_after)
-                        local ttl_ms = (retry_after * 1000) + 30000
+                        local ttl_ms = math.floor((retry_after * 1000) + 30000)
                         redis.call("PEXPIRE", key, ttl_ms)
                         return {0, i, retry_after}
                     else
@@ -1918,6 +1918,17 @@ pub async fn quota_middleware(req: Request<Body>, next: Next) -> Result<Response
 
     #[cfg(any(test, feature = "test-utils"))]
     {
+        if state.config.allow_mock_quota
+            && parts.headers.contains_key("X-Mock-Quota-CircuitBreaker")
+        {
+            let violation = QuotaViolation {
+                layer: QuotaLayer::CircuitBreaker,
+                retry_after_s: 30,
+            };
+            warn!("Circuit Breaker exceeded (Mock)");
+            return Err(violation_to_response(&violation));
+        }
+
         if state.config.allow_mock_quota && parts.headers.contains_key("X-Mock-Quota-System") {
             let violation = QuotaViolation {
                 layer: QuotaLayer::SystemHardLimit,
@@ -1944,17 +1955,6 @@ pub async fn quota_middleware(req: Request<Body>, next: Next) -> Result<Response
             warn!("API Rate Limit exceeded (Mock)");
             return Err(violation_to_response(&violation));
         }
-
-        if state.config.allow_mock_quota
-            && parts.headers.contains_key("X-Mock-Quota-CircuitBreaker")
-        {
-            let violation = QuotaViolation {
-                layer: QuotaLayer::CircuitBreaker,
-                retry_after_s: 30,
-            };
-            warn!("Circuit Breaker exceeded (Mock)");
-            return Err(violation_to_response(&violation));
-        }
     }
 
     if let Err(v) = state
@@ -1962,10 +1962,10 @@ pub async fn quota_middleware(req: Request<Body>, next: Next) -> Result<Response
         .check_and_update_multi(
             tenant_ctx.tenant_id(),
             &[
+                QuotaLayer::CircuitBreaker,
                 QuotaLayer::SystemHardLimit,
                 QuotaLayer::TenantBudget,
                 QuotaLayer::ApiRateLimit,
-                QuotaLayer::CircuitBreaker,
             ],
         )
         .await
