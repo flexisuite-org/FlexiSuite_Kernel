@@ -1184,10 +1184,9 @@ impl RedisQuotaStore {
             local cost = tonumber(ARGV[3])
             local now = tonumber(ARGV[4])
             local backoff_s = tonumber(ARGV[5])
+            local is_cb = tonumber(ARGV[6]) == 1
 
             -- Circuit breaker logic: load-based burst protector
-            local is_cb = string.match(key, ":cb$") ~= nil
-
             if is_cb then
                 local cb_state = redis.call("HGET", key, "state")
                 local cb_until_raw = redis.call("HGET", key, "until")
@@ -1195,7 +1194,7 @@ impl RedisQuotaStore {
 
                 if cb_state == "open" then
                     if cb_until ~= nil and now < cb_until then
-                        return {0, cb_until - now}
+                        return {0, math.ceil(cb_until - now)}
                     else
                         -- Timeout expired, fall through to token check (acts as half-open probe)
                     end
@@ -1218,6 +1217,7 @@ impl RedisQuotaStore {
 
                 if is_cb then
                     redis.call("HSET", key, "tokens", new_tokens, "last_refill", now, "state", "closed")
+                    redis.call("HDEL", key, "until")
                 else
                     redis.call("HSET", key, "tokens", new_tokens, "last_refill", now)
                 end
@@ -1234,7 +1234,7 @@ impl RedisQuotaStore {
                     return {0, retry_after}
                 else
                     local required = cost - filled
-                    local retry_after = required / rate
+                    local retry_after = math.ceil(required / rate)
                     return {0, retry_after}
                 end
             end
@@ -1256,8 +1256,7 @@ impl RedisQuotaStore {
                 local capacity = tonumber(ARGV[idx + 1])
                 local cost = tonumber(ARGV[idx + 2])
                 local backoff_s = tonumber(ARGV[idx + 3])
-
-                is_cb[i] = string.match(key, ":cb$") ~= nil
+                is_cb[i] = tonumber(ARGV[idx + 4]) == 1
 
                 -- Circuit breaker logic: load-based burst protector
                 if is_cb[i] then
@@ -1266,7 +1265,7 @@ impl RedisQuotaStore {
                     local cb_until = tonumber(cb_until_raw)
                     if cb_state == "open" then
                         if cb_until ~= nil and now < cb_until then
-                            return {0, i, cb_until - now}
+                            return {0, i, math.ceil(cb_until - now)}
                         else
                             -- Timeout expired, fall through to token check (acts as half-open probe)
                         end
@@ -1291,20 +1290,21 @@ impl RedisQuotaStore {
                         redis.call("PEXPIRE", key, ttl_ms)
                         return {0, i, retry_after}
                     else
-                        local retry_after = (cost - filled) / rate
+                        local retry_after = math.ceil((cost - filled) / rate)
                         return {0, i, retry_after}
                     end
                 end
 
                 keys[i] = key
                 new_tokens[i] = filled - cost
-                idx = idx + 4
+                idx = idx + 5
             end
 
             -- Second pass: commit updates
             for i = 1, n do
                 if is_cb[i] then
                     redis.call("HSET", keys[i], "tokens", new_tokens[i], "last_refill", now, "state", "closed")
+                    redis.call("HDEL", keys[i], "until")
                 else
                     redis.call("HSET", keys[i], "tokens", new_tokens[i], "last_refill", now)
                 end
@@ -1330,9 +1330,10 @@ impl RedisQuotaStore {
         &self,
         tenant_id: &kernel_core::auth::TenantId,
         layer: QuotaLayer,
-    ) -> Option<(String, f64, f64, f64, f64)> {
+    ) -> Option<(String, f64, f64, f64, f64, bool)> {
         let tenant_id_str = tenant_id.to_string();
         let tenant_override = self.quota.tenant_overrides.get(&tenant_id_str);
+        let is_cb = layer == QuotaLayer::CircuitBreaker;
         match layer {
             QuotaLayer::SystemHardLimit => {
                 let q = tenant_override
@@ -1344,6 +1345,7 @@ impl RedisQuotaStore {
                     q.capacity,
                     q.cost,
                     q.backoff_s,
+                    is_cb,
                 ))
             }
             QuotaLayer::TenantBudget => {
@@ -1354,7 +1356,7 @@ impl RedisQuotaStore {
                 s.push_str("quota:{global}:tenant:");
                 append_sha256_hex(tenant_id_str.as_bytes(), &mut s);
                 s.push_str(":cpu");
-                Some((s, q.rate, q.capacity, q.cost, q.backoff_s))
+                Some((s, q.rate, q.capacity, q.cost, q.backoff_s, is_cb))
             }
             QuotaLayer::ApiRateLimit => {
                 let q = tenant_override
@@ -1364,7 +1366,7 @@ impl RedisQuotaStore {
                 s.push_str("quota:{global}:tenant:");
                 append_sha256_hex(tenant_id_str.as_bytes(), &mut s);
                 s.push_str(":api");
-                Some((s, q.rate, q.capacity, q.cost, q.backoff_s))
+                Some((s, q.rate, q.capacity, q.cost, q.backoff_s, is_cb))
             }
             QuotaLayer::CircuitBreaker => {
                 let q = tenant_override
@@ -1374,7 +1376,7 @@ impl RedisQuotaStore {
                 s.push_str("quota:{global}:tenant:");
                 append_sha256_hex(tenant_id_str.as_bytes(), &mut s);
                 s.push_str(":cb");
-                Some((s, q.rate, q.capacity, q.cost, q.backoff_s))
+                Some((s, q.rate, q.capacity, q.cost, q.backoff_s, is_cb))
             }
         }
     }
@@ -1387,7 +1389,7 @@ impl QuotaStore for RedisQuotaStore {
         tenant_id: &kernel_core::auth::TenantId,
         layer: QuotaLayer,
     ) -> Result<(), QuotaViolation> {
-        let Some((key, rate, capacity, cost, backoff_s)) = self.layer_config(tenant_id, layer)
+        let Some((key, rate, capacity, cost, backoff_s, is_cb)) = self.layer_config(tenant_id, layer)
         else {
             return Ok(());
         };
@@ -1407,6 +1409,7 @@ impl QuotaStore for RedisQuotaStore {
             .arg(cost)
             .arg(now)
             .arg(backoff_s)
+            .arg(if is_cb { 1 } else { 0 })
             .invoke_async(&mut conn)
             .await;
 
@@ -1437,11 +1440,12 @@ impl QuotaStore for RedisQuotaStore {
         tenant_id: &kernel_core::auth::TenantId,
         layers: &[QuotaLayer],
     ) -> Result<(), QuotaViolation> {
-        let checks: Vec<(QuotaLayer, String, f64, f64, f64, f64)> = layers
+        let checks: Vec<(QuotaLayer, String, f64, f64, f64, f64, bool)> = layers
             .iter()
             .filter_map(|layer| {
-                self.layer_config(tenant_id, *layer)
-                    .map(|(k, r, c, cost, backoff_s)| (*layer, k, r, c, cost, backoff_s))
+                self.layer_config(tenant_id, *layer).map(
+                    |(k, r, c, cost, backoff_s, is_cb)| (*layer, k, r, c, cost, backoff_s, is_cb),
+                )
             })
             .collect();
 
@@ -1457,12 +1461,13 @@ impl QuotaStore for RedisQuotaStore {
 
         let mut inv = self.script_multi.prepare_invoke();
         inv.arg(now).arg(checks.len() as i64);
-        for (_, key, rate, capacity, cost, backoff_s) in &checks {
+        for (_, key, rate, capacity, cost, backoff_s, is_cb) in &checks {
             inv.key(key)
                 .arg(rate)
                 .arg(capacity)
                 .arg(cost)
-                .arg(backoff_s);
+                .arg(backoff_s)
+                .arg(if *is_cb { 1 } else { 0 });
         }
 
         let res: Result<(i32, i64, f64), _> = inv.invoke_async(&mut conn).await;
@@ -1471,7 +1476,7 @@ impl QuotaStore for RedisQuotaStore {
             Ok((0, idx, retry_after)) => {
                 let layer_idx = (idx.saturating_sub(1)) as usize;
                 let retry_after_s = retry_after.ceil() as u64;
-                if let Some((layer, _, _, _, _, _)) = checks.get(layer_idx) {
+                if let Some((layer, _, _, _, _, _, _)) = checks.get(layer_idx) {
                     Err(QuotaViolation {
                         layer: *layer,
                         retry_after_s,

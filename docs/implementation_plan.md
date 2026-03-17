@@ -431,6 +431,10 @@ KMS (Key Management Service) を前提とした鍵ライフサイクルを規定
 | `System Hard Limit` 超過 | `503 Service Unavailable` | システム保護窓の最短解除見込み秒数（1-30秒でクリップ） |
 | テナント隔離サーキットブレーカー作動 | `503 Service Unavailable` | ブレーカー半開放予定までの秒数 |
 
+  - **Circuit Breaker (Burst Protector) 設計上の注意**:
+    - FlexiSuiteのサーキットブレーカーは、エラー率ではなく**リクエスト流量（バースト）**に基づいて作動する。
+    - 設定されたトークンバケット（default: 10 req/s, capacity 100）を使い切った場合に「遮断（Open）」状態となる。
+    - これは、特定のテナントによる急激なトラフィック増大からシステム全体を保護するための、サーキットブレーカースタイルの復旧挙動（Open → Half-Open → Closed）を持つバースト制限レイヤーである。
   - 特定テナントの負荷がシステム全体に波及する場合、当該テナントの全リクエストをサーキットブレーカーで遮断する権限をKernelが持つ。
 - **Client Retry Contract**:
   - SDK/クライアントは `Retry-After` が存在する場合これを最優先し、未指定時のみ指数バックオフ（`base=250ms`, `factor=2`, `jitter=full`, `max=30s`）を用いる**べきである (SHOULD)**。
