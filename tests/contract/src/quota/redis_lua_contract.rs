@@ -1,6 +1,6 @@
 #[cfg(test)]
 mod tests {
-    use kernel_api::middleware::{QuotaConfig, QuotaLayerConfig, RedisQuotaStore, QuotaStore};
+    use kernel_api::middleware::{QuotaConfig, QuotaLayerConfig, RedisQuotaStore, QuotaStore, violation_to_response};
     use kernel_core::auth::TenantId;
     use kernel_core::quota::QuotaLayer;
     use testcontainers::runners::AsyncRunner;
@@ -57,6 +57,13 @@ mod tests {
         assert_eq!(violation.layer, QuotaLayer::CircuitBreaker);
         assert_eq!(violation.retry_after_s, 1);
 
+        // Verify X-Violation-Type through the authoritative response mapper (Codex P2)
+        let response = violation_to_response(&violation);
+        assert_eq!(
+            response.headers().get("X-Violation-Type").unwrap().to_str().unwrap(),
+            QuotaLayer::CircuitBreaker.violation_type()
+        );
+
         // 3. Recovery
         tokio::time::sleep(tokio::time::Duration::from_millis(1100)).await;
         assert!(store.check_and_update(&tenant_id, QuotaLayer::CircuitBreaker).await.is_ok());
@@ -104,6 +111,13 @@ mod tests {
         assert_eq!(violation.layer, QuotaLayer::CircuitBreaker);
         assert_eq!(violation.retry_after_s, 1);
 
+        // Verify X-Violation-Type through the authoritative response mapper (Codex P2)
+        let response = violation_to_response(&violation);
+        assert_eq!(
+            response.headers().get("X-Violation-Type").unwrap().to_str().unwrap(),
+            QuotaLayer::CircuitBreaker.violation_type()
+        );
+
         // 3. Recovery
         tokio::time::sleep(tokio::time::Duration::from_millis(1100)).await;
         assert!(store.check_and_update_multi(&tenant_id, &layers).await.is_ok());
@@ -140,5 +154,12 @@ mod tests {
         assert!(res.is_err());
         let violation = res.unwrap_err();
         assert_eq!(violation.layer, QuotaLayer::SystemHardLimit, "SHL must win over CB");
+
+        // Verify X-Violation-Type through the authoritative response mapper (Codex P2)
+        let response = violation_to_response(&violation);
+        assert_eq!(
+            response.headers().get("X-Violation-Type").unwrap().to_str().unwrap(),
+            QuotaLayer::SystemHardLimit.violation_type()
+        );
     }
 }
