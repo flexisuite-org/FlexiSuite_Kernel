@@ -140,10 +140,10 @@ impl Default for MiddlewareConfig {
             match std::env::var(key) {
                 Ok(v) => match v.parse::<f64>() {
                     Ok(s) => {
-                        if s > 0.0 {
+                        if s.is_finite() && s > 0.0 {
                             s
                         } else {
-                            tracing::warn!(key = %key, value = %s, "Non-positive env var for quota (rate/capacity), using default");
+                            tracing::warn!(key = %key, value = %s, "Invalid or non-positive env var for quota (rate/capacity), using default");
                             default_val
                         }
                     }
@@ -1380,13 +1380,19 @@ impl RedisQuotaStore {
         let tenant_override = self.quota.tenant_overrides.get(&tenant_id_str);
         let is_cb = layer == QuotaLayer::CircuitBreaker;
         
-        let validate_quota = |q: QuotaLayerConfig, fallback: QuotaLayerConfig| -> QuotaLayerConfig {
+        let validate_quota = |q: QuotaLayerConfig, fallback: QuotaLayerConfig, layer_name: &str| -> QuotaLayerConfig {
             if q.rate.is_finite() && q.rate > 0.0 &&
                q.capacity.is_finite() && q.capacity > 0.0 &&
                q.cost.is_finite() && q.cost > 0.0 &&
                q.backoff_s.is_finite() && q.backoff_s > 0.0 {
                 q
             } else {
+                tracing::warn!(
+                    tenant_id = %tenant_id_str,
+                    layer = %layer_name,
+                    config = ?q,
+                    "Invalid tenant quota override detected, falling back to global default"
+                );
                 fallback
             }
         };
@@ -1395,7 +1401,8 @@ impl RedisQuotaStore {
             QuotaLayer::SystemHardLimit => {
                 let q = validate_quota(
                     tenant_override.and_then(|o| o.system_hard_limit).unwrap_or(self.quota.system_hard_limit),
-                    self.quota.system_hard_limit
+                    self.quota.system_hard_limit,
+                    "SystemHardLimit"
                 );
                 Some((
                     "quota:{global}:system".to_string(),
@@ -1409,7 +1416,8 @@ impl RedisQuotaStore {
             QuotaLayer::TenantBudget => {
                 let q = validate_quota(
                     tenant_override.and_then(|o| o.tenant_budget).unwrap_or(self.quota.tenant_budget),
-                    self.quota.tenant_budget
+                    self.quota.tenant_budget,
+                    "TenantBudget"
                 );
                 let mut s = String::with_capacity(128);
                 s.push_str("quota:{global}:tenant:");
@@ -1420,7 +1428,8 @@ impl RedisQuotaStore {
             QuotaLayer::ApiRateLimit => {
                 let q = validate_quota(
                     tenant_override.and_then(|o| o.api_rate_limit).unwrap_or(self.quota.api_rate_limit),
-                    self.quota.api_rate_limit
+                    self.quota.api_rate_limit,
+                    "ApiRateLimit"
                 );
                 let mut s = String::with_capacity(128);
                 s.push_str("quota:{global}:tenant:");
@@ -1431,7 +1440,8 @@ impl RedisQuotaStore {
             QuotaLayer::CircuitBreaker => {
                 let q = validate_quota(
                     tenant_override.and_then(|o| o.circuit_breaker).unwrap_or(self.quota.circuit_breaker),
-                    self.quota.circuit_breaker
+                    self.quota.circuit_breaker,
+                    "CircuitBreaker"
                 );
                 let mut s = String::with_capacity(128);
                 s.push_str("quota:{global}:tenant:");

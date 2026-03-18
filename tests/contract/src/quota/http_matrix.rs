@@ -101,5 +101,11 @@ mod tests {
             retry_after_s: 120,
         };
         assert_eq!(v_cb_high.headers()[0].1, "120");
+
+        let v_cb_v_high = QuotaViolation {
+            layer: QuotaLayer::CircuitBreaker,
+            retry_after_s: 999_999_999,
+        };
+        assert_eq!(v_cb_v_high.headers()[0].1, "31536000");
     }
 }

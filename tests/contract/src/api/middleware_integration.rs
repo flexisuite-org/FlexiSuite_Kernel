@@ -43,6 +43,24 @@ pub fn mock_db_with_budget(auth_calls: usize) -> sea_orm::DatabaseConnection {
 
     for _ in 0..auth_calls {
         let now = Utc::now();
+
+        #[cfg(feature = "dev-auth")]
+        {
+            db = db.append_query_results([vec![key_record::Model {
+                kid: "hmac-key-1".to_string(),
+                key_type: key_record::KeyType::Hmac,
+                algorithm: "HS256".to_string(),
+                secret_bytes: Some(vec![0u8; 32]),
+                public_bytes: None,
+                state: key_record::KeyState::Active,
+                created_at: now.into(),
+                activated_at: Some(now.into()),
+                retired_at: None,
+                revoked_at: None,
+                expires_at: None,
+            }]]);
+        }
+
         // 1) flexi.authorize_tenant
         db = db.append_exec_results([MockExecResult {
             last_insert_id: 0,
@@ -503,7 +521,7 @@ async fn test_idempotency_key_validation() {
 async fn test_quota_evaluation_priority_and_clipping() {
     let _ = tracing_subscriber::fmt::try_init();
     #[cfg(all(feature = "dev-auth", feature = "test-utils"))]
-    let app = setup_app_with_db(mock_db_with_bridge_budget(2)).await;
+    let app = setup_app_with_db(mock_db_with_budget(2)).await;
     #[cfg(not(all(feature = "dev-auth", feature = "test-utils")))]
     let app = setup_app().await;
 
@@ -594,7 +612,7 @@ async fn test_quota_evaluation_priority_and_clipping() {
 #[cfg(all(feature = "dev-auth", feature = "test-utils"))]
 async fn test_quota_circuit_breaker_branch_contract() {
     let _ = tracing_subscriber::fmt::try_init();
-    let app = setup_app_with_db(mock_db_with_bridge_budget(1)).await;
+    let app = setup_app_with_db(mock_db_with_budget(1)).await;
 
     let req = Request::builder()
         .uri("/test")
