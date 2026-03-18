@@ -34,10 +34,10 @@ mod tests {
             tenant_budget: QuotaLayerConfig { rate: 100.0, capacity: 300.0, cost: 1.0, backoff_s: 30.0 },
             api_rate_limit: QuotaLayerConfig { rate: 10.0, capacity: 50.0, cost: 1.0, backoff_s: 30.0 },
             circuit_breaker: QuotaLayerConfig {
-                rate: 2.0,       // 2 tokens per second
+                rate: 1.0,       // Small enough to prevent flake in loop, but large enough to refill 1 token after 1s backoff
                 capacity: 5.0,   // Max 5 tokens
                 cost: 1.0,       // 1 token per request
-                backoff_s: 30.0, // Wait 30s before half-open
+                backoff_s: 1.0,  // Wait 1s before half-open so we can test recovery
             },
             tenant_overrides: std::collections::HashMap::new(),
         };
@@ -57,7 +57,14 @@ mod tests {
         
         let violation = res.unwrap_err();
         assert_eq!(violation.layer, QuotaLayer::CircuitBreaker);
-        assert_eq!(violation.retry_after_s, 30); // Should match backoff_s
+        assert_eq!(violation.retry_after_s, 1); // Should match backoff_s
+
+        // 3. Wait for the backoff period plus a tiny epsilon to allow recovery (half-open)
+        tokio::time::sleep(tokio::time::Duration::from_millis(1100)).await;
+
+        // 4. The 7th request should succeed, closing the breaker
+        let res = store.check_and_update(&tenant_id, QuotaLayer::CircuitBreaker).await;
+        assert!(res.is_ok(), "Circuit breaker should recover after backoff");
     }
 
     #[tokio::test]
@@ -72,10 +79,10 @@ mod tests {
             tenant_budget: QuotaLayerConfig { rate: 100.0, capacity: 300.0, cost: 1.0, backoff_s: 30.0 },
             api_rate_limit: QuotaLayerConfig { rate: 10.0, capacity: 50.0, cost: 1.0, backoff_s: 30.0 },
             circuit_breaker: QuotaLayerConfig {
-                rate: 2.0,       // 2 tokens per second
+                rate: 1.0,       // Small enough to prevent flake in loop, but large enough to refill 1 token after 1s backoff
                 capacity: 5.0,   // Max 5 tokens
                 cost: 1.0,       // 1 token per request
-                backoff_s: 30.0, // Wait 30s before half-open
+                backoff_s: 1.0,  // Wait 1s before half-open so we can test recovery
             },
             tenant_overrides: std::collections::HashMap::new(),
         };
@@ -102,6 +109,13 @@ mod tests {
         
         let violation = res.unwrap_err();
         assert_eq!(violation.layer, QuotaLayer::CircuitBreaker);
-        assert_eq!(violation.retry_after_s, 30); // Should match backoff_s
+        assert_eq!(violation.retry_after_s, 1); // Should match backoff_s
+
+        // 3. Wait for the backoff period plus a tiny epsilon to allow recovery (half-open)
+        tokio::time::sleep(tokio::time::Duration::from_millis(1100)).await;
+
+        // 4. The 7th request should succeed, closing the breaker
+        let res = store.check_and_update_multi(&tenant_id, &layers).await;
+        assert!(res.is_ok(), "Circuit breaker should recover after backoff");
     }
 }

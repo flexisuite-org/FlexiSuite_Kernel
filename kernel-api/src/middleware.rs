@@ -1382,9 +1382,9 @@ impl RedisQuotaStore {
         
         let validate_quota = |q: QuotaLayerConfig, fallback: QuotaLayerConfig| -> QuotaLayerConfig {
             if q.rate.is_finite() && q.rate > 0.0 &&
-               q.capacity.is_finite() && q.capacity >= 0.0 &&
-               q.cost.is_finite() && q.cost >= 0.0 &&
-               q.backoff_s.is_finite() && q.backoff_s >= 0.0 {
+               q.capacity.is_finite() && q.capacity > 0.0 &&
+               q.cost.is_finite() && q.cost > 0.0 &&
+               q.backoff_s.is_finite() && q.backoff_s > 0.0 {
                 q
             } else {
                 fallback
