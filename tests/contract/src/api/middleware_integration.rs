@@ -503,7 +503,7 @@ async fn test_idempotency_key_validation() {
 async fn test_quota_evaluation_priority_and_clipping() {
     let _ = tracing_subscriber::fmt::try_init();
     #[cfg(all(feature = "dev-auth", feature = "test-utils"))]
-    let app = setup_app_with_db(mock_db_with_budget(2)).await;
+    let app = setup_app_with_db(mock_db_with_bridge_budget(2)).await;
     #[cfg(not(all(feature = "dev-auth", feature = "test-utils")))]
     let app = setup_app().await;
 
@@ -594,7 +594,7 @@ async fn test_quota_evaluation_priority_and_clipping() {
 #[cfg(all(feature = "dev-auth", feature = "test-utils"))]
 async fn test_quota_circuit_breaker_branch_contract() {
     let _ = tracing_subscriber::fmt::try_init();
-    let app = setup_app_with_db(mock_db_with_budget(1)).await;
+    let app = setup_app_with_db(mock_db_with_bridge_budget(1)).await;
 
     let req = Request::builder()
         .uri("/test")
