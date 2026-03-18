@@ -1379,11 +1379,24 @@ impl RedisQuotaStore {
         let tenant_id_str = tenant_id.to_string();
         let tenant_override = self.quota.tenant_overrides.get(&tenant_id_str);
         let is_cb = layer == QuotaLayer::CircuitBreaker;
+        
+        let validate_quota = |q: QuotaLayerConfig, fallback: QuotaLayerConfig| -> QuotaLayerConfig {
+            if q.rate.is_finite() && q.rate > 0.0 &&
+               q.capacity.is_finite() && q.capacity >= 0.0 &&
+               q.cost.is_finite() && q.cost >= 0.0 &&
+               q.backoff_s.is_finite() && q.backoff_s >= 0.0 {
+                q
+            } else {
+                fallback
+            }
+        };
+
         match layer {
             QuotaLayer::SystemHardLimit => {
-                let q = tenant_override
-                    .and_then(|o| o.system_hard_limit)
-                    .unwrap_or(self.quota.system_hard_limit);
+                let q = validate_quota(
+                    tenant_override.and_then(|o| o.system_hard_limit).unwrap_or(self.quota.system_hard_limit),
+                    self.quota.system_hard_limit
+                );
                 Some((
                     "quota:{global}:system".to_string(),
                     q.rate,
@@ -1394,9 +1407,10 @@ impl RedisQuotaStore {
                 ))
             }
             QuotaLayer::TenantBudget => {
-                let q = tenant_override
-                    .and_then(|o| o.tenant_budget)
-                    .unwrap_or(self.quota.tenant_budget);
+                let q = validate_quota(
+                    tenant_override.and_then(|o| o.tenant_budget).unwrap_or(self.quota.tenant_budget),
+                    self.quota.tenant_budget
+                );
                 let mut s = String::with_capacity(128);
                 s.push_str("quota:{global}:tenant:");
                 append_sha256_hex(tenant_id_str.as_bytes(), &mut s);
@@ -1404,9 +1418,10 @@ impl RedisQuotaStore {
                 Some((s, q.rate, q.capacity, q.cost, q.backoff_s, is_cb))
             }
             QuotaLayer::ApiRateLimit => {
-                let q = tenant_override
-                    .and_then(|o| o.api_rate_limit)
-                    .unwrap_or(self.quota.api_rate_limit);
+                let q = validate_quota(
+                    tenant_override.and_then(|o| o.api_rate_limit).unwrap_or(self.quota.api_rate_limit),
+                    self.quota.api_rate_limit
+                );
                 let mut s = String::with_capacity(128);
                 s.push_str("quota:{global}:tenant:");
                 append_sha256_hex(tenant_id_str.as_bytes(), &mut s);
@@ -1414,9 +1429,10 @@ impl RedisQuotaStore {
                 Some((s, q.rate, q.capacity, q.cost, q.backoff_s, is_cb))
             }
             QuotaLayer::CircuitBreaker => {
-                let q = tenant_override
-                    .and_then(|o| o.circuit_breaker)
-                    .unwrap_or(self.quota.circuit_breaker);
+                let q = validate_quota(
+                    tenant_override.and_then(|o| o.circuit_breaker).unwrap_or(self.quota.circuit_breaker),
+                    self.quota.circuit_breaker
+                );
                 let mut s = String::with_capacity(128);
                 s.push_str("quota:{global}:tenant:");
                 append_sha256_hex(tenant_id_str.as_bytes(), &mut s);
