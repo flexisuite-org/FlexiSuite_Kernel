@@ -34,10 +34,10 @@ mod tests {
             tenant_budget: QuotaLayerConfig { rate: 100.0, capacity: 300.0, cost: 1.0, backoff_s: 30.0 },
             api_rate_limit: QuotaLayerConfig { rate: 10.0, capacity: 50.0, cost: 1.0, backoff_s: 30.0 },
             circuit_breaker: QuotaLayerConfig {
-                rate: 1.0,       // Small enough to prevent flake in loop, but large enough to refill 1 token after 1s backoff
-                capacity: 5.0,   // Max 5 tokens
-                cost: 1.0,       // 1 token per request
-                backoff_s: 1.0,  // Wait 1s before half-open so we can test recovery
+                rate: 1.0,
+                capacity: 5.0,
+                cost: 1.0,
+                backoff_s: 1.0,
             },
             tenant_overrides: std::collections::HashMap::new(),
         };
@@ -45,26 +45,21 @@ mod tests {
         let store = RedisQuotaStore::new(manager, quota_config);
         let tenant_id = TenantId::new("test-tenant").unwrap();
 
-        // 1. Consume all tokens to trigger the circuit breaker
+        // 1. Consume all tokens
         for _ in 0..5 {
-            let res = store.check_and_update(&tenant_id, QuotaLayer::CircuitBreaker).await;
-            assert!(res.is_ok(), "Should consume successfully until capacity reached");
+            assert!(store.check_and_update(&tenant_id, QuotaLayer::CircuitBreaker).await.is_ok());
         }
 
-        // 2. The 6th request should trip the breaker
+        // 2. Trip
         let res = store.check_and_update(&tenant_id, QuotaLayer::CircuitBreaker).await;
-        assert!(res.is_err(), "Circuit breaker should trip");
-        
+        assert!(res.is_err());
         let violation = res.unwrap_err();
         assert_eq!(violation.layer, QuotaLayer::CircuitBreaker);
-        assert_eq!(violation.retry_after_s, 1); // Should match backoff_s
+        assert_eq!(violation.retry_after_s, 1);
 
-        // 3. Wait for the backoff period plus a tiny epsilon to allow recovery (half-open)
+        // 3. Recovery
         tokio::time::sleep(tokio::time::Duration::from_millis(1100)).await;
-
-        // 4. The 7th request should succeed, closing the breaker
-        let res = store.check_and_update(&tenant_id, QuotaLayer::CircuitBreaker).await;
-        assert!(res.is_ok(), "Circuit breaker should recover after backoff");
+        assert!(store.check_and_update(&tenant_id, QuotaLayer::CircuitBreaker).await.is_ok());
     }
 
     #[tokio::test]
@@ -79,10 +74,10 @@ mod tests {
             tenant_budget: QuotaLayerConfig { rate: 100.0, capacity: 300.0, cost: 1.0, backoff_s: 30.0 },
             api_rate_limit: QuotaLayerConfig { rate: 10.0, capacity: 50.0, cost: 1.0, backoff_s: 30.0 },
             circuit_breaker: QuotaLayerConfig {
-                rate: 1.0,       // Small enough to prevent flake in loop, but large enough to refill 1 token after 1s backoff
-                capacity: 5.0,   // Max 5 tokens
-                cost: 1.0,       // 1 token per request
-                backoff_s: 1.0,  // Wait 1s before half-open so we can test recovery
+                rate: 1.0,
+                capacity: 5.0,
+                cost: 1.0,
+                backoff_s: 1.0,
             },
             tenant_overrides: std::collections::HashMap::new(),
         };
@@ -97,25 +92,53 @@ mod tests {
             QuotaLayer::ApiRateLimit,
         ];
 
-        // 1. Consume all tokens to trigger the circuit breaker
+        // 1. Consume all CB tokens (SHL has plenty)
         for _ in 0..5 {
-            let res = store.check_and_update_multi(&tenant_id, &layers).await;
-            assert!(res.is_ok(), "Should consume successfully until capacity reached");
+            assert!(store.check_and_update_multi(&tenant_id, &layers).await.is_ok());
         }
 
-        // 2. The 6th request should trip the breaker
+        // 2. Trip CB
         let res = store.check_and_update_multi(&tenant_id, &layers).await;
-        assert!(res.is_err(), "Circuit breaker should trip");
-        
+        assert!(res.is_err());
         let violation = res.unwrap_err();
         assert_eq!(violation.layer, QuotaLayer::CircuitBreaker);
-        assert_eq!(violation.retry_after_s, 1); // Should match backoff_s
+        assert_eq!(violation.retry_after_s, 1);
 
-        // 3. Wait for the backoff period plus a tiny epsilon to allow recovery (half-open)
+        // 3. Recovery
         tokio::time::sleep(tokio::time::Duration::from_millis(1100)).await;
+        assert!(store.check_and_update_multi(&tenant_id, &layers).await.is_ok());
+    }
 
-        // 4. The 7th request should succeed, closing the breaker
+    #[tokio::test]
+    async fn test_redis_lua_priority_contract() {
+        let (_node, client) = start_redis_server().await;
+        let manager = redis::aio::ConnectionManager::new(client)
+            .await
+            .expect("create connection manager");
+
+        let quota_config = QuotaConfig {
+            system_hard_limit: QuotaLayerConfig { rate: 1.0, capacity: 1.0, cost: 1.0, backoff_s: 30.0 },
+            tenant_budget: QuotaLayerConfig { rate: 100.0, capacity: 100.0, cost: 1.0, backoff_s: 30.0 },
+            api_rate_limit: QuotaLayerConfig { rate: 100.0, capacity: 100.0, cost: 1.0, backoff_s: 30.0 },
+            circuit_breaker: QuotaLayerConfig { rate: 1.0, capacity: 1.0, cost: 1.0, backoff_s: 30.0 },
+            tenant_overrides: std::collections::HashMap::new(),
+        };
+
+        let store = RedisQuotaStore::new(manager, quota_config);
+        let tenant_id = TenantId::new("test-priority-tenant").unwrap();
+
+        let layers = vec![
+            QuotaLayer::SystemHardLimit,
+            QuotaLayer::CircuitBreaker,
+        ];
+
+        // 1. First request: OK
+        assert!(store.check_and_update_multi(&tenant_id, &layers).await.is_ok());
+        
+        // 2. Second request: Both would fail, but SHL is higher priority
         let res = store.check_and_update_multi(&tenant_id, &layers).await;
-        assert!(res.is_ok(), "Circuit breaker should recover after backoff");
+        assert!(res.is_err());
+        let violation = res.unwrap_err();
+        assert_eq!(violation.layer, QuotaLayer::SystemHardLimit, "SHL must win over CB");
     }
 }

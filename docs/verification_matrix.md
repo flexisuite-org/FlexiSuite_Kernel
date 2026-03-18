@@ -71,6 +71,7 @@
 | クォータ | `test_quota_http_matrix` | 429/503判定表 および `X-Violation-Type` ヘッダ | レイヤ別に規定コードおよび `X-Violation-Type` を返却 |
 | クォータ | `test_retry_after_contract` | `Retry-After` 算出 および上限クリップ制約 | 欠落なく非負秒で返却（CBやSystem Hard Limitのクリップ制約を含む） |
 | クォータ | `test_redis_lua_multi_script_circuit_breaker_contract` | Circuit Breaker動作の検証 | 評価順序の遵守と `X-Violation-Type: circuit_breaker` の返却 (実Redis環境) |
+| クォータ | `test_redis_lua_priority_contract` | レイヤ間優先順位の検証 | SHL > CB 等の優先順位が正しく維持されること (実Redis環境) |
 | イベント順序 | `test_event_ordering_entity` | `order_mode=entity` | `entity_seq` 順に処理 |
 | イベント順序 | `test_event_ordering_causality` | `order_mode=causality` | `causality_seq` 順に処理 |
 | イベント順序 | `test_event_mode_mix_forbidden` | 同一 `entity_id` のモード混在禁止 | 作成時に拒否 |
