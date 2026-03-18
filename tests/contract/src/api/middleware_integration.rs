@@ -17,6 +17,8 @@ use kernel_api::middleware::{
     IdempotencyStore, InMemoryActionStore, InMemoryQuotaStore, MiddlewareConfig, MiddlewareState,
 };
 use std::sync::Arc;
+#[cfg(all(feature = "dev-auth", feature = "test-utils"))]
+use kernel_core::quota::QuotaLayer;
 #[cfg(feature = "dev-auth")]
 use tokio::sync::Notify;
 
