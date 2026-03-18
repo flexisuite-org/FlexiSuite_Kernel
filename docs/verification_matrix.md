@@ -116,7 +116,7 @@
 
 | 領域 | 要件 | 強制メカニズム | 監視/アラート |
 |---|---|---|---|
-| クォータ制御 | 優先順位 `System > Tenant > API` | ミドルウェア短絡判定 | `quota_reject_total{layer=...}` |
+| クォータ制御 | 優先順位 `System > CircuitBreaker > Tenant > API` | ミドルウェア短絡判定 | `quota_reject_total{layer=...}` |
 | クォータ制御 | 429/503 + `Retry-After` | APIレスポンスガード | `quota_retry_after_missing_total` |
 | NTPドリフト | App-DB 時刻差監視 | 定期ジョブ | 1秒超過継続でCritical |
 | Nonce運用 | TTL回収遅延防止 | `pg_cron` または外部ジョブ | `nonce_cleanup_lag_seconds` |

@@ -1129,6 +1129,10 @@ pub trait QuotaStore: Send + Sync {
         tenant_id: &kernel_core::auth::TenantId,
         layer: QuotaLayer,
     ) -> Result<(), QuotaViolation>;
+
+    /// Note: The default implementation is NON-ATOMIC. It checks layers sequentially.
+    /// If atomicity is required (e.g., to not consume tokens of passing layers
+    /// when a subsequent layer fails), implementors MUST override this method.
     async fn check_and_update_multi(
         &self,
         tenant_id: &kernel_core::auth::TenantId,
