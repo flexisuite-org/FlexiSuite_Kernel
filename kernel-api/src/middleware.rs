@@ -1179,6 +1179,9 @@ impl RedisQuotaStore {
         let script = redis::Script::new(
             r#"
             local function compute_refill_ttl_ms(rate, capacity, tokens)
+                if rate <= 0 then
+                    return 1
+                end
                 local missing = math.max(0, capacity - tokens)
                 if missing <= 0 then
                     return 1
@@ -1242,7 +1245,12 @@ impl RedisQuotaStore {
                     return {0, retry_after}
                 else
                     local required = cost - filled
-                    local retry_after = math.ceil(required / rate)
+                    local retry_after
+                    if rate <= 0 then
+                        retry_after = 60
+                    else
+                        retry_after = math.ceil(required / rate)
+                    end
                     return {0, retry_after}
                 end
             end
@@ -1310,7 +1318,12 @@ impl RedisQuotaStore {
                         redis.call("PEXPIRE", key, ttl_ms)
                         return {0, i, retry_after}
                     else
-                        local retry_after = math.ceil((cost - filled) / rate)
+                        local retry_after
+                        if rate <= 0 then
+                            retry_after = 60
+                        else
+                            retry_after = math.ceil((cost - filled) / rate)
+                        end
                         return {0, i, retry_after}
                     end
                 end
@@ -2226,5 +2239,26 @@ mod tests {
 
         assert_eq!(ttl_ms, 240_000);
         assert!(ttl_ms > 60_000);
+    }
+
+    #[test]
+    fn test_quota_refill_ttl_guard_zero_rate() {
+        // This test documents the safety guard we added to the Lua script.
+        let rate = 0.0_f64;
+        let capacity = 100.0_f64;
+        let tokens = 0.0_f64;
+
+        let refill_ttl_ms = if rate <= 0.0 {
+            1
+        } else {
+            let missing = (capacity - tokens).max(0.0);
+            if missing <= 0.0 {
+                1
+            } else {
+                ((missing / rate) * 1000.0).ceil() as u64
+            }
+        };
+
+        assert_eq!(refill_ttl_ms, 1);
     }
 }
