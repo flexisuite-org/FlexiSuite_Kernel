@@ -427,13 +427,14 @@ KMS (Key Management Service) を前提とした鍵ライフサイクルを規定
     - Circuit Breaker層をパスしても、その後のレイヤー（例: Tenant Budget）で拒否された場合、CBのトークンは消費されない。
     - これにより、CBは「実際に受け入れられたリクエストの流量」に基づいてトリップする。
   - **HTTP判定表 (REQ-QUOTA-HTTP-CONTRACT)**:
+    - レスポンスには、超過したレイヤを示す `X-Violation-Type` ヘッダを必ず含めなければならない (MUST)。取りうる値は `system_hard_limit`, `circuit_breaker`, `tenant_budget`, `api_rate_limit` とする。
 
-| 判定レイヤ | 返却コード | `Retry-After` 算出 |
-|---|---|---|
-| `Tenant Budget` 超過 | `429 Too Many Requests` | トークンバケット再充填までの秒数（切り上げ） |
-| `API Rate Limit` 超過 | `429 Too Many Requests` | レート窓リセットまでの秒数 |
-| `System Hard Limit` 超過 | `503 Service Unavailable` | システム保護窓の最短解除見込み秒数（1-30秒でクリップ） |
-| テナント隔離サーキットブレーカー作動 | `503 Service Unavailable` | ブレーカー半開放予定までの秒数 |
+| 判定レイヤ | `X-Violation-Type` | 返却コード | `Retry-After` 算出 |
+|---|---|---|---|
+| `System Hard Limit` 超過 | `system_hard_limit` | `503 Service Unavailable` | システム保護窓の最短解除見込み秒数（1-30秒でクリップ） |
+| テナント隔離サーキットブレーカー作動 | `circuit_breaker` | `503 Service Unavailable` | ブレーカー半開放予定までの秒数 |
+| `Tenant Budget` 超過 | `tenant_budget` | `429 Too Many Requests` | トークンバケット再充填までの秒数（切り上げ） |
+| `API Rate Limit` 超過 | `api_rate_limit` | `429 Too Many Requests` | レート窓リセットまでの秒数 |
 
   - **Circuit Breaker (Burst Protector) 設計上の注意**:
     - FlexiSuiteのサーキットブレーカーは、エラー率ではなく**リクエスト流量（バースト）**に基づいて作動する。
