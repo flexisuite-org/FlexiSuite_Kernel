@@ -1259,6 +1259,9 @@ impl RedisQuotaStore {
         let script_multi = redis::Script::new(
             r#"
             local function compute_refill_ttl_ms(rate, capacity, tokens)
+                if rate <= 0 then
+                    return 1
+                end
                 local missing = math.max(0, capacity - tokens)
                 if missing <= 0 then
                     return 1
@@ -2132,20 +2135,17 @@ pub fn violation_to_response(v: &QuotaViolation) -> Response {
         }
     }
 
-    #[cfg(any(test, feature = "test-utils"))]
-    {
-        // For tests, we might want to inspect specific violation details via headers
-        let violation_type = match v.layer {
-            QuotaLayer::SystemHardLimit => "system_hard_limit",
-            QuotaLayer::CircuitBreaker => "circuit_breaker",
-            QuotaLayer::TenantBudget => "tenant_budget",
-            QuotaLayer::ApiRateLimit => "api_rate_limit",
-        };
-        headers.insert(
-            "X-Violation-Type",
-            HeaderValue::from_str(violation_type).unwrap_or(HeaderValue::from_static("unknown")),
-        );
-    }
+    // The X-Violation-Type header MUST always be present in quota violation responses
+    let violation_type = match v.layer {
+        QuotaLayer::SystemHardLimit => "system_hard_limit",
+        QuotaLayer::CircuitBreaker => "circuit_breaker",
+        QuotaLayer::TenantBudget => "tenant_budget",
+        QuotaLayer::ApiRateLimit => "api_rate_limit",
+    };
+    headers.insert(
+        "X-Violation-Type",
+        HeaderValue::from_str(violation_type).unwrap_or(HeaderValue::from_static("unknown")),
+    );
 
     res
 }
