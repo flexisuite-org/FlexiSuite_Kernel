@@ -47,13 +47,8 @@ mod tests {
             assert!(retry_after.is_some(), "Retry-After header must be present");
             assert_eq!(retry_after.unwrap().1, "10", "Retry-After value must match");
             
-            // Replicate the logic in kernel_api::middleware::violation_to_response to test the contract
-            let actual_violation_type = match violation.layer {
-                QuotaLayer::SystemHardLimit => "system_hard_limit",
-                QuotaLayer::CircuitBreaker => "circuit_breaker",
-                QuotaLayer::TenantBudget => "tenant_budget",
-                QuotaLayer::ApiRateLimit => "api_rate_limit",
-            };
+            // Use the canonical conversion used by runtime to test the contract
+            let actual_violation_type = violation.layer.violation_type();
             assert_eq!(actual_violation_type, expected_violation_type, "X-Violation-Type must match");
         }
     }

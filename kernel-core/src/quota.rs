@@ -8,6 +8,17 @@ pub enum QuotaLayer {
     CircuitBreaker,
 }
 
+impl QuotaLayer {
+    pub fn violation_type(&self) -> &'static str {
+        match self {
+            QuotaLayer::SystemHardLimit => "system_hard_limit",
+            QuotaLayer::CircuitBreaker => "circuit_breaker",
+            QuotaLayer::TenantBudget => "tenant_budget",
+            QuotaLayer::ApiRateLimit => "api_rate_limit",
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct QuotaViolation {
     pub layer: QuotaLayer,

@@ -2156,12 +2156,7 @@ pub fn violation_to_response(v: &QuotaViolation) -> Response {
     }
 
     // The X-Violation-Type header MUST always be present in quota violation responses
-    let violation_type = match v.layer {
-        QuotaLayer::SystemHardLimit => "system_hard_limit",
-        QuotaLayer::CircuitBreaker => "circuit_breaker",
-        QuotaLayer::TenantBudget => "tenant_budget",
-        QuotaLayer::ApiRateLimit => "api_rate_limit",
-    };
+    let violation_type = v.layer.violation_type();
     headers.insert(
         "X-Violation-Type",
         HeaderValue::from_str(violation_type).unwrap_or(HeaderValue::from_static("unknown")),

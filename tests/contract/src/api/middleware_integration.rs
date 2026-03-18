@@ -548,7 +548,7 @@ async fn test_quota_evaluation_priority_and_clipping() {
             .unwrap()
             .to_str()
             .unwrap();
-        assert_eq!(violation_type, "system_hard_limit");
+        assert_eq!(violation_type, QuotaLayer::SystemHardLimit.violation_type());
     }
 
     // Now test SystemHardLimit clipping logic without CircuitBreaker
@@ -574,7 +574,7 @@ async fn test_quota_evaluation_priority_and_clipping() {
             .unwrap()
             .to_str()
             .unwrap();
-        assert_eq!(violation_type, "system_hard_limit");
+        assert_eq!(violation_type, QuotaLayer::SystemHardLimit.violation_type());
     }
 
     #[cfg(all(feature = "dev-auth", not(feature = "test-utils")))]
@@ -617,7 +617,7 @@ async fn test_quota_circuit_breaker_branch_contract() {
             .unwrap()
             .to_str()
             .unwrap(),
-        "circuit_breaker"
+        QuotaLayer::CircuitBreaker.violation_type()
     );
 }
 
