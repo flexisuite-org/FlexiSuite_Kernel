@@ -43,24 +43,6 @@ pub fn mock_db_with_budget(auth_calls: usize) -> sea_orm::DatabaseConnection {
 
     for _ in 0..auth_calls {
         let now = Utc::now();
-
-        #[cfg(feature = "dev-auth")]
-        {
-            db = db.append_query_results([vec![key_record::Model {
-                kid: "hmac-key-1".to_string(),
-                key_type: key_record::KeyType::Hmac,
-                algorithm: "HS256".to_string(),
-                secret_bytes: Some(vec![0u8; 32]),
-                public_bytes: None,
-                state: key_record::KeyState::Active,
-                created_at: now.into(),
-                activated_at: Some(now.into()),
-                retired_at: None,
-                revoked_at: None,
-                expires_at: None,
-            }]]);
-        }
-
         // 1) flexi.authorize_tenant
         db = db.append_exec_results([MockExecResult {
             last_insert_id: 0,
