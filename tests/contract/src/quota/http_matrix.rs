@@ -11,25 +11,25 @@ mod tests {
     #[test]
     fn test_quota_http_matrix() {
         let scenarios = vec![
-            QuotaScenario {
+            (QuotaScenario {
                 layer: QuotaLayer::TenantBudget,
                 expected_status: StatusCode::TOO_MANY_REQUESTS,
-            },
-            QuotaScenario {
+            }, "tenant_budget"),
+            (QuotaScenario {
                 layer: QuotaLayer::ApiRateLimit,
                 expected_status: StatusCode::TOO_MANY_REQUESTS,
-            },
-            QuotaScenario {
+            }, "api_rate_limit"),
+            (QuotaScenario {
                 layer: QuotaLayer::SystemHardLimit,
                 expected_status: StatusCode::SERVICE_UNAVAILABLE,
-            },
-            QuotaScenario {
+            }, "system_hard_limit"),
+            (QuotaScenario {
                 layer: QuotaLayer::CircuitBreaker,
                 expected_status: StatusCode::SERVICE_UNAVAILABLE,
-            },
+            }, "circuit_breaker"),
         ];
 
-        for scenario in scenarios {
+        for (scenario, expected_violation_type) in scenarios {
             // Mock server behavior check
             // let response = client.trigger_quota(scenario.layer).await;
             // assert_eq!(response.status(), scenario.expected_status);
@@ -46,6 +46,10 @@ mod tests {
             let retry_after = headers.iter().find(|(k, _)| k == "Retry-After");
             assert!(retry_after.is_some(), "Retry-After header must be present");
             assert_eq!(retry_after.unwrap().1, "10", "Retry-After value must match");
+            
+            // Use the canonical conversion used by runtime to test the contract
+            let actual_violation_type = violation.layer.violation_type();
+            assert_eq!(actual_violation_type, expected_violation_type, "X-Violation-Type must match");
         }
     }
 
@@ -97,5 +101,11 @@ mod tests {
             retry_after_s: 120,
         };
         assert_eq!(v_cb_high.headers()[0].1, "120");
+
+        let v_cb_v_high = QuotaViolation {
+            layer: QuotaLayer::CircuitBreaker,
+            retry_after_s: 999_999_999,
+        };
+        assert_eq!(v_cb_v_high.headers()[0].1, "31536000");
     }
 }

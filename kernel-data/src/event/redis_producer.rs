@@ -47,8 +47,6 @@ impl RedisProducer {
         })
     }
 
-
-
     fn validate_stream_base(stream_base: &str) -> Result<(), EventError> {
         if stream_base.is_empty() || stream_base.contains(':') {
             return Err(EventError::Producer(format!(

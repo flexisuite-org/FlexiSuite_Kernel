@@ -68,8 +68,10 @@
 | 冪等性 | `test_action_status_lookup` | `GET /actions/{action_id}` | `PENDING/COMPLETED/FAILED` が整合 |
 | 冪等性 | `test_idempotency_canonical_request_target` | canonical化仕様（path/query） | 並び順差/重複キー/末尾スラッシュ差異を正規化して同一判定 |
 | 冪等性 | `test_idempotency_query_order_conflict_guard` | canonical化後の本文不一致検知 | query順序差のみでは衝突とせず、本文差異時のみ `409` |
-| クォータ | `test_quota_http_matrix` | 429/503判定表 | レイヤ別に規定コード返却 |
-| クォータ | `test_retry_after_contract` | `Retry-After` 算出 | 欠落なく非負秒で返却 |
+| クォータ | `test_quota_http_matrix` | 429/503判定表 および `X-Violation-Type` ヘッダ | レイヤ別に規定コードおよび `X-Violation-Type` を返却 |
+| クォータ | `test_retry_after_contract` | `Retry-After` 算出 および上限クリップ制約 | 欠落なく非負秒で返却（CBやSystem Hard Limitのクリップ制約を含む） |
+| クォータ | `test_redis_lua_multi_script_circuit_breaker_contract` | Circuit Breaker動作の検証 | 評価順序の遵守と `X-Violation-Type: circuit_breaker` の返却 (実Redis環境) |
+| クォータ | `test_redis_lua_priority_contract` | レイヤ間優先順位の検証 | SHL > CB 等の優先順位が正しく維持されること (実Redis環境) |
 | イベント順序 | `test_event_ordering_entity` | `order_mode=entity` | `entity_seq` 順に処理 |
 | イベント順序 | `test_event_ordering_causality` | `order_mode=causality` | `causality_seq` 順に処理 |
 | イベント順序 | `test_event_mode_mix_forbidden` | 同一 `entity_id` のモード混在禁止 | 作成時に拒否 |
@@ -115,7 +117,7 @@
 
 | 領域 | 要件 | 強制メカニズム | 監視/アラート |
 |---|---|---|---|
-| クォータ制御 | 優先順位 `System > Tenant > API` | ミドルウェア短絡判定 | `quota_reject_total{layer=...}` |
+| クォータ制御 | 優先順位 `System > CircuitBreaker > Tenant > API` | ミドルウェア短絡判定 | `quota_reject_total{layer=...}` |
 | クォータ制御 | 429/503 + `Retry-After` | APIレスポンスガード | `quota_retry_after_missing_total` |
 | NTPドリフト | App-DB 時刻差監視 | 定期ジョブ | 1秒超過継続でCritical |
 | Nonce運用 | TTL回収遅延防止 | `pg_cron` または外部ジョブ | `nonce_cleanup_lag_seconds` |

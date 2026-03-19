@@ -25,7 +25,11 @@ fn expected_actor_id(tenant_id: &TenantId, user_id: &UserId) -> String {
 #[tokio::test(flavor = "multi_thread")]
 #[ignore] // Requires Docker
 async fn test_audit_log_creation() {
-    let node = Postgres::default().with_tag("15-alpine").start().await.expect("start postgres");
+    let node = Postgres::default()
+        .with_tag("15-alpine")
+        .start()
+        .await
+        .expect("start postgres");
     let port = node.get_host_port_ipv4(5432).await.expect("get port");
     let connection_string = format!("postgres://postgres:postgres@127.0.0.1:{}/postgres", port);
 

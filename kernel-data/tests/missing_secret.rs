@@ -17,7 +17,11 @@ use testcontainers_modules::postgres::Postgres;
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_auth_failures() {
-    let node = Postgres::default().with_tag("15-alpine").start().await.expect("start postgres");
+    let node = Postgres::default()
+        .with_tag("15-alpine")
+        .start()
+        .await
+        .expect("start postgres");
     let port = node.get_host_port_ipv4(5432).await.expect("get port");
     let connection_string = format!("postgres://postgres:postgres@127.0.0.1:{}/postgres", port);
 

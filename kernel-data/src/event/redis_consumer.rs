@@ -4,23 +4,23 @@ use crate::event::{
     validate_stream_key,
 };
 use async_trait::async_trait;
+use moka::future::Cache;
 use redis::aio::ConnectionManager;
 use redis::streams::{
     StreamAutoClaimOptions, StreamAutoClaimReply, StreamClaimReply, StreamId, StreamReadOptions,
     StreamReadReply,
 };
 use redis::{AsyncCommands, Client, RedisError};
-use moka::future::Cache;
 use std::sync::{
     Arc,
     atomic::{AtomicUsize, Ordering as AtomicOrdering},
 };
 use std::time::Duration;
+#[cfg(test)]
+use testcontainers::{ImageExt, runners::AsyncRunner};
+#[cfg(test)]
+use testcontainers_modules::redis::{REDIS_PORT, Redis};
 use tracing::{instrument, warn};
-#[cfg(test)]
-use testcontainers::{runners::AsyncRunner, ImageExt};
-#[cfg(test)]
-use testcontainers_modules::redis::{Redis, REDIS_PORT};
 
 #[derive(Clone)]
 pub struct RedisConsumer {
@@ -72,8 +72,6 @@ impl RedisConsumer {
             nogroup_recovery_start_id: nogroup_recovery_start_id.unwrap_or_else(|| "0".to_string()),
         })
     }
-
-
 
     fn validate_stream_base(stream_base: &str) -> Result<(), EventError> {
         if stream_base.is_empty() || stream_base.contains(':') {
@@ -237,8 +235,9 @@ impl RedisConsumer {
             // the full stream backlog. In a NOGROUP recovery scenario for an existing stream,
             // this can trigger a massive redelivery of historical events.
             // Using "$" would skip the backlog and only receive new messages.
-            let create_group: Result<(), RedisError> =
-                conn.xgroup_create_mkstream(&key, consumer_group, start_id).await;
+            let create_group: Result<(), RedisError> = conn
+                .xgroup_create_mkstream(&key, consumer_group, start_id)
+                .await;
             if let Err(error) = create_group {
                 if Self::is_busy_group_error(&error) {
                     continue;
@@ -377,8 +376,13 @@ impl RedisConsumer {
         // pass false to NOACK to ensure at-least-once delivery.
         // Note: Blocking on a single shard means worst-case latency for a message on a specific
         // shard can be (SHARD_COUNT * block_timeout) during periods of zero activity.
-        let blocking_options =
-            Self::build_read_options(consumer_group, consumer_name, 1, Some(self.block_timeout), false);
+        let blocking_options = Self::build_read_options(
+            consumer_group,
+            consumer_name,
+            1,
+            Some(self.block_timeout),
+            false,
+        );
 
         let key_strs: Vec<&str> = keys.iter().map(|s| s.as_str()).collect();
         let id_strs: Vec<&str> = vec![">"; keys.len()];
@@ -701,7 +705,8 @@ mod tests {
         assert!(ok.is_ok());
 
         // Others (delayed) are rejected because we have no delay queue logic
-        let err = RedisConsumer::validate_retry_policy(&RetryPolicy::BackoffUntil(chrono::Utc::now()));
+        let err =
+            RedisConsumer::validate_retry_policy(&RetryPolicy::BackoffUntil(chrono::Utc::now()));
         assert!(err.is_err());
     }
 

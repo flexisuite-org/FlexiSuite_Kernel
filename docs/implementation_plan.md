@@ -418,19 +418,28 @@ KMS (Key Management Service) を前提とした鍵ライフサイクルを規定
 - **Global Hard Ceiling**:
   - Tier別プラン（Pro/Enterprise）で上記制限を緩和する場合でも、**システム全体の安定性を守るための「絶対上限 (System Hard Limit)」** を設け、これを突破することは**許可してはならない (MUST NOT)**。
 - **優先順位 (衝突解決順)**:
-  - 制御判定は `System Hard Limit` → `Tenant Budget` → `API Rate Limit` の順で評価**しなければならない (MUST)**。
+  - 制御判定は `System Hard Limit` → `Circuit Breaker` → `Tenant Budget` → `API Rate Limit` の順で評価**しなければならない (MUST)**。
   - 上位レイヤで拒否された場合、下位レイヤの判定は行わない（短絡評価）**しなければならない (MUST)**。
 - **制御動作**:
   - クォータ超過時は `Retry-After` ヘッダを付与し、以下の判定表に従って `429` または `503` を返却**しなければならない (MUST)**。
+  - **Atomicity & Side-effects**:
+    - マルチキーLuaスクリプトは原子性を保つため2フェーズで実行される。
+    - Circuit Breaker層をパスしても、その後のレイヤー（例: Tenant Budget）で拒否された場合、CBのトークンは消費されない。
+    - これにより、CBは「実際に受け入れられたリクエストの流量」に基づいてトリップする。
   - **HTTP判定表 (REQ-QUOTA-HTTP-CONTRACT)**:
+    - レスポンスには、超過したレイヤを示す `X-Violation-Type` ヘッダを必ず含めなければならない (MUST)。取りうる値は `system_hard_limit`, `circuit_breaker`, `tenant_budget`, `api_rate_limit` とする。
 
-| 判定レイヤ | 返却コード | `Retry-After` 算出 |
-|---|---|---|
-| `Tenant Budget` 超過 | `429 Too Many Requests` | トークンバケット再充填までの秒数（切り上げ） |
-| `API Rate Limit` 超過 | `429 Too Many Requests` | レート窓リセットまでの秒数 |
-| `System Hard Limit` 超過 | `503 Service Unavailable` | システム保護窓の最短解除見込み秒数（1-30秒でクリップ） |
-| テナント隔離サーキットブレーカー作動 | `503 Service Unavailable` | ブレーカー半開放予定までの秒数 |
+| 判定レイヤ | `X-Violation-Type` | 返却コード | `Retry-After` 算出 |
+|---|---|---|---|
+| `System Hard Limit` 超過 | `system_hard_limit` | `503 Service Unavailable` | システム保護窓の最短解除見込み秒数（1-30秒でクリップ） |
+| テナント隔離サーキットブレーカー作動 | `circuit_breaker` | `503 Service Unavailable` | ブレーカー半開放予定までの秒数 |
+| `Tenant Budget` 超過 | `tenant_budget` | `429 Too Many Requests` | トークンバケット再充填までの秒数（切り上げ） |
+| `API Rate Limit` 超過 | `api_rate_limit` | `429 Too Many Requests` | レート窓リセットまでの秒数 |
 
+  - **Circuit Breaker (Burst Protector) 設計上の注意**:
+    - FlexiSuiteのサーキットブレーカーは、エラー率ではなく**リクエスト流量（バースト）**に基づいて作動する。
+    - 設定されたトークンバケット（default: 10 req/s, capacity 100）を使い切った場合に「遮断（Open）」状態となる。
+    - これは、特定のテナントによる急激なトラフィック増大からシステム全体を保護するための、サーキットブレーカースタイルの復旧挙動（Open → Half-Open → Closed）を持つバースト制限レイヤーである。
   - 特定テナントの負荷がシステム全体に波及する場合、当該テナントの全リクエストをサーキットブレーカーで遮断する権限をKernelが持つ。
 - **Client Retry Contract**:
   - SDK/クライアントは `Retry-After` が存在する場合これを最優先し、未指定時のみ指数バックオフ（`base=250ms`, `factor=2`, `jitter=full`, `max=30s`）を用いる**べきである (SHOULD)**。

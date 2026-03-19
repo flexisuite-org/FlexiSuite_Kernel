@@ -32,7 +32,11 @@ const TEST_INTERNAL_SECRET: &str = "test_internal_secret_123";
 type PostgresNode = ContainerAsync<Postgres>;
 
 async fn setup_test_db() -> (DatabaseConnection, PostgresNode) {
-    let node = Postgres::default().with_tag("15-alpine").start().await.expect("start postgres");
+    let node = Postgres::default()
+        .with_tag("15-alpine")
+        .start()
+        .await
+        .expect("start postgres");
     let port = node.get_host_port_ipv4(5432).await.expect("get port");
     let connection_string = format!("postgres://postgres:postgres@127.0.0.1:{}/postgres", port);
 
@@ -281,7 +285,11 @@ async fn test_delete_entity_contract() {
 #[tokio::test(flavor = "multi_thread")]
 #[ignore] // Requires Docker
 async fn test_migration_succeeds_without_flexi_role() {
-    let node = Postgres::default().with_tag("15-alpine").start().await.expect("start postgres");
+    let node = Postgres::default()
+        .with_tag("15-alpine")
+        .start()
+        .await
+        .expect("start postgres");
     let port = node.get_host_port_ipv4(5432).await.expect("get port");
     let connection_string = format!("postgres://postgres:postgres@127.0.0.1:{}/postgres", port);
 
@@ -344,7 +352,11 @@ async fn test_authorize_rejects_nonce_reuse() {
 #[tokio::test(flavor = "multi_thread")]
 #[ignore] // Requires Docker
 async fn test_authorized_tenant_id_rejects_manual_context_tampering() {
-    let node = Postgres::default().with_tag("15-alpine").start().await.expect("start postgres");
+    let node = Postgres::default()
+        .with_tag("15-alpine")
+        .start()
+        .await
+        .expect("start postgres");
     let port = node.get_host_port_ipv4(5432).await.expect("get port");
     let connection_string = format!("postgres://postgres:postgres@127.0.0.1:{}/postgres", port);
 

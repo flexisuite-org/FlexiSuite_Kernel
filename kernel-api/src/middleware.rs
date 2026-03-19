@@ -38,6 +38,8 @@ pub struct MiddlewareConfig {
     pub inflight_wait_timeout: Duration,
     pub redis_url: String,
     pub require_redis: bool,
+    #[cfg(any(test, feature = "test-utils"))]
+    pub allow_mock_quota: bool,
     pub quota: QuotaConfig,
 }
 
@@ -46,6 +48,7 @@ pub struct QuotaLayerConfig {
     pub rate: f64,
     pub capacity: f64,
     pub cost: f64,
+    pub backoff_s: f64,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -53,6 +56,7 @@ pub struct TenantQuotaOverride {
     pub system_hard_limit: Option<QuotaLayerConfig>,
     pub tenant_budget: Option<QuotaLayerConfig>,
     pub api_rate_limit: Option<QuotaLayerConfig>,
+    pub circuit_breaker: Option<QuotaLayerConfig>,
 }
 
 #[derive(Clone, Debug)]
@@ -60,21 +64,25 @@ pub struct QuotaConfig {
     pub system_hard_limit: QuotaLayerConfig,
     pub tenant_budget: QuotaLayerConfig,
     pub api_rate_limit: QuotaLayerConfig,
+    pub circuit_breaker: QuotaLayerConfig,
     pub tenant_overrides: HashMap<String, TenantQuotaOverride>,
 }
 
 impl fmt::Debug for MiddlewareConfig {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("MiddlewareConfig")
-            .field("idempotency_ttl", &self.idempotency_ttl)
+        let mut s = f.debug_struct("MiddlewareConfig");
+        s.field("idempotency_ttl", &self.idempotency_ttl)
             .field("action_ttl", &self.action_ttl)
             .field("max_body_size", &self.max_body_size)
             .field("max_replay_body_size", &self.max_replay_body_size)
             .field("inflight_wait_timeout", &self.inflight_wait_timeout)
             .field("redis_url", &"<redacted>")
-            .field("require_redis", &self.require_redis)
-            .field("quota", &self.quota)
-            .finish()
+            .field("require_redis", &self.require_redis);
+
+        #[cfg(any(test, feature = "test-utils"))]
+        s.field("allow_mock_quota", &self.allow_mock_quota);
+
+        s.field("quota", &self.quota).finish()
     }
 }
 
@@ -132,10 +140,10 @@ impl Default for MiddlewareConfig {
             match std::env::var(key) {
                 Ok(v) => match v.parse::<f64>() {
                     Ok(s) => {
-                        if s > 0.0 {
+                        if s.is_finite() && s > 0.0 {
                             s
                         } else {
-                            tracing::warn!(key = %key, value = %s, "Non-positive env var for quota (rate/capacity), using default");
+                            tracing::warn!(key = %key, value = %s, "Invalid or non-positive env var for quota (rate/capacity), using default");
                             default_val
                         }
                     }
@@ -156,21 +164,40 @@ impl Default for MiddlewareConfig {
             inflight_wait_timeout: get_env_duration("INFLIGHT_WAIT_TIMEOUT_SECS", 5),
             redis_url: get_env_string("REDIS_URL", "redis://127.0.0.1:6379"),
             require_redis: get_env_bool("REQUIRE_REDIS", true),
+            #[cfg(any(test, feature = "test-utils"))]
+            allow_mock_quota: {
+                let is_mock = get_env_bool("ALLOW_MOCK_QUOTA", false);
+                if is_mock {
+                    tracing::warn!(
+                        "ALLOW_MOCK_QUOTA is enabled. This is unsafe for shared/production environments!"
+                    );
+                }
+                is_mock
+            },
             quota: QuotaConfig {
                 system_hard_limit: QuotaLayerConfig {
                     rate: get_env_f64("QUOTA_SYSTEM_HARD_LIMIT_RATE", 1000.0),
                     capacity: get_env_f64("QUOTA_SYSTEM_HARD_LIMIT_CAPACITY", 1000.0),
                     cost: get_env_f64("QUOTA_SYSTEM_HARD_LIMIT_COST", 1.0),
+                    backoff_s: get_env_f64("QUOTA_SYSTEM_HARD_LIMIT_BACKOFF_S", 30.0),
                 },
                 tenant_budget: QuotaLayerConfig {
                     rate: get_env_f64("QUOTA_TENANT_BUDGET_RATE", 1000.0),
                     capacity: get_env_f64("QUOTA_TENANT_BUDGET_CAPACITY", 3000.0),
                     cost: get_env_f64("QUOTA_TENANT_BUDGET_COST", 5.0),
+                    backoff_s: get_env_f64("QUOTA_TENANT_BUDGET_BACKOFF_S", 30.0),
                 },
                 api_rate_limit: QuotaLayerConfig {
                     rate: get_env_f64("QUOTA_API_RATE_LIMIT_RATE", 16.666),
                     capacity: get_env_f64("QUOTA_API_RATE_LIMIT_CAPACITY", 100.0),
                     cost: get_env_f64("QUOTA_API_RATE_LIMIT_COST", 1.0),
+                    backoff_s: get_env_f64("QUOTA_API_RATE_LIMIT_BACKOFF_S", 30.0),
+                },
+                circuit_breaker: QuotaLayerConfig {
+                    rate: get_env_f64("QUOTA_CIRCUIT_BREAKER_RATE", 10.0),
+                    capacity: get_env_f64("QUOTA_CIRCUIT_BREAKER_CAPACITY", 100.0),
+                    cost: get_env_f64("QUOTA_CIRCUIT_BREAKER_COST", 1.0),
+                    backoff_s: get_env_f64("QUOTA_CIRCUIT_BREAKER_BACKOFF_S", 30.0),
                 },
                 tenant_overrides: HashMap::new(),
             },
@@ -1102,6 +1129,10 @@ pub trait QuotaStore: Send + Sync {
         tenant_id: &kernel_core::auth::TenantId,
         layer: QuotaLayer,
     ) -> Result<(), QuotaViolation>;
+
+    /// Note: The default implementation is NON-ATOMIC. It checks layers sequentially.
+    /// If atomicity is required (e.g., to not consume tokens of passing layers
+    /// when a subsequent layer fails), implementors MUST override this method.
     async fn check_and_update_multi(
         &self,
         tenant_id: &kernel_core::auth::TenantId,
@@ -1151,11 +1182,39 @@ impl RedisQuotaStore {
     pub fn new(manager: redis::aio::ConnectionManager, quota: QuotaConfig) -> Self {
         let script = redis::Script::new(
             r#"
+            local function compute_refill_ttl_ms(rate, capacity, tokens)
+                if rate <= 0 then
+                    return 1
+                end
+                local missing = math.max(0, capacity - tokens)
+                if missing <= 0 then
+                    return 1
+                end
+                return math.max(1, math.ceil((missing / rate) * 1000))
+            end
+
             local key = KEYS[1]
             local rate = tonumber(ARGV[1])
             local capacity = tonumber(ARGV[2])
             local cost = tonumber(ARGV[3])
             local now = tonumber(ARGV[4])
+            local backoff_s = tonumber(ARGV[5])
+            local is_cb = tonumber(ARGV[6]) == 1
+
+            -- Circuit breaker logic: load-based burst protector
+            if is_cb then
+                local cb_state = redis.call("HGET", key, "state")
+                local cb_until_raw = redis.call("HGET", key, "until")
+                local cb_until = tonumber(cb_until_raw)
+
+                if cb_state == "open" then
+                    if cb_until ~= nil and now < cb_until then
+                        return {0, math.ceil(cb_until - now)}
+                    else
+                        -- Timeout expired, fall through to token check (acts as half-open probe)
+                    end
+                end
+            end
 
             local tokens = tonumber(redis.call("HGET", key, "tokens"))
             local last_refill = tonumber(redis.call("HGET", key, "last_refill"))
@@ -1170,29 +1229,83 @@ impl RedisQuotaStore {
 
             if filled >= cost then
                 local new_tokens = filled - cost
-                redis.call("HSET", key, "tokens", new_tokens, "last_refill", now)
-                redis.call("PEXPIRE", key, 60000)
+
+                if is_cb then
+                    redis.call("HSET", key, "tokens", new_tokens, "last_refill", now, "state", "closed")
+                    redis.call("HDEL", key, "until")
+                    redis.call("PEXPIRE", key, compute_refill_ttl_ms(rate, capacity, new_tokens))
+                else
+                    redis.call("HSET", key, "tokens", new_tokens, "last_refill", now)
+                    redis.call("PEXPIRE", key, 60000)
+                end
                 return {1, new_tokens}
             else
-                local required = cost - filled
-                local retry_after = required / rate
-                return {0, retry_after}
+                if is_cb then
+                    local retry_after = math.ceil(backoff_s)
+                    retry_after = math.max(1, math.min(31536000, retry_after))
+                    redis.call("HSET", key, "state", "open", "until", now + retry_after)
+                    local ttl_ms = math.floor((retry_after * 1000) + 30000)
+                    redis.call("PEXPIRE", key, ttl_ms)
+                    return {0, retry_after}
+                else
+                    local required = cost - filled
+                    local retry_after
+                    if rate <= 0 then
+                        retry_after = 60
+                    else
+                        retry_after = math.ceil(required / rate)
+                    end
+                    return {0, retry_after}
+                end
             end
         "#,
         );
         let script_multi = redis::Script::new(
             r#"
+            local function compute_refill_ttl_ms(rate, capacity, tokens)
+                if rate <= 0 then
+                    return 1
+                end
+                local missing = math.max(0, capacity - tokens)
+                if missing <= 0 then
+                    return 1
+                end
+                return math.max(1, math.ceil((missing / rate) * 1000))
+            end
+
             local now = tonumber(ARGV[1])
             local n = tonumber(ARGV[2])
             local idx = 3
             local keys = {}
             local new_tokens = {}
+            local is_cb = {}
+            local rates = {}
+            local capacities = {}
 
+            -- First pass: validation (CB may write open state on failure before early return)
             for i = 1, n do
                 local key = KEYS[i]
                 local rate = tonumber(ARGV[idx])
                 local capacity = tonumber(ARGV[idx + 1])
                 local cost = tonumber(ARGV[idx + 2])
+                local backoff_s = tonumber(ARGV[idx + 3])
+                is_cb[i] = tonumber(ARGV[idx + 4]) == 1
+                rates[i] = rate
+                capacities[i] = capacity
+
+                -- Circuit breaker logic: load-based burst protector
+                if is_cb[i] then
+                    local cb_state = redis.call("HGET", key, "state")
+                    local cb_until_raw = redis.call("HGET", key, "until")
+                    local cb_until = tonumber(cb_until_raw)
+                    if cb_state == "open" then
+                        if cb_until ~= nil and now < cb_until then
+                            return {0, i, math.ceil(cb_until - now)}
+                        else
+                            -- Timeout expired, fall through to token check (acts as half-open probe)
+                        end
+                    end
+                end
 
                 local tokens = tonumber(redis.call("HGET", key, "tokens"))
                 local last_refill = tonumber(redis.call("HGET", key, "last_refill"))
@@ -1204,18 +1317,43 @@ impl RedisQuotaStore {
                 local delta = math.max(0, now - last_refill)
                 local filled = math.min(capacity, tokens + (delta * rate))
                 if filled < cost then
-                    local retry_after = (cost - filled) / rate
-                    return {0, i, retry_after}
+                    if is_cb[i] then
+                        local retry_after = math.ceil(backoff_s)
+                        retry_after = math.max(1, math.min(31536000, retry_after))
+                        redis.call("HSET", key, "state", "open", "until", now + retry_after)
+                        local ttl_ms = math.floor((retry_after * 1000) + 30000)
+                        redis.call("PEXPIRE", key, ttl_ms)
+                        return {0, i, retry_after}
+                    else
+                        local retry_after
+                        if rate <= 0 then
+                            retry_after = 60
+                        else
+                            retry_after = math.ceil((cost - filled) / rate)
+                        end
+                        return {0, i, retry_after}
+                    end
                 end
 
                 keys[i] = key
                 new_tokens[i] = filled - cost
-                idx = idx + 3
+                idx = idx + 5
             end
 
+            -- Second pass: commit updates
             for i = 1, n do
-                redis.call("HSET", keys[i], "tokens", new_tokens[i], "last_refill", now)
-                redis.call("PEXPIRE", keys[i], 60000)
+                if is_cb[i] then
+                    redis.call("HSET", keys[i], "tokens", new_tokens[i], "last_refill", now, "state", "closed")
+                    redis.call("HDEL", keys[i], "until")
+                    redis.call(
+                        "PEXPIRE",
+                        keys[i],
+                        compute_refill_ttl_ms(rates[i], capacities[i], new_tokens[i])
+                    )
+                else
+                    redis.call("HSET", keys[i], "tokens", new_tokens[i], "last_refill", now)
+                    redis.call("PEXPIRE", keys[i], 60000)
+                end
             end
 
             return {1, 0, 0}
@@ -1230,49 +1368,87 @@ impl RedisQuotaStore {
     }
 
     /// All quota keys intentionally use the `{global}` Redis Cluster hash tag so
-    /// `SystemHardLimit`, `TenantBudget`, and `ApiRateLimit` keys land in one slot and
+    /// `SystemHardLimit`, `CircuitBreaker`, `TenantBudget`, and `ApiRateLimit` keys land in one slot and
     /// can be updated atomically by the multi-key Lua script. This creates a hot slot;
     /// do not change hash tags without redesigning the atomicity strategy.
     fn layer_config(
         &self,
         tenant_id: &kernel_core::auth::TenantId,
         layer: QuotaLayer,
-    ) -> Option<(String, f64, f64, f64)> {
+    ) -> Option<(String, f64, f64, f64, f64, bool)> {
         let tenant_id_str = tenant_id.to_string();
         let tenant_override = self.quota.tenant_overrides.get(&tenant_id_str);
+        let is_cb = layer == QuotaLayer::CircuitBreaker;
+        
+        let validate_quota = |q: QuotaLayerConfig, fallback: QuotaLayerConfig, layer_name: &str| -> QuotaLayerConfig {
+            if q.rate.is_finite() && q.rate > 0.0 &&
+               q.capacity.is_finite() && q.capacity > 0.0 &&
+               q.cost.is_finite() && q.cost > 0.0 &&
+               q.backoff_s.is_finite() && q.backoff_s > 0.0 {
+                q
+            } else {
+                tracing::warn!(
+                    tenant_id = %tenant_id_str,
+                    layer = %layer_name,
+                    config = ?q,
+                    "Invalid tenant quota override detected, falling back to global default"
+                );
+                fallback
+            }
+        };
+
         match layer {
             QuotaLayer::SystemHardLimit => {
-                let q = tenant_override
-                    .and_then(|o| o.system_hard_limit)
-                    .unwrap_or(self.quota.system_hard_limit);
+                let q = validate_quota(
+                    tenant_override.and_then(|o| o.system_hard_limit).unwrap_or(self.quota.system_hard_limit),
+                    self.quota.system_hard_limit,
+                    "SystemHardLimit"
+                );
                 Some((
                     "quota:{global}:system".to_string(),
                     q.rate,
                     q.capacity,
                     q.cost,
+                    q.backoff_s,
+                    is_cb,
                 ))
             }
             QuotaLayer::TenantBudget => {
-                let q = tenant_override
-                    .and_then(|o| o.tenant_budget)
-                    .unwrap_or(self.quota.tenant_budget);
+                let q = validate_quota(
+                    tenant_override.and_then(|o| o.tenant_budget).unwrap_or(self.quota.tenant_budget),
+                    self.quota.tenant_budget,
+                    "TenantBudget"
+                );
                 let mut s = String::with_capacity(128);
                 s.push_str("quota:{global}:tenant:");
                 append_sha256_hex(tenant_id_str.as_bytes(), &mut s);
                 s.push_str(":cpu");
-                Some((s, q.rate, q.capacity, q.cost))
+                Some((s, q.rate, q.capacity, q.cost, q.backoff_s, is_cb))
             }
             QuotaLayer::ApiRateLimit => {
-                let q = tenant_override
-                    .and_then(|o| o.api_rate_limit)
-                    .unwrap_or(self.quota.api_rate_limit);
+                let q = validate_quota(
+                    tenant_override.and_then(|o| o.api_rate_limit).unwrap_or(self.quota.api_rate_limit),
+                    self.quota.api_rate_limit,
+                    "ApiRateLimit"
+                );
                 let mut s = String::with_capacity(128);
                 s.push_str("quota:{global}:tenant:");
                 append_sha256_hex(tenant_id_str.as_bytes(), &mut s);
                 s.push_str(":api");
-                Some((s, q.rate, q.capacity, q.cost))
+                Some((s, q.rate, q.capacity, q.cost, q.backoff_s, is_cb))
             }
-            QuotaLayer::CircuitBreaker => None,
+            QuotaLayer::CircuitBreaker => {
+                let q = validate_quota(
+                    tenant_override.and_then(|o| o.circuit_breaker).unwrap_or(self.quota.circuit_breaker),
+                    self.quota.circuit_breaker,
+                    "CircuitBreaker"
+                );
+                let mut s = String::with_capacity(128);
+                s.push_str("quota:{global}:tenant:");
+                append_sha256_hex(tenant_id_str.as_bytes(), &mut s);
+                s.push_str(":cb");
+                Some((s, q.rate, q.capacity, q.cost, q.backoff_s, is_cb))
+            }
         }
     }
 }
@@ -1284,7 +1460,9 @@ impl QuotaStore for RedisQuotaStore {
         tenant_id: &kernel_core::auth::TenantId,
         layer: QuotaLayer,
     ) -> Result<(), QuotaViolation> {
-        let Some((key, rate, capacity, cost)) = self.layer_config(tenant_id, layer) else {
+        let Some((key, rate, capacity, cost, backoff_s, is_cb)) =
+            self.layer_config(tenant_id, layer)
+        else {
             return Ok(());
         };
 
@@ -1302,6 +1480,8 @@ impl QuotaStore for RedisQuotaStore {
             .arg(capacity)
             .arg(cost)
             .arg(now)
+            .arg(backoff_s)
+            .arg(if is_cb { 1 } else { 0 })
             .invoke_async(&mut conn)
             .await;
 
@@ -1332,11 +1512,13 @@ impl QuotaStore for RedisQuotaStore {
         tenant_id: &kernel_core::auth::TenantId,
         layers: &[QuotaLayer],
     ) -> Result<(), QuotaViolation> {
-        let checks: Vec<(QuotaLayer, String, f64, f64, f64)> = layers
+        let checks: Vec<(QuotaLayer, String, f64, f64, f64, f64, bool)> = layers
             .iter()
             .filter_map(|layer| {
                 self.layer_config(tenant_id, *layer)
-                    .map(|(k, r, c, cost)| (*layer, k, r, c, cost))
+                    .map(|(k, r, c, cost, backoff_s, is_cb)| {
+                        (*layer, k, r, c, cost, backoff_s, is_cb)
+                    })
             })
             .collect();
 
@@ -1352,8 +1534,13 @@ impl QuotaStore for RedisQuotaStore {
 
         let mut inv = self.script_multi.prepare_invoke();
         inv.arg(now).arg(checks.len() as i64);
-        for (_, key, rate, capacity, cost) in &checks {
-            inv.key(key).arg(rate).arg(capacity).arg(cost);
+        for (_, key, rate, capacity, cost, backoff_s, is_cb) in &checks {
+            inv.key(key)
+                .arg(rate)
+                .arg(capacity)
+                .arg(cost)
+                .arg(backoff_s)
+                .arg(if *is_cb { 1 } else { 0 });
         }
 
         let res: Result<(i32, i64, f64), _> = inv.invoke_async(&mut conn).await;
@@ -1362,7 +1549,7 @@ impl QuotaStore for RedisQuotaStore {
             Ok((0, idx, retry_after)) => {
                 let layer_idx = (idx.saturating_sub(1)) as usize;
                 let retry_after_s = retry_after.ceil() as u64;
-                if let Some((layer, _, _, _, _)) = checks.get(layer_idx) {
+                if let Some((layer, _, _, _, _, _, _)) = checks.get(layer_idx) {
                     Err(QuotaViolation {
                         layer: *layer,
                         retry_after_s,
@@ -1804,14 +1991,14 @@ pub async fn quota_middleware(req: Request<Body>, next: Next) -> Result<Response
     let state = match parts.extensions.get::<MiddlewareState>() {
         Some(s) => s,
         None => {
-            error!("MiddlewareState missing");
+            error!("MiddlewareState missing in extensions");
             return Err(StatusCode::INTERNAL_SERVER_ERROR.into_response());
         }
     };
 
     #[cfg(any(test, feature = "test-utils"))]
     {
-        if parts.headers.contains_key("X-Mock-Quota-System") {
+        if state.config.allow_mock_quota && parts.headers.contains_key("X-Mock-Quota-System") {
             let violation = QuotaViolation {
                 layer: QuotaLayer::SystemHardLimit,
                 retry_after_s: 100,
@@ -1820,7 +2007,18 @@ pub async fn quota_middleware(req: Request<Body>, next: Next) -> Result<Response
             return Err(violation_to_response(&violation));
         }
 
-        if parts.headers.contains_key("X-Mock-Quota-Tenant") {
+        if state.config.allow_mock_quota
+            && parts.headers.contains_key("X-Mock-Quota-CircuitBreaker")
+        {
+            let violation = QuotaViolation {
+                layer: QuotaLayer::CircuitBreaker,
+                retry_after_s: 30,
+            };
+            warn!("Circuit Breaker exceeded (Mock)");
+            return Err(violation_to_response(&violation));
+        }
+
+        if state.config.allow_mock_quota && parts.headers.contains_key("X-Mock-Quota-Tenant") {
             let violation = QuotaViolation {
                 layer: QuotaLayer::TenantBudget,
                 retry_after_s: 5,
@@ -1829,7 +2027,7 @@ pub async fn quota_middleware(req: Request<Body>, next: Next) -> Result<Response
             return Err(violation_to_response(&violation));
         }
 
-        if parts.headers.contains_key("X-Mock-Quota-Api") {
+        if state.config.allow_mock_quota && parts.headers.contains_key("X-Mock-Quota-Api") {
             let violation = QuotaViolation {
                 layer: QuotaLayer::ApiRateLimit,
                 retry_after_s: 60,
@@ -1845,6 +2043,7 @@ pub async fn quota_middleware(req: Request<Body>, next: Next) -> Result<Response
             tenant_ctx.tenant_id(),
             &[
                 QuotaLayer::SystemHardLimit,
+                QuotaLayer::CircuitBreaker,
                 QuotaLayer::TenantBudget,
                 QuotaLayer::ApiRateLimit,
             ],
@@ -1966,20 +2165,12 @@ pub fn violation_to_response(v: &QuotaViolation) -> Response {
         }
     }
 
-    #[cfg(any(test, feature = "test-utils"))]
-    {
-        // For tests, we might want to inspect specific violation details via headers
-        let violation_type = match v.layer {
-            QuotaLayer::SystemHardLimit => "system_hard_limit",
-            QuotaLayer::CircuitBreaker => "circuit_breaker",
-            QuotaLayer::TenantBudget => "tenant_budget",
-            QuotaLayer::ApiRateLimit => "api_rate_limit",
-        };
-        headers.insert(
-            "X-Violation-Type",
-            HeaderValue::from_str(violation_type).unwrap_or(HeaderValue::from_static("unknown")),
-        );
-    }
+    // The X-Violation-Type header MUST always be present in quota violation responses
+    let violation_type = v.layer.violation_type();
+    headers.insert(
+        "X-Violation-Type",
+        HeaderValue::from_str(violation_type).unwrap_or(HeaderValue::from_static("unknown")),
+    );
 
     res
 }
@@ -2062,5 +2253,37 @@ mod tests {
             .expect("in-memory idempotency store must be active");
 
         assert!(matches!(acquired, IdempotencyAcquireResult::Acquired(_)));
+    }
+
+    #[test]
+    fn test_circuit_breaker_refill_ttl_covers_full_recovery_horizon() {
+        let rate = 0.5_f64;
+        let capacity = 120.0_f64;
+        let new_tokens = 0.0_f64;
+        let ttl_ms = ((capacity - new_tokens) / rate * 1000.0).ceil() as u64;
+
+        assert_eq!(ttl_ms, 240_000);
+        assert!(ttl_ms > 60_000);
+    }
+
+    #[test]
+    fn test_quota_refill_ttl_guard_zero_rate() {
+        // This test documents the safety guard we added to the Lua script.
+        let rate = 0.0_f64;
+        let capacity = 100.0_f64;
+        let tokens = 0.0_f64;
+
+        let refill_ttl_ms = if rate <= 0.0 {
+            1
+        } else {
+            let missing = (capacity - tokens).max(0.0);
+            if missing <= 0.0 {
+                1
+            } else {
+                ((missing / rate) * 1000.0).ceil() as u64
+            }
+        };
+
+        assert_eq!(refill_ttl_ms, 1);
     }
 }

@@ -8,6 +8,17 @@ pub enum QuotaLayer {
     CircuitBreaker,
 }
 
+impl QuotaLayer {
+    pub fn violation_type(&self) -> &'static str {
+        match self {
+            QuotaLayer::SystemHardLimit => "system_hard_limit",
+            QuotaLayer::CircuitBreaker => "circuit_breaker",
+            QuotaLayer::TenantBudget => "tenant_budget",
+            QuotaLayer::ApiRateLimit => "api_rate_limit",
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct QuotaViolation {
     pub layer: QuotaLayer,
@@ -33,7 +44,7 @@ impl QuotaViolation {
             }
             QuotaLayer::CircuitBreaker => {
                 // Circuit-breaker backoff must never be 0s.
-                self.retry_after_s.max(1)
+                self.retry_after_s.clamp(1, 31_536_000)
             }
             QuotaLayer::TenantBudget => {
                 // Client-facing retries follow non-zero minimum and hard one-year ceiling.
