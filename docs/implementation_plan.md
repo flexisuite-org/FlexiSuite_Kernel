@@ -813,7 +813,7 @@ Kernelはエラー発生時や診断要求に対し、以下の構造化デー�
 - `GET /api/v1/diagnostics/policy`: テナントの診断同意状態（`enabled`, `updated_at`, `updated_by`）を取得する。
 - `PUT /api/v1/diagnostics/policy`: テナント管理者が診断同意状態を更新する（既定 `false`）。
 - **Project Rules & Context Layer**:
-  - 各プロジェクト/テナントは `.kiro/context.md` (仮) 相当のコンテキストファイルを配置可能とし、AIのエラー修正時の判断基準（Rulebook）として機能させる。
+  - 各プロジェクト/テナントは専用のコンテキストファイルを配置可能とし、AI のエラー修正時の判断基準（Rulebook）として機能させる。
 
 
 ---
@@ -931,7 +931,7 @@ Kernelはエラー発生時や診断要求に対し、以下の構造化デー�
 | 診断同意/監査 | Product Engineer | Product Lead | Security, Legal/Privacy | Customer Success |
 | DR演習 | SRE + DBA | SRE Lead | Security, Backend | PM, Exec |
 
-## 11. 仕様変更ワークフロー (Kiro準拠)
+## 11. 仕様変更ワークフロー
 
 - 仕様変更は **Requirements → Design → Tasks → Implementation** の順に承認を通過しなければならない **(MUST)**。
 - `-y` によるFast-trackは緊急修正時のみ使用し、事後24時間以内に通常ドキュメントを補完**しなければならない (MUST)**。
