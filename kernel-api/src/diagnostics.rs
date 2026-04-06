@@ -349,6 +349,6 @@ async fn update_policy(
     Json(_payload): Json<UpdatePolicyRequest>,
 ) -> impl IntoResponse {
     // TODO(issue-rbac-update-policy-20260218): tenant-admin RBAC check for update_policy を実装する。
-    // Ticket: .kiro/specs/coderabbit_jules_linkage/tickets/issue-rbac-update-policy-20260218.md
+    // 関連メモは issue-rbac-update-policy-20260218 として管理する。
     StatusCode::FORBIDDEN.into_response()
 }
