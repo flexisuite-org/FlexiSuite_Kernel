@@ -1,90 +1,62 @@
-# AI-DLC and Spec-Driven Development
+# FlexiSuite AI Collaboration Guide
 
-Kiro-style Spec Driven Development implementation on AI-DLC (AI Development Life Cycle)
+## 目的
 
-## Project Memory
-Project memory keeps persistent guidance (steering, specs notes, component docs) so Codex honors your standards each run. Treat it as the long-lived source of truth for patterns, conventions, and decisions.
+このファイルは、FlexiSuite Kernel リポジトリで作業する AI エージェント向けの共通ガイドです。プロジェクト全体の原則、判断基準、コミュニケーション方針をここに集約します。
 
-- Use `.kiro/steering/` for project-wide policies: architecture principles, naming schemes, security constraints, tech stack decisions, api standards, etc.
-- Use local `AGENTS.md` files for feature or library context (e.g. `src/lib/payments/AGENTS.md`): describe domain assumptions, API contracts, or testing conventions specific to that folder. Codex auto-loads these when working in the matching path.
-- Specs notes stay with each spec (under `.kiro/specs/`) to guide specification-level workflows.
+## コンテキストの扱い
 
-## Project Context
+- プロジェクト全体の方針はこの `AGENTS.md` を基準に解釈する。
+- ディレクトリ配下に追加の `AGENTS.md` がある場合は、その配下の作業に対してローカルルールとして優先する。
+- 実装判断では、コード、テスト、既存ドキュメントを一次情報として確認する。
 
-### Paths
-- Steering: `.kiro/steering/`
-- Specs: `.kiro/specs/`
+## 開発ガイドライン
 
-### Steering vs Specification
+- 思考は英語で行い、ユーザーへの応答は日本語で行う。
+- このリポジトリに新規作成または更新する Markdown は日本語で記述する。
+- ユーザーの指示を正確に守りつつ、その範囲内では自律的に調査・実装・検証まで完了させる。
+- 情報が不足していて重大な誤実装の可能性がある場合のみ確認を行い、それ以外は合理的な前提を置いて進める。
 
-**Steering** (`.kiro/steering/`) - Guide AI with project-wide rules and context
-**Specs** (`.kiro/specs/`) - Formalize development process for individual features
+## プロジェクト概要
 
-### Active Specifications
-- Check `.kiro/specs/` for active specifications
-- Use `/prompts:kiro-spec-status [feature-name]` to check progress
+FlexiSuite は、SaaS 時代に向けた「Flexible OS」を目指すプロダクション品質の基盤です。AI 駆動のアプリ開発を、特定アプリ向けではなく汎用プラットフォームとして成立させることを目的にしています。
 
-## Development Guidelines
-- Think in English, generate responses in Japanese. All Markdown content written to project files (e.g., requirements.md, design.md, tasks.md, research.md, validation reports) MUST be written in Japanese.
+> **MDP (Minimal Desirable Product)**
+> これは MVP や試作品ではない。Rust による本番品質の OS カーネル相当基盤として、最初から堅牢性・安全性・拡張性を備えた実装を行う。
 
-## Minimal Workflow
-- Phase 0 (optional): `/prompts:kiro-steering`, `/prompts:kiro-steering-custom`
-- Phase 1 (Specification):
-  - `/prompts:kiro-spec-init "description"`
-  - `/prompts:kiro-spec-requirements {feature}`
-  - `/prompts:kiro-validate-gap {feature}` (optional: for existing codebase)
-  - `/prompts:kiro-spec-design {feature} [-y]`
-  - `/prompts:kiro-validate-design {feature}` (optional: design review)
-  - `/prompts:kiro-spec-tasks {feature} [-y]`
-- Phase 2 (Implementation): `/prompts:kiro-spec-impl {feature} [tasks]`
-  - `/prompts:kiro-validate-impl {feature}` (optional: after implementation)
-- Progress check: `/prompts:kiro-spec-status {feature}` (use anytime)
+### 背景
 
-## Development Rules
-- 3-phase approval workflow: Requirements → Design → Tasks → Implementation
-- Human review required each phase; use `-y` only for intentional fast-track
-- Keep steering current and verify alignment with `/prompts:kiro-spec-status`
-- Follow the user's instructions precisely, and within that scope act autonomously: gather the necessary context and complete the requested work end-to-end in this run, asking questions only when essential information is missing or the instructions are critically ambiguous.
+- Custom UX という考え方は、Gemini CLI を組み込んだ学習管理アプリ FlexiStudy で検証された。
+- このリポジトリは、その仕組みを汎用化して誰でも使える基盤として提供するための実装である。
 
-## Steering Configuration
-- Load entire `.kiro/steering/` as project memory
-- Default files: `product.md`, `tech.md`, `structure.md`
-- Custom files are supported (managed via `/prompts:kiro-steering-custom`)
+### コア哲学
 
----
+- **Kernel / Userland 分離**: Kernel は Identity、Storage、Events、Compute などの基本プリミティブを提供し、業務ロジックは分離された Userland で動かす。
+- **App is Data**: アプリは JSON 定義として保持し、単一の Universal Player が描画する。ユーザーごとの専用コンテナは前提にしない。
+- **3 層の信頼モデル**: Kernel Provided、Store Verified、User Imported の順に信頼境界を分ける。
+- **AI Native**: 人間だけでなく AI エージェントも第一級の利用者として扱う。
 
-## FlexiSuite Project Overview
+### 技術スタック
 
-FlexiSuite is a **"Flexible OS for the SaaS era"** — an operating system-level platform that democratizes AI-driven application development (Vibe Coding).
-
-> **MDP (Minimal Desirable Product) Philosophy**
-> This is NOT an MVP or a prototype. We are building a **production-grade, full-featured OS kernel** in Rust. The goal is not just "viable", but "desirable".
-
-### Background
-- The concept of "Custom UX" (AI-driven UI/UX self-modification) was validated through a separate product called **FlexiStudy** (a study management app with embedded Gemini CLI).
-- This repository is the **generalized infrastructure** that makes Custom UX available to anyone, as a platform.
-
-### Core Philosophy
-- **Kernel/Userland Separation**: The Kernel (Rust) provides primitives (Identity, Storage, Events, Compute). Business logic runs in Userland (sandboxed JS/TS or Wasm).
-- **App is Data**: Applications are JSON definitions rendered by a single "Universal Player" (Next.js). No per-user containers.
-- **3-Tier Trust Model**: Kernel Provided (direct) → Store Verified (reviewed, initially iframe) → User Imported (iframe sandbox).
-- **AI Native**: The system is designed to be equally usable by humans and AI agents.
-
-### Tech Stack
-- **Backend**: Rust (Axum + SeaORM + Tokio)
-- **Frontend**: Next.js (Universal Player, single instance, multi-tenant)
-- **Sandbox**: Deno Core (JS/TS) + Wasmtime (Wasm) hybrid
-- **Database**: PostgreSQL with Row-Level Security (RLS)
-- **Cache/Events**: Redis (Streams with abstraction layer)
+- **Backend**: Rust (`axum`, `SeaORM`, `tokio`)
+- **Frontend**: Next.js による Universal Player
+- **Sandbox**: `Deno Core` と `Wasmtime` のハイブリッド
+- **Database**: PostgreSQL + Row-Level Security
+- **Cache / Events**: Redis Streams
 - **Auth**: PASETO v4
-- **Component Compiler**: SWC (Rust) + esm.sh CDN resolution
+- **Component Compiler**: SWC + `esm.sh`
 
-## Development Principles
+## 絶対原則
 
-> **These are absolute rules. No exceptions.**
+1. **常に本番品質で実装する。** 暫定実装、場当たり的な回避、あとで直す前提のコードを入れない。
+2. **推測で実装しない。** 不明点はコード、テスト、ドキュメントを確認し、根拠を持って変更する。
+3. **これはアプリではなく OS である。** マルチテナント、隔離、後方互換性、スケール性能を前提に設計する。
+4. **テナント分離は最優先事項である。** すべてのデータアクセスは `TenantContext` を通じてスコープされなければならない。
+5. **MDP を守る。** 機能を入れるなら完成品として成立する品質で実装し、中途半端な機能追加は行わない。
 
-1. **Production-grade always.** Every line of code must be written with production-quality robustness. No throwaway code, no "we'll fix it later", no shortcuts. If you are unsure about the correct approach, research and verify before implementing.
-2. **No guesswork.** Never implement based on assumptions or speculation. If you don't know the answer, investigate the codebase, read documentation, or ask. Incorrect implementations are worse than no implementation.
-3. **This is an OS, not an app.** Design decisions must account for multi-tenancy, security isolation, backward compatibility, and performance at scale. Think in terms of system contracts, not feature checklists.
-4. **Tenant isolation is sacred.** Every database access MUST go through `TenantContext`. Raw SQL without tenant scoping MUST NOT exist in any public API. This is enforced at the type system level.
-6. **MDP over MVP.** Do not build "temporary" features. If a feature is included, it must be implemented with the quality and robustness expected of a finished OS. It is better to have fewer, perfectly working features than many half-baked ones.
+## 実装時の判断基準
+
+- 既存パターンがある場合は、それに合わせて拡張する。
+- セキュリティ境界、認可、データ分離に関わる変更は、正常系より先に失敗系と漏れの有無を確認する。
+- 仕様が曖昧でも、公開 API や永続化フォーマットに影響する変更では特に慎重に進める。
+- コメントやドキュメントは、将来の保守者が判断理由を追える範囲で簡潔に残す。
