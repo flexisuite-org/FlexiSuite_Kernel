@@ -9,7 +9,7 @@ kernel-core = { path = "../kernel-core" }
 tokio = { version = "1", features = ["full"] }
 sea-orm = { version = "1.1.20", features = ["sqlx-postgres", "runtime-tokio-rustls"] }
 aws-config = { version = "1.8.14", features = ["behavior-version-latest"] }
-aws-sdk-s3 = "1.127.0"
+aws-sdk-s3 = "1.129.0"
 aws-smithy-types = "1"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
