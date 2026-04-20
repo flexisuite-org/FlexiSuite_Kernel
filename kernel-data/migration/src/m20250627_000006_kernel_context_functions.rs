@@ -22,11 +22,18 @@ DECLARE
     v_id uuid;
 BEGIN
     -- Use gen_random_uuid() which generates UUIDv4 natively in Postgres 13+.
-    -- For an audit log this provides sufficient uniqueness.
+    -- NOTE: The Rust codebase uses UUIDv7 (Uuid::now_v7()) for time-ordered IDs.
+    -- This function uses UUIDv4 because it runs inside a SECURITY DEFINER PL/pgSQL
+    -- context where pg_uuidv7 extensions may not be available. The randomness is
+    -- sufficient for audit log uniqueness, though a future migration to UUIDv7
+    -- would improve index locality for chronological queries.
     v_id := pg_catalog.gen_random_uuid();
 
     -- Ensure the INSERT successfully passes RLS if the function owner lacks BYPASSRLS
     PERFORM set_config('flexi.current_tenant', 'system', true);
+    IF current_setting('flexi.hmac_secret', true) IS NULL THEN
+        RAISE WARNING 'flexi.hmac_secret is not set; ctx_sig will be NULL. Ensure the GUC is configured for the connecting role.';
+    END IF;
     PERFORM set_config('flexi.ctx_sig', encode(hmac('system', current_setting('flexi.hmac_secret', true), 'sha256'), 'hex'), true);
 
     INSERT INTO flexi.audit_logs (
@@ -56,6 +63,8 @@ DO $$
 BEGIN
     IF EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = 'flexi_kernel_admin') THEN
         GRANT EXECUTE ON FUNCTION flexi.log_privileged_audit(text, text, jsonb) TO flexi_kernel_admin;
+    ELSE
+        RAISE WARNING 'Role flexi_kernel_admin does not exist; flexi.log_privileged_audit has no grantees. Create the role before deploying this migration.';
     END IF;
 END $$;
         "#;

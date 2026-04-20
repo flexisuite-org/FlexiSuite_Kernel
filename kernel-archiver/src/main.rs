@@ -154,7 +154,7 @@ fn load_config() -> Result<AppConfig> {
         Err(_) => {
             let allow_fallback = env::var("KERNEL_DATABASE_URL_ALLOW_FALLBACK").unwrap_or_default();
             if allow_fallback == "1" || allow_fallback.eq_ignore_ascii_case("true") {
-                warn!("KERNEL_DATABASE_URL not set. KERNEL_DATABASE_URL_ALLOW_FALLBACK is active. Falling back to DATABASE_URL. Privileged operations may fail if the database role lacks execute permissions for flexi.log_privileged_audit.");
+                warn!("KERNEL_DATABASE_URL not set. KERNEL_DATABASE_URL_ALLOW_FALLBACK is active. Falling back to DATABASE_URL. This bypasses the dedicated security boundary (flexi_kernel_admin role). Privileged operations may fail if the database role lacks execute permissions for flexi.log_privileged_audit.");
                 database_url.clone()
             } else {
                 return Err(anyhow!("KERNEL_DATABASE_URL must be set. Set KERNEL_DATABASE_URL_ALLOW_FALLBACK=true to override this requirement."));
@@ -420,7 +420,7 @@ async fn run_archive_cycle(
                     ).await
                 })
             }).await {
-                error!("Failed to log privileged audit for archive records: {}", e);
+                error!("Failed to log privileged audit for archive records for tenant {}: {}", tenant_id, e);
             }
         }
     }

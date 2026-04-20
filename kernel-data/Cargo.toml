@@ -37,7 +37,7 @@ testcontainers-modules = { version = "0.15", features = ["postgres", "redis"] }
 # test-only dependency for integration tests
 # kernel-core = { path = "../kernel-core" } # Removed to break cycle
 # Enable test-utils on self for tests
-kernel-data = { path = ".", features = ["test-utils"] }
+kernel-data = { path = ".", features = ["test-utils", "background_worker"] }
 
 [features]
 default = []
