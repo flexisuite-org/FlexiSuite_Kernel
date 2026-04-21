@@ -34,12 +34,9 @@ AS $$
 DECLARE
     v_id uuid;
 BEGIN
-    -- Use gen_random_uuid() which generates UUIDv4 natively in Postgres 13+.
-    -- NOTE: The Rust codebase uses UUIDv7 (Uuid::now_v7()) for time-ordered IDs.
-    -- This function uses UUIDv4 because it runs inside a SECURITY DEFINER PL/pgSQL
-    -- context where pg_uuidv7 extensions may not be available. The randomness is
-    -- sufficient for audit log uniqueness, though a future migration to UUIDv7
-    -- would improve index locality for chronological queries.
+    -- This privileged audit log is written inside the DB by a SECURITY DEFINER
+    -- function. gen_random_uuid() is intentional here: UUIDv4 provides sufficient
+    -- uniqueness without requiring a pg_uuidv7 extension in production databases.
     v_id := pg_catalog.gen_random_uuid();
 
     -- Ensure the INSERT successfully passes RLS if the function owner lacks BYPASSRLS
@@ -47,6 +44,8 @@ BEGIN
     IF current_setting('flexi.hmac_secret', true) IS NULL OR current_setting('flexi.hmac_secret', true) = '' THEN
         RAISE EXCEPTION 'flexi.hmac_secret is not set or empty; cannot compute ctx_sig. Configure the GUC for the connecting role before using this function.';
     END IF;
+    -- pgcrypto is installed into the flexi schema by m20240216_000001_init_rls.rs,
+    -- and this function's search_path includes flexi before pg_catalog.
     PERFORM set_config('flexi.ctx_sig', encode(hmac('system', current_setting('flexi.hmac_secret', true), 'sha256'), 'hex'), true);
 
     INSERT INTO flexi.audit_logs (
@@ -64,7 +63,9 @@ BEGIN
         NULL
     );
 
-    -- Clear the GUCs so they do not leak into subsequent queries in the same transaction
+    -- These SET LOCAL writes use set_config(..., true), so they are transaction-scoped
+    -- and PostgreSQL auto-reverts them on rollback if the INSERT fails; this cleanup is
+    -- defense-in-depth for the successful path, not required for correctness.
     PERFORM set_config('flexi.current_tenant', '', true);
     PERFORM set_config('flexi.ctx_sig', '', true);
 END;
@@ -83,11 +84,15 @@ BEGIN
     END IF;
 END $$;
 
+-- Grant schema privileges before ownership transfer; ALTER FUNCTION OWNER requires
+-- the new owner to have CREATE privilege on the schema containing the function.
+GRANT USAGE ON SCHEMA flexi TO flexi_kernel_definer;
+GRANT CREATE ON SCHEMA flexi TO flexi_kernel_definer;
+
 -- Transfer ownership so the function runs as flexi_kernel_definer, not the migration role.
 ALTER FUNCTION flexi.log_privileged_audit(text, text, jsonb) OWNER TO flexi_kernel_definer;
 
--- Grant USAGE on schema and INSERT on audit_logs so the NOLOGIN owner can operate.
-GRANT USAGE ON SCHEMA flexi TO flexi_kernel_definer;
+-- Grant INSERT on audit_logs so the NOLOGIN owner can operate.
 GRANT INSERT ON flexi.audit_logs TO flexi_kernel_definer;
 
 DO $$
@@ -105,7 +110,12 @@ END $$;
 
     async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
         let db = manager.get_connection();
-        db.execute_unprepared("DROP FUNCTION IF EXISTS flexi.log_privileged_audit(text, text, jsonb);")
+        db.execute_unprepared(
+            "DROP FUNCTION IF EXISTS flexi.log_privileged_audit(text, text, jsonb);
+             REVOKE ALL ON SCHEMA flexi FROM flexi_kernel_definer;
+             REVOKE ALL ON flexi.audit_logs FROM flexi_kernel_definer;
+             DROP ROLE IF EXISTS flexi_kernel_definer;",
+        )
             .await?;
         Ok(())
     }

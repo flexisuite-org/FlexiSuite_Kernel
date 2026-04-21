@@ -16,7 +16,9 @@ use uuid::Uuid;
 // TODO: Keep production DB access strictly within TenantScoped/TenantContext APIs; do not copy these patterns outside tests.
 const TEST_INTERNAL_SECRET: &str = "test_internal_secret_for_audit";
 
+#[cfg(feature = "background_worker")]
 use kernel_data::kernel_context::create_background_runner_context;
+#[cfg(feature = "background_worker")]
 use std::sync::Arc;
 
 fn expected_actor_id(tenant_id: &TenantId, user_id: &UserId) -> String {
@@ -223,6 +225,7 @@ async fn test_audit_log_creation() {
     assert!(other_logs.is_empty(), "Cross-tenant logs should be empty");
 }
 
+#[cfg(feature = "background_worker")]
 #[tokio::test(flavor = "multi_thread")]
 #[ignore] // Requires Docker
 async fn test_kernel_context_log_privileged_audit_integration() {
@@ -244,16 +247,29 @@ async fn test_kernel_context_log_privileged_audit_integration() {
         .await
         .expect("Failed to run migrations");
 
-    let kernel_db_string = format!("postgres://flexi_kernel_admin:admin_pass@127.0.0.1:{}/postgres", port);
-    let kernel_db = Arc::new(Database::connect(&kernel_db_string).await.expect("Failed to connect admin db"));
+    let kernel_db_string = format!(
+        "postgres://flexi_kernel_admin:admin_pass@127.0.0.1:{}/postgres",
+        port
+    );
 
     // Ensure the flexi_kernel_admin role has USAGE on schema flexi and can access audit_logs
-    db.execute_unprepared("GRANT USAGE ON SCHEMA flexi TO flexi_kernel_admin;").await.expect("grant usage");
-    db.execute_unprepared("GRANT SELECT ON flexi.audit_logs TO flexi_kernel_admin;").await.expect("grant select");
+    db.execute_unprepared("GRANT USAGE ON SCHEMA flexi TO flexi_kernel_admin;")
+        .await
+        .expect("grant usage");
+    db.execute_unprepared("GRANT SELECT ON flexi.audit_logs TO flexi_kernel_admin;")
+        .await
+        .expect("grant select");
     db.execute_unprepared(&format!(
         "ALTER ROLE flexi_kernel_admin SET flexi.hmac_secret = '{}'",
         TEST_INTERNAL_SECRET.replace("'", "''")
-    )).await.expect("set hmac_secret for flexi_kernel_admin");
+    ))
+    .await
+    .expect("set hmac_secret for flexi_kernel_admin");
+    let kernel_db = Arc::new(
+        Database::connect(&kernel_db_string)
+            .await
+            .expect("Failed to connect admin db"),
+    );
 
     // We can execute the privileged audit SQL function via KernelContext
     let kernel_ctx = create_background_runner_context(kernel_db.clone());
@@ -300,12 +316,19 @@ async fn test_kernel_context_log_privileged_audit_integration() {
         archived_at: ActiveValue::NotSet,
     };
 
+    db.execute_unprepared("GRANT USAGE ON SCHEMA flexi TO flexi_test_unprivileged;")
+        .await
+        .expect("grant schema usage to unprivileged");
+    db.execute_unprepared("GRANT INSERT, SELECT ON flexi.audit_logs TO flexi_test_unprivileged;")
+        .await
+        .expect("grant table privileges to reach RLS");
+
     let result = audit_log::Entity::insert(log).exec(&unpriv_db).await;
-    let err = result.expect_err("unprivileged direct insert must fail due to RLS or permissions");
+    let err = result.expect_err("unprivileged direct insert must fail due to RLS");
     let err_str = err.to_string();
     assert!(
-        err_str.contains("42501") || err_str.contains("permission denied") || err_str.contains("violates row-level security policy"),
-        "Unprivileged direct insert should fail with SQLSTATE 42501 (insufficient_privilege) or RLS policy violation, but got: {:?}",
+        err_str.contains("violates row-level security policy"),
+        "Unprivileged direct insert should reach and fail the RLS policy, but got: {:?}",
         err
     );
 
@@ -313,7 +336,6 @@ async fn test_kernel_context_log_privileged_audit_integration() {
     // This tests the explicit EXECUTE grant to flexi_kernel_admin after PUBLIC is revoked.
     // Grant USAGE on schema so the test reaches the EXECUTE permission check rather than
     // failing early on schema access.
-    db.execute_unprepared("GRANT USAGE ON SCHEMA flexi TO flexi_test_unprivileged;").await.expect("grant usage to unprivileged");
     let func_result = unpriv_db
         .execute_unprepared("SELECT flexi.log_privileged_audit('unprivileged_call', 'test', '{}'::jsonb)")
         .await;

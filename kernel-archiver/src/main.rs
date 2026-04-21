@@ -181,6 +181,9 @@ fn load_config() -> Result<AppConfig> {
     let kernel_database_url = match env::var("KERNEL_DATABASE_URL") {
         Ok(url) => url,
         Err(_) => {
+            // The startup current_user verification makes this fallback unreachable in
+            // practice for non-flexi_kernel_admin roles; keeping it explicit preserves
+            // the security boundary even when the escape hatch is enabled.
             let allow_fallback = env::var("KERNEL_DATABASE_URL_ALLOW_FALLBACK").unwrap_or_default();
             if allow_fallback == "1" || allow_fallback.eq_ignore_ascii_case("true") {
                 warn!("KERNEL_DATABASE_URL not set. KERNEL_DATABASE_URL_ALLOW_FALLBACK is active. Falling back to DATABASE_URL. This bypasses the dedicated security boundary (flexi_kernel_admin role). Privileged operations may fail if the database role lacks execute permissions for flexi.log_privileged_audit.");
@@ -434,8 +437,8 @@ async fn run_archive_cycle(
             // across two independent connections (db and kernel_db).
             // A persistent failure here would result in the records being marked,
             // but the privileged audit log not reflecting the intent.
-            // TODO(outbox): Implement durable outbox pattern for audit log reliability.
-            // If the application necessitates, outbox reconciliation should be built.
+            // TODO(Issue #138): Implement durable outbox reconciliation for audit log
+            // reliability so this non-atomic cross-connection write can be recovered.
             if let Err(e) = kernel_ctx.with_tx(|txn| {
                 let inner_details = details.clone();
                 Box::pin(async move {
