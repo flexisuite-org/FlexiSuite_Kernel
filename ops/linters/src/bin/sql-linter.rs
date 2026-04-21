@@ -304,7 +304,7 @@ fn main() -> Result<()> {
         if path.is_file() {
             if let Some(ext) = path.extension() {
                 let ext_str = ext.to_string_lossy();
-                if ext_str == "rs" || ext_str == "sql" {
+                if ext_str == "sql" || (ext_str == "rs" && path.to_string_lossy().contains("migration")) {
                     let content = match fs::read_to_string(path) {
                         Ok(c) => c,
                         Err(e) => {

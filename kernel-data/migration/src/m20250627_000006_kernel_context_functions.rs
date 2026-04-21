@@ -1,5 +1,18 @@
 use sea_orm_migration::prelude::*;
 
+/// ## Migration: Kernel Context Functions (Privileged Definer)
+///
+/// Creates the `flexi.log_privileged_audit` privileged-definer function for
+/// privileged audit logging from the kernel background runner.
+///
+/// ### Deployment Requirements
+/// - The migration runner must have `CREATEROLE` privilege (to create `flexi_kernel_definer`).
+/// - The `flexi_kernel_admin` role must exist (created by `init_rls` migration).
+/// - The `flexi.hmac_secret` GUC must be configured for the connecting role.
+///
+/// ### Ownership Model
+/// Function ownership is transferred to `flexi_kernel_definer` (NOLOGIN, NOINHERIT)
+/// so that effective privileges are environment-independent, not tied to the migration runner.
 #[derive(DeriveMigrationName)]
 pub struct Migration;
 

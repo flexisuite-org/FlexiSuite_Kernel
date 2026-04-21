@@ -123,7 +123,7 @@ async fn main() -> Result<()> {
         let current_role = row
             .and_then(|r| r.try_get_by_index::<String>(0).ok())
             .unwrap_or_else(|| "<unknown>".to_string());
-        if !current_role.starts_with("flexi_kernel_admin") {
+        if current_role != "flexi_kernel_admin" {
             return Err(anyhow!(
                 "Kernel database connection role is '{}', expected 'flexi_kernel_admin'. \
                  Set KERNEL_DATABASE_URL to a connection string that authenticates as flexi_kernel_admin.",
@@ -434,6 +434,7 @@ async fn run_archive_cycle(
             // across two independent connections (db and kernel_db).
             // A persistent failure here would result in the records being marked,
             // but the privileged audit log not reflecting the intent.
+            // TODO(outbox): Implement durable outbox pattern for audit log reliability.
             // If the application necessitates, outbox reconciliation should be built.
             if let Err(e) = kernel_ctx.with_tx(|txn| {
                 let inner_details = details.clone();

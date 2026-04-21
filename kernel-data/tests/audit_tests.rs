@@ -251,7 +251,7 @@ async fn test_kernel_context_log_privileged_audit_integration() {
     db.execute_unprepared("GRANT USAGE ON SCHEMA flexi TO flexi_kernel_admin;").await.expect("grant usage");
     db.execute_unprepared("GRANT SELECT ON flexi.audit_logs TO flexi_kernel_admin;").await.expect("grant select");
 
-    // We can execute the SECURITY DEFINER function via KernelContext
+    // We can execute the privileged audit SQL function via KernelContext
     let kernel_ctx = create_background_runner_context(kernel_db.clone());
 
     kernel_ctx.with_tx(|txn| {
@@ -304,8 +304,8 @@ async fn test_kernel_context_log_privileged_audit_integration() {
         err
     );
 
-    // Verify that unprivileged role cannot EXECUTE the SECURITY DEFINER function.
-    // This tests the REVOKE ALL ... FROM PUBLIC + GRANT EXECUTE TO flexi_kernel_admin boundary.
+    // Verify that unprivileged role cannot invoke the privileged audit SQL function.
+    // This tests the explicit EXECUTE grant to flexi_kernel_admin after PUBLIC is revoked.
     let func_result = unpriv_db
         .execute_unprepared("SELECT flexi.log_privileged_audit('unprivileged_call', 'test', '{}'::jsonb)")
         .await;
