@@ -324,7 +324,7 @@ async fn test_kernel_context_log_privileged_audit_integration() {
     );
     let func_err = func_result.expect_err("unprivileged role must not invoke flexi.log_privileged_audit").to_string();
     assert!(
-        func_err.contains("42501") || func_err.contains("permission denied") || func_err.contains("does not exist"),
+        func_err.contains("42501") || func_err.contains("permission denied"),
         "Expected SQLSTATE 42501 or permission denied for function execution, but got: {}",
         func_err
     );
