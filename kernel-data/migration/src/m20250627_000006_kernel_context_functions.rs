@@ -91,6 +91,7 @@ GRANT CREATE ON SCHEMA flexi TO flexi_kernel_definer;
 
 -- Transfer ownership so the function runs as flexi_kernel_definer, not the migration role.
 ALTER FUNCTION flexi.log_privileged_audit(text, text, jsonb) OWNER TO flexi_kernel_definer;
+REVOKE CREATE ON SCHEMA flexi FROM flexi_kernel_definer;
 
 -- Grant INSERT on audit_logs so the NOLOGIN owner can operate.
 GRANT INSERT ON flexi.audit_logs TO flexi_kernel_definer;
