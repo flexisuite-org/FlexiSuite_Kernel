@@ -7,7 +7,7 @@ use sea_orm_migration::prelude::*;
 ///
 /// ### Deployment Requirements
 /// - The migration runner must have `CREATEROLE` privilege (to create `flexi_kernel_definer`).
-/// - The `flexi_kernel_admin` role must exist (created by `init_rls` migration).
+/// - The `flexi_kernel_admin` role must exist before running this migration.
 /// - The `flexi.hmac_secret` GUC must be configured for the connecting role.
 ///
 /// ### Ownership Model
@@ -44,8 +44,8 @@ BEGIN
 
     -- Ensure the INSERT successfully passes RLS if the function owner lacks BYPASSRLS
     PERFORM set_config('flexi.current_tenant', 'system', true);
-    IF current_setting('flexi.hmac_secret', true) IS NULL THEN
-        RAISE EXCEPTION 'flexi.hmac_secret is not set; cannot compute ctx_sig. Configure the GUC for the connecting role before using this function.';
+    IF current_setting('flexi.hmac_secret', true) IS NULL OR current_setting('flexi.hmac_secret', true) = '' THEN
+        RAISE EXCEPTION 'flexi.hmac_secret is not set or empty; cannot compute ctx_sig. Configure the GUC for the connecting role before using this function.';
     END IF;
     PERFORM set_config('flexi.ctx_sig', encode(hmac('system', current_setting('flexi.hmac_secret', true), 'sha256'), 'hex'), true);
 
@@ -95,7 +95,7 @@ BEGIN
     IF EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = 'flexi_kernel_admin') THEN
         GRANT EXECUTE ON FUNCTION flexi.log_privileged_audit(text, text, jsonb) TO flexi_kernel_admin;
     ELSE
-        RAISE WARNING 'Role flexi_kernel_admin does not exist; flexi.log_privileged_audit has no grantees. Create the role before deploying this migration.';
+        RAISE NOTICE 'Role flexi_kernel_admin does not exist; skipping GRANT for flexi.log_privileged_audit. Privileged audit logging will fail at runtime.';
     END IF;
 END $$;
         "#;

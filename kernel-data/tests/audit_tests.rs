@@ -250,6 +250,10 @@ async fn test_kernel_context_log_privileged_audit_integration() {
     // Ensure the flexi_kernel_admin role has USAGE on schema flexi and can access audit_logs
     db.execute_unprepared("GRANT USAGE ON SCHEMA flexi TO flexi_kernel_admin;").await.expect("grant usage");
     db.execute_unprepared("GRANT SELECT ON flexi.audit_logs TO flexi_kernel_admin;").await.expect("grant select");
+    db.execute_unprepared(&format!(
+        "ALTER ROLE flexi_kernel_admin SET flexi.hmac_secret = '{}'",
+        TEST_INTERNAL_SECRET.replace("'", "''")
+    )).await.expect("set hmac_secret for flexi_kernel_admin");
 
     // We can execute the privileged audit SQL function via KernelContext
     let kernel_ctx = create_background_runner_context(kernel_db.clone());
@@ -307,6 +311,9 @@ async fn test_kernel_context_log_privileged_audit_integration() {
 
     // Verify that unprivileged role cannot invoke the privileged audit SQL function.
     // This tests the explicit EXECUTE grant to flexi_kernel_admin after PUBLIC is revoked.
+    // Grant USAGE on schema so the test reaches the EXECUTE permission check rather than
+    // failing early on schema access.
+    db.execute_unprepared("GRANT USAGE ON SCHEMA flexi TO flexi_test_unprivileged;").await.expect("grant usage to unprivileged");
     let func_result = unpriv_db
         .execute_unprepared("SELECT flexi.log_privileged_audit('unprivileged_call', 'test', '{}'::jsonb)")
         .await;
