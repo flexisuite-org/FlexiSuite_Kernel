@@ -100,7 +100,7 @@ BEGIN
     IF EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = 'flexi_kernel_admin') THEN
         GRANT EXECUTE ON FUNCTION flexi.log_privileged_audit(text, text, jsonb) TO flexi_kernel_admin;
     ELSE
-        RAISE NOTICE 'Role flexi_kernel_admin does not exist; skipping GRANT for flexi.log_privileged_audit. Privileged audit logging will fail at runtime.';
+        RAISE WARNING 'Role flexi_kernel_admin does not exist; skipping GRANT for flexi.log_privileged_audit. Privileged audit logging will fail at runtime.';
     END IF;
 END $$;
         "#;
@@ -111,10 +111,25 @@ END $$;
     async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
         let db = manager.get_connection();
         db.execute_unprepared(
-            "DROP FUNCTION IF EXISTS flexi.log_privileged_audit(text, text, jsonb);
-             REVOKE ALL ON SCHEMA flexi FROM flexi_kernel_definer;
-             REVOKE ALL ON flexi.audit_logs FROM flexi_kernel_definer;
-             DROP ROLE IF EXISTS flexi_kernel_definer;",
+            "DO $$
+             BEGIN
+               -- Only drop the role if it was created by this migration (owns the function).
+               -- A deployment-provisioned role would not own this function.
+               IF EXISTS (
+                 SELECT 1
+                 FROM pg_catalog.pg_proc
+                 WHERE proname = 'log_privileged_audit'
+                   AND pronamespace = 'flexi'::regnamespace
+                   AND proowner = (SELECT oid FROM pg_catalog.pg_roles WHERE rolname = 'flexi_kernel_definer')
+               ) THEN
+                 DROP FUNCTION IF EXISTS flexi.log_privileged_audit(text, text, jsonb);
+                 REVOKE ALL ON SCHEMA flexi FROM flexi_kernel_definer;
+                 REVOKE ALL ON flexi.audit_logs FROM flexi_kernel_definer;
+                 DROP ROLE flexi_kernel_definer;
+               ELSE
+                 DROP FUNCTION IF EXISTS flexi.log_privileged_audit(text, text, jsonb);
+               END IF;
+             END $$;",
         )
             .await?;
         Ok(())
