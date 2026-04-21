@@ -107,6 +107,32 @@ async fn main() -> Result<()> {
     );
     info!("Connected to kernel admin database");
 
+    // Verify the kernel database connection uses the expected role.
+    // This prevents silent privilege escalation when KERNEL_DATABASE_URL
+    // falls back to DATABASE_URL with a non-admin role.
+    {
+        use sea_orm::{ConnectionTrait, DbBackend, Statement};
+        let row = kernel_db
+            .query_one(Statement::from_sql_and_values(
+                DbBackend::Postgres,
+                "SELECT current_user",
+                [],
+            ))
+            .await
+            .context("failed to query current_user on kernel database connection")?;
+        let current_role = row
+            .and_then(|r| r.try_get_by_index::<String>(0).ok())
+            .unwrap_or_else(|| "<unknown>".to_string());
+        if !current_role.starts_with("flexi_kernel_admin") {
+            return Err(anyhow!(
+                "Kernel database connection role is '{}', expected 'flexi_kernel_admin'. \
+                 Set KERNEL_DATABASE_URL to a connection string that authenticates as flexi_kernel_admin.",
+                current_role
+            ));
+        }
+        info!("Verified kernel database role: {}", current_role);
+    }
+
     use kernel_core::auth::SystemTenantContext;
     let init_ctx = TenantContext::from(SystemTenantContext).with_db(db.clone());
     KeyManager::rotate_keys(&init_ctx)

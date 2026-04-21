@@ -303,4 +303,21 @@ async fn test_kernel_context_log_privileged_audit_integration() {
         "Unprivileged direct insert should fail due to RLS or permissions, but got: {:?}",
         err
     );
+
+    // Verify that unprivileged role cannot EXECUTE the SECURITY DEFINER function.
+    // This tests the REVOKE ALL ... FROM PUBLIC + GRANT EXECUTE TO flexi_kernel_admin boundary.
+    let func_result = unpriv_db
+        .execute_unprepared("SELECT flexi.log_privileged_audit('unprivileged_call', 'test', '{}'::jsonb)")
+        .await;
+    assert!(
+        func_result.is_err(),
+        "Unprivileged role should NOT be able to execute flexi.log_privileged_audit, but the call succeeded. Got: {:?}",
+        func_result
+    );
+    let func_err = func_result.unwrap_err().to_string();
+    assert!(
+        func_err.contains("permission denied") || func_err.contains("does not exist"),
+        "Expected permission denied for function execution, but got: {}",
+        func_err
+    );
 }

@@ -5,6 +5,7 @@ on:
     paths:
       - docs/implementation_plan.md
       - docs/verification_matrix.md
+      - kernel-data/migration/**
       - ops/**
       - scripts/ci/**
       - tests/contract/supplychain/**

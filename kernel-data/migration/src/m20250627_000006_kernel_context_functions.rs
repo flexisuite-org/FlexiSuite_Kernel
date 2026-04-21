@@ -32,7 +32,7 @@ BEGIN
     -- Ensure the INSERT successfully passes RLS if the function owner lacks BYPASSRLS
     PERFORM set_config('flexi.current_tenant', 'system', true);
     IF current_setting('flexi.hmac_secret', true) IS NULL THEN
-        RAISE WARNING 'flexi.hmac_secret is not set; ctx_sig will be NULL. Ensure the GUC is configured for the connecting role.';
+        RAISE EXCEPTION 'flexi.hmac_secret is not set; cannot compute ctx_sig. Configure the GUC for the connecting role before using this function.';
     END IF;
     PERFORM set_config('flexi.ctx_sig', encode(hmac('system', current_setting('flexi.hmac_secret', true), 'sha256'), 'hex'), true);
 
@@ -58,6 +58,24 @@ END;
 $$;
 
 REVOKE ALL ON FUNCTION flexi.log_privileged_audit(text, text, jsonb) FROM PUBLIC;
+
+-- Create a dedicated NOLOGIN role to own SECURITY DEFINER functions.
+-- This ensures the function's effective privileges are independent of
+-- the migration runner role, preventing environment-dependent behavior.
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = 'flexi_kernel_definer') THEN
+        CREATE ROLE flexi_kernel_definer NOLOGIN NOINHERIT;
+        RAISE NOTICE 'Created flexi_kernel_definer NOLOGIN role for SECURITY DEFINER function ownership.';
+    END IF;
+END $$;
+
+-- Transfer ownership so the function runs as flexi_kernel_definer, not the migration role.
+ALTER FUNCTION flexi.log_privileged_audit(text, text, jsonb) OWNER TO flexi_kernel_definer;
+
+-- Grant USAGE on schema and INSERT on audit_logs so the NOLOGIN owner can operate.
+GRANT USAGE ON SCHEMA flexi TO flexi_kernel_definer;
+GRANT INSERT ON flexi.audit_logs TO flexi_kernel_definer;
 
 DO $$
 BEGIN
