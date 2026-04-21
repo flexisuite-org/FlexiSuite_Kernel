@@ -297,10 +297,11 @@ async fn test_kernel_context_log_privileged_audit_integration() {
     };
 
     let result = audit_log::Entity::insert(log).exec(&unpriv_db).await;
-    let err = result.unwrap_err();
+    let err = result.expect_err("unprivileged direct insert must fail due to RLS or permissions");
+    let err_str = err.to_string();
     assert!(
-        err.to_string().contains("permission denied") || err.to_string().contains("violates row-level security policy"),
-        "Unprivileged direct insert should fail due to RLS or permissions, but got: {:?}",
+        err_str.contains("42501") || err_str.contains("permission denied") || err_str.contains("violates row-level security policy"),
+        "Unprivileged direct insert should fail with SQLSTATE 42501 (insufficient_privilege) or RLS policy violation, but got: {:?}",
         err
     );
 
@@ -314,10 +315,10 @@ async fn test_kernel_context_log_privileged_audit_integration() {
         "Unprivileged role should NOT be able to execute flexi.log_privileged_audit, but the call succeeded. Got: {:?}",
         func_result
     );
-    let func_err = func_result.unwrap_err().to_string();
+    let func_err = func_result.expect_err("unprivileged role must not invoke flexi.log_privileged_audit").to_string();
     assert!(
-        func_err.contains("permission denied") || func_err.contains("does not exist"),
-        "Expected permission denied for function execution, but got: {}",
+        func_err.contains("42501") || func_err.contains("permission denied") || func_err.contains("does not exist"),
+        "Expected SQLSTATE 42501 or permission denied for function execution, but got: {}",
         func_err
     );
 }

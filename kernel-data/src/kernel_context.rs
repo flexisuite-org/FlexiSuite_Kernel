@@ -103,10 +103,8 @@ impl KernelContext {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::entities::audit_log;
     use sea_orm::{DatabaseBackend, MockDatabase, MockExecResult, TransactionTrait};
     use serde_json::json;
-    use uuid::Uuid;
 
     #[tokio::test]
     async fn test_kernel_context_with_tx_success() {
@@ -151,26 +149,10 @@ mod tests {
                     last_insert_id: 0,
                     rows_affected: 0,
                 }, // begin
-            ])
-            .append_query_results([vec![
-                audit_log::Model {
-                    id: Uuid::now_v7().to_string(),
-                    tenant_id: "system".to_string(),
-                    actor_id: "kernel_admin".to_string(),
-                    action: "test_action".to_string(),
-                    resource: "test_resource".to_string(),
-                    details: json!({"key": "value"}),
-                    ip_address: None,
-                    user_agent: Some("kernel-background-runner".to_string()),
-                    created_at: chrono::Utc::now().into(),
-                    archived_at: None,
-                }
-            ]])
-            .append_exec_results([
                 MockExecResult {
                     last_insert_id: 0,
-                    rows_affected: 1,
-                }, // insert fallback if returning isn't mapped
+                    rows_affected: 0,
+                }, // SELECT flexi.log_privileged_audit(...) — returns void
                 MockExecResult {
                     last_insert_id: 0,
                     rows_affected: 0,

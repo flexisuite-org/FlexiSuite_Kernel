@@ -133,6 +133,9 @@ async fn main() -> Result<()> {
         info!("Verified kernel database role: {}", current_role);
     }
 
+    use kernel_data::kernel_context::create_background_runner_context;
+    let kernel_ctx = create_background_runner_context(kernel_db.clone());
+
     use kernel_core::auth::SystemTenantContext;
     let init_ctx = TenantContext::from(SystemTenantContext).with_db(db.clone());
     KeyManager::rotate_keys(&init_ctx)
@@ -157,7 +160,7 @@ async fn main() -> Result<()> {
             }
             _ = interval.tick(), if !shutdown_requested => {
                 info!("Starting archive cycle...");
-                match run_archive_cycle(&db, &kernel_db, &s3_client, &config).await {
+                match run_archive_cycle(&db, &kernel_ctx, &s3_client, &config).await {
                     Ok(()) => info!("Archive cycle completed."),
                     Err(e) => error!("Archive cycle failed: {}", e),
                 }
@@ -302,14 +305,11 @@ fn parse_object_lock_config() -> Result<Option<ObjectLockConfig>> {
 
 async fn run_archive_cycle(
     db: &std::sync::Arc<DatabaseConnection>,
-    kernel_db: &std::sync::Arc<DatabaseConnection>,
+    kernel_ctx: &kernel_data::kernel_context::KernelContext,
     s3: &Client,
     config: &AppConfig,
 ) -> Result<()> {
     use kernel_core::auth::SystemTenantContext;
-    use kernel_data::kernel_context::create_background_runner_context;
-
-    let kernel_ctx = create_background_runner_context(kernel_db.clone());
 
     let system_ctx = TenantContext::from(SystemTenantContext).with_db(db.clone());
     KeyManager::rotate_keys(&system_ctx)
@@ -447,7 +447,14 @@ async fn run_archive_cycle(
                     ).await
                 })
             }).await {
-                error!("Failed to log privileged audit for archive records for tenant {}: {}", tenant_id, e);
+                error!(
+                    tenant_id = %tenant_id,
+                    action = "kernel_archiver.archive_records",
+                    eh_count = eh_count,
+                    al_count = al_count,
+                    error = %e,
+                    "Failed to log privileged audit for archive records"
+                );
             }
         }
     }

@@ -160,7 +160,7 @@ fn map_wasm_error(error: anyhow::Error) -> SandboxError {
     }
 
     let message = error.to_string();
-    // String mapping fallback for wasmtime 41.0.3 diagnostics when no Trap is available.
+    // String mapping fallback for wasmtime 42.0.2 diagnostics when no Trap is available.
     if message.contains("allocation too large")
         || message.contains("exceeded memory limits")
         || message.contains("growing memory")
