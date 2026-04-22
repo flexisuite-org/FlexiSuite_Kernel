@@ -7,7 +7,11 @@ use sea_orm_migration::prelude::*;
 ///
 /// ### Deployment Requirements
 /// - The migration runner must have `CREATEROLE` privilege (to create `flexi_kernel_definer`).
-/// - The `flexi_kernel_admin` role must exist before running this migration.
+/// - The migration runner must be superuser or have sufficient `SET ROLE` capability on
+///   `flexi_kernel_definer` for `ALTER FUNCTION ... OWNER TO` (CREATEROLE plus CREATE on
+///   the schema is not sufficient for non-superuser runners; see PostgreSQL ALTER FUNCTION docs).
+/// - The `flexi_kernel_admin` role is deployment-provisioned; if absent, this migration emits
+///   a `RAISE WARNING` and skips the `GRANT EXECUTE` / `GRANT USAGE` for that role.
 /// - The `flexi.hmac_secret` GUC must be configured for the connecting role.
 ///
 /// ### Ownership Model
@@ -144,7 +148,7 @@ BEGIN
         GRANT EXECUTE ON FUNCTION flexi.log_privileged_audit(text, text, jsonb) TO flexi_kernel_admin;
         GRANT USAGE ON SCHEMA flexi TO flexi_kernel_admin;
     ELSE
-        RAISE EXCEPTION 'Role flexi_kernel_admin does not exist; cannot grant EXECUTE on flexi.log_privileged_audit. Provision the role before running this migration.';
+        RAISE WARNING 'Role flexi_kernel_admin does not exist; skipping GRANT for flexi.log_privileged_audit. Privileged audit logging will fail at runtime until the role is provisioned and the grant is applied.';
     END IF;
 END $$;
         "#;
