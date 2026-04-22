@@ -101,7 +101,7 @@ BEGIN
     IF EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = 'flexi_kernel_admin') THEN
         GRANT EXECUTE ON FUNCTION flexi.log_privileged_audit(text, text, jsonb) TO flexi_kernel_admin;
     ELSE
-        RAISE WARNING 'Role flexi_kernel_admin does not exist; skipping GRANT for flexi.log_privileged_audit. Privileged audit logging will fail at runtime.';
+        RAISE EXCEPTION 'Role flexi_kernel_admin does not exist; cannot grant EXECUTE on flexi.log_privileged_audit. Provision the role before running this migration.';
     END IF;
 END $$;
         "#;
