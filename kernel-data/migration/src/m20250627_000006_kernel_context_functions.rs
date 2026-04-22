@@ -80,7 +80,42 @@ DO $$
 BEGIN
     IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = 'flexi_kernel_definer') THEN
         CREATE ROLE flexi_kernel_definer NOLOGIN NOINHERIT;
+        COMMENT ON ROLE flexi_kernel_definer IS 'Created by migration m20250627_000006';
         RAISE NOTICE 'Created flexi_kernel_definer NOLOGIN role for SECURITY DEFINER function ownership.';
+    END IF;
+END $$;
+
+-- Validate a pre-provisioned owner role before assigning SECURITY DEFINER ownership.
+DO $$
+DECLARE
+    v_rolcanlogin boolean;
+    v_rolinherit boolean;
+    v_rolsuper boolean;
+    v_rolbypassrls boolean;
+BEGIN
+    SELECT r.rolcanlogin, r.rolinherit, r.rolsuper, r.rolbypassrls
+    INTO v_rolcanlogin, v_rolinherit, v_rolsuper, v_rolbypassrls
+    FROM pg_catalog.pg_roles r
+    WHERE r.rolname = 'flexi_kernel_definer';
+
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'Role flexi_kernel_definer does not exist after provisioning.';
+    END IF;
+
+    IF v_rolcanlogin THEN
+        RAISE EXCEPTION 'Role flexi_kernel_definer must be NOLOGIN.';
+    END IF;
+
+    IF v_rolinherit THEN
+        RAISE EXCEPTION 'Role flexi_kernel_definer must be NOINHERIT.';
+    END IF;
+
+    IF v_rolsuper THEN
+        RAISE EXCEPTION 'Role flexi_kernel_definer must not be SUPERUSER.';
+    END IF;
+
+    IF v_rolbypassrls THEN
+        RAISE EXCEPTION 'Role flexi_kernel_definer must not have BYPASSRLS.';
     END IF;
 END $$;
 
@@ -90,16 +125,24 @@ GRANT USAGE ON SCHEMA flexi TO flexi_kernel_definer;
 GRANT CREATE ON SCHEMA flexi TO flexi_kernel_definer;
 
 -- Transfer ownership so the function runs as flexi_kernel_definer, not the migration role.
+-- ALTER FUNCTION OWNER requires the migration runner to be superuser or have
+-- sufficient SET ROLE capability on flexi_kernel_definer; CREATEROLE plus CREATE
+-- on the schema is not sufficient for a non-superuser migration runner.
 ALTER FUNCTION flexi.log_privileged_audit(text, text, jsonb) OWNER TO flexi_kernel_definer;
 REVOKE CREATE ON SCHEMA flexi FROM flexi_kernel_definer;
 
 -- Grant INSERT on audit_logs so the NOLOGIN owner can operate.
 GRANT INSERT ON flexi.audit_logs TO flexi_kernel_definer;
 
+-- Grant EXECUTE on authorized_tenant_id() so the SECURITY DEFINER function body
+-- can evaluate the RLS policy on audit_logs (tenant_id = flexi.authorized_tenant_id()).
+GRANT EXECUTE ON FUNCTION flexi.authorized_tenant_id() TO flexi_kernel_definer;
+
 DO $$
 BEGIN
     IF EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = 'flexi_kernel_admin') THEN
         GRANT EXECUTE ON FUNCTION flexi.log_privileged_audit(text, text, jsonb) TO flexi_kernel_admin;
+        GRANT USAGE ON SCHEMA flexi TO flexi_kernel_admin;
     ELSE
         RAISE EXCEPTION 'Role flexi_kernel_admin does not exist; cannot grant EXECUTE on flexi.log_privileged_audit. Provision the role before running this migration.';
     END IF;
@@ -113,22 +156,34 @@ END $$;
         let db = manager.get_connection();
         db.execute_unprepared(
             "DO $$
+             DECLARE
+               v_role_created_by_migration boolean := false;
              BEGIN
-               -- Only drop the role if it was created by this migration (owns the function).
-               -- A deployment-provisioned role would not own this function.
                IF EXISTS (
                  SELECT 1
-                 FROM pg_catalog.pg_proc
-                 WHERE proname = 'log_privileged_audit'
-                   AND pronamespace = 'flexi'::regnamespace
-                   AND proowner = (SELECT oid FROM pg_catalog.pg_roles WHERE rolname = 'flexi_kernel_definer')
+                 FROM pg_catalog.pg_roles r
+                 WHERE r.rolname = 'flexi_kernel_definer'
+                   AND pg_catalog.shobj_description(r.oid, 'pg_authid') = 'Created by migration m20250627_000006'
                ) THEN
-                 DROP FUNCTION IF EXISTS flexi.log_privileged_audit(text, text, jsonb);
-                 REVOKE ALL ON SCHEMA flexi FROM flexi_kernel_definer;
-                 REVOKE ALL ON flexi.audit_logs FROM flexi_kernel_definer;
-                 DROP ROLE flexi_kernel_definer;
-               ELSE
-                 DROP FUNCTION IF EXISTS flexi.log_privileged_audit(text, text, jsonb);
+                 v_role_created_by_migration := true;
+               END IF;
+
+               DROP FUNCTION IF EXISTS flexi.log_privileged_audit(text, text, jsonb);
+
+               IF EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'flexi_kernel_admin') THEN
+                 REVOKE USAGE ON SCHEMA flexi FROM flexi_kernel_admin;
+               END IF;
+
+               IF EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'flexi_kernel_definer') THEN
+                 REVOKE USAGE ON SCHEMA flexi FROM flexi_kernel_definer;
+                 REVOKE CREATE ON SCHEMA flexi FROM flexi_kernel_definer;
+                 REVOKE INSERT ON flexi.audit_logs FROM flexi_kernel_definer;
+                 REVOKE EXECUTE ON FUNCTION flexi.authorized_tenant_id() FROM flexi_kernel_definer;
+
+                 -- Only drop the role if its marker proves this migration created it.
+                 IF v_role_created_by_migration THEN
+                   DROP ROLE flexi_kernel_definer;
+                 END IF;
                END IF;
              END $$;",
         )

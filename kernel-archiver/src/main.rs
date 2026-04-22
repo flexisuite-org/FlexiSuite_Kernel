@@ -107,30 +107,38 @@ async fn main() -> Result<()> {
     );
     info!("Connected to kernel admin database");
 
-    // Verify the kernel database connection uses the expected role.
+    // Verify the kernel database connection authenticates as and uses the expected role.
     // This prevents silent privilege escalation when KERNEL_DATABASE_URL
-    // falls back to DATABASE_URL with a non-admin role.
+    // falls back to DATABASE_URL with a non-admin role or uses SET ROLE.
     {
         use sea_orm::{ConnectionTrait, DbBackend, Statement};
         let row = kernel_db
             .query_one(Statement::from_sql_and_values(
                 DbBackend::Postgres,
-                "SELECT current_user",
+                "SELECT session_user, current_user",
                 [],
             ))
             .await
-            .context("failed to query current_user on kernel database connection")?;
-        let current_role = row
-            .and_then(|r| r.try_get_by_index::<String>(0).ok())
-            .unwrap_or_else(|| "<unknown>".to_string());
-        if current_role != "flexi_kernel_admin" {
+            .context("failed to query session_user/current_user on kernel database connection")?;
+        let (session_role, current_role) = row
+            .and_then(|r| {
+                let session_role = r.try_get_by_index::<String>(0).ok()?;
+                let current_role = r.try_get_by_index::<String>(1).ok()?;
+                Some((session_role, current_role))
+            })
+            .unwrap_or_else(|| ("<unknown>".to_string(), "<unknown>".to_string()));
+        if session_role != "flexi_kernel_admin" || current_role != "flexi_kernel_admin" {
             return Err(anyhow!(
-                "Kernel database connection role is '{}', expected 'flexi_kernel_admin'. \
+                "Kernel database connection session_user/current_user is '{}/{}', expected 'flexi_kernel_admin/flexi_kernel_admin'. \
                  Set KERNEL_DATABASE_URL to a connection string that authenticates as flexi_kernel_admin.",
+                session_role,
                 current_role
             ));
         }
-        info!("Verified kernel database role: {}", current_role);
+        info!(
+            "Verified kernel database role: session_user={}, current_user={}",
+            session_role, current_role
+        );
     }
 
     use kernel_data::kernel_context::create_background_runner_context;

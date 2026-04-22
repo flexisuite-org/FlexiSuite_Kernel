@@ -252,10 +252,7 @@ async fn test_kernel_context_log_privileged_audit_integration() {
         port
     );
 
-    // Ensure the flexi_kernel_admin role has USAGE on schema flexi and can access audit_logs
-    db.execute_unprepared("GRANT USAGE ON SCHEMA flexi TO flexi_kernel_admin;")
-        .await
-        .expect("grant usage");
+    // Ensure the flexi_kernel_admin role can inspect audit_logs.
     db.execute_unprepared("GRANT SELECT ON flexi.audit_logs TO flexi_kernel_admin;")
         .await
         .expect("grant select");
