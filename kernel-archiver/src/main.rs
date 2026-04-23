@@ -29,6 +29,7 @@ struct ObjectLockConfig {
 #[derive(Clone)]
 struct AppConfig {
     database_url: String,
+    kernel_database_url: String,
     s3_bucket: String,
     region_name: String,
     interval_secs: u64,
@@ -95,9 +96,53 @@ async fn main() -> Result<()> {
     let db = std::sync::Arc::new(
         Database::connect(&config.database_url)
             .await
-            .context("failed to connect database")?,
+            .context("failed to connect primary database")?,
     );
-    info!("Connected to database");
+    info!("Connected to primary database");
+
+    let kernel_db = std::sync::Arc::new(
+        Database::connect(&config.kernel_database_url)
+            .await
+            .context("failed to connect kernel admin database")?,
+    );
+    info!("Connected to kernel admin database");
+
+    // Verify the kernel database connection authenticates as and uses the expected role.
+    // This prevents silent privilege escalation when KERNEL_DATABASE_URL
+    // falls back to DATABASE_URL with a non-admin role or uses SET ROLE.
+    {
+        use sea_orm::{ConnectionTrait, DbBackend, Statement};
+        let row = kernel_db
+            .query_one(Statement::from_sql_and_values(
+                DbBackend::Postgres,
+                "SELECT session_user, current_user",
+                [],
+            ))
+            .await
+            .context("failed to query session_user/current_user on kernel database connection")?;
+        let (session_role, current_role) = row
+            .and_then(|r| {
+                let session_role = r.try_get_by_index::<String>(0).ok()?;
+                let current_role = r.try_get_by_index::<String>(1).ok()?;
+                Some((session_role, current_role))
+            })
+            .unwrap_or_else(|| ("<unknown>".to_string(), "<unknown>".to_string()));
+        if session_role != "flexi_kernel_admin" || current_role != "flexi_kernel_admin" {
+            return Err(anyhow!(
+                "Kernel database connection session_user/current_user is '{}/{}', expected 'flexi_kernel_admin/flexi_kernel_admin'. \
+                 Set KERNEL_DATABASE_URL to a connection string that authenticates as flexi_kernel_admin.",
+                session_role,
+                current_role
+            ));
+        }
+        info!(
+            "Verified kernel database role: session_user={}, current_user={}",
+            session_role, current_role
+        );
+    }
+
+    use kernel_data::kernel_context::create_background_runner_context;
+    let kernel_ctx = create_background_runner_context(kernel_db.clone());
 
     use kernel_core::auth::SystemTenantContext;
     let init_ctx = TenantContext::from(SystemTenantContext).with_db(db.clone());
@@ -123,7 +168,7 @@ async fn main() -> Result<()> {
             }
             _ = interval.tick(), if !shutdown_requested => {
                 info!("Starting archive cycle...");
-                match run_archive_cycle(&db, &s3_client, &config).await {
+                match run_archive_cycle(&db, &kernel_ctx, &s3_client, &config).await {
                     Ok(()) => info!("Archive cycle completed."),
                     Err(e) => error!("Archive cycle failed: {}", e),
                 }
@@ -141,6 +186,21 @@ async fn main() -> Result<()> {
 
 fn load_config() -> Result<AppConfig> {
     let database_url = env::var("DATABASE_URL").context("DATABASE_URL must be set")?;
+    let kernel_database_url = match env::var("KERNEL_DATABASE_URL") {
+        Ok(url) => url,
+        Err(_) => {
+            // The startup current_user verification makes this fallback unreachable in
+            // practice for non-flexi_kernel_admin roles; keeping it explicit preserves
+            // the security boundary even when the escape hatch is enabled.
+            let allow_fallback = env::var("KERNEL_DATABASE_URL_ALLOW_FALLBACK").unwrap_or_default();
+            if allow_fallback == "1" || allow_fallback.eq_ignore_ascii_case("true") {
+                warn!("KERNEL_DATABASE_URL not set. KERNEL_DATABASE_URL_ALLOW_FALLBACK is active. Falling back to DATABASE_URL. This bypasses the dedicated security boundary (flexi_kernel_admin role). Privileged operations may fail if the database role lacks execute permissions for flexi.log_privileged_audit.");
+                database_url.clone()
+            } else {
+                return Err(anyhow!("KERNEL_DATABASE_URL must be set. Set KERNEL_DATABASE_URL_ALLOW_FALLBACK=true to override this requirement."));
+            }
+        }
+    };
     let s3_bucket = env::var("AUDIT_LOG_BUCKET").context("AUDIT_LOG_BUCKET must be set")?;
 
     let region_name = match env::var("AWS_REGION") {
@@ -190,6 +250,7 @@ fn load_config() -> Result<AppConfig> {
 
     Ok(AppConfig {
         database_url,
+        kernel_database_url,
         s3_bucket,
         region_name,
         interval_secs,
@@ -255,10 +316,12 @@ fn parse_object_lock_config() -> Result<Option<ObjectLockConfig>> {
 
 async fn run_archive_cycle(
     db: &std::sync::Arc<DatabaseConnection>,
+    kernel_ctx: &kernel_data::kernel_context::KernelContext,
     s3: &Client,
     config: &AppConfig,
 ) -> Result<()> {
     use kernel_core::auth::SystemTenantContext;
+
     let system_ctx = TenantContext::from(SystemTenantContext).with_db(db.clone());
     KeyManager::rotate_keys(&system_ctx)
         .await
@@ -349,6 +412,14 @@ async fn run_archive_cycle(
             continue;
         };
 
+        let eh_count = mark_plan.entity_history_ids.len();
+        let al_count = mark_plan.audit_log_ids.len();
+        let details = serde_json::json!({
+            "tenant_id": tenant_id.as_str(),
+            "archived_entity_history_count": eh_count,
+            "archived_audit_log_count": al_count,
+        });
+
         let mark_result = with_tenant_tx(db, &ctx, &mark_token, move |repo| {
             Box::pin(async move {
                 if !mark_plan.entity_history_ids.is_empty() {
@@ -369,6 +440,33 @@ async fn run_archive_cycle(
                 "Tenant {} failed to mark archived records: {}",
                 tenant_id, e
             );
+        } else {
+            // Note: Audit logging and mark-as-archived are not atomic because they operate
+            // across two independent connections (db and kernel_db).
+            // A persistent failure here would result in the records being marked,
+            // but the privileged audit log not reflecting the intent.
+            // TODO(Issue #138): Implement durable outbox reconciliation for audit log
+            // reliability so this non-atomic cross-connection write can be recovered.
+            if let Err(e) = kernel_ctx.with_tx(|txn| {
+                let inner_details = details.clone();
+                Box::pin(async move {
+                    kernel_data::kernel_context::KernelContext::log_privileged_audit(
+                        txn,
+                        "kernel_archiver.archive_records".to_string(),
+                        "system:archive".to_string(),
+                        inner_details,
+                    ).await
+                })
+            }).await {
+                error!(
+                    tenant_id = %tenant_id,
+                    action = "kernel_archiver.archive_records",
+                    eh_count = eh_count,
+                    al_count = al_count,
+                    error = %e,
+                    "Failed to log privileged audit for archive records"
+                );
+            }
         }
     }
 

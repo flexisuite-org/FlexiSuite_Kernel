@@ -68,7 +68,6 @@ impl WasmSandbox {
 
     pub fn new(options: RuntimeOptions) -> Result<Self, SandboxError> {
         let mut config = Config::new();
-        config.async_support(true);
         config.consume_fuel(true);
         config.epoch_interruption(true);
 
@@ -161,7 +160,7 @@ fn map_wasm_error(error: anyhow::Error) -> SandboxError {
     }
 
     let message = error.to_string();
-    // String mapping fallback for wasmtime 41.0.3 diagnostics when no Trap is available.
+    // String mapping fallback for wasmtime 42.0.2 diagnostics when no Trap is available.
     if message.contains("allocation too large")
         || message.contains("exceeded memory limits")
         || message.contains("growing memory")
@@ -481,7 +480,7 @@ impl SandboxRuntime for WasmSandbox {
                 .await
             {
                 Ok(Ok(module)) => module,
-                Ok(Err(e)) => return Err(map_wasm_error(e)),
+                Ok(Err(e)) => return Err(map_wasm_error(e.into())),
                 Err(e) => return Err(SandboxError::RuntimeError(e.to_string())),
             };
 
@@ -527,7 +526,7 @@ impl SandboxRuntime for WasmSandbox {
             Ok(instance) => instance,
             Err(e) => {
                 self.stop_watchdog();
-                return Err(map_wasm_error(e));
+                return Err(map_wasm_error(e.into()));
             }
         };
 
@@ -535,7 +534,7 @@ impl SandboxRuntime for WasmSandbox {
             Ok(start) => start,
             Err(e) => {
                 self.stop_watchdog();
-                return Err(map_wasm_error(e));
+                return Err(map_wasm_error(e.into()));
             }
         };
 
@@ -545,7 +544,7 @@ impl SandboxRuntime for WasmSandbox {
             Ok(_) => {}
             Err(e) => {
                 self.stop_watchdog();
-                let mapped = map_wasm_error(e);
+                let mapped = map_wasm_error(e.into());
                 if matches!(mapped, SandboxError::RuntimeError(_))
                     && is_wall_timeout.load(Ordering::SeqCst)
                 {

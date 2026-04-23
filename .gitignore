@@ -56,3 +56,6 @@ yarn-error.log*
 
 # === Vercel ===
 .vercel
+
+# === Metis (AI Agent Harness) ===
+.metis/
