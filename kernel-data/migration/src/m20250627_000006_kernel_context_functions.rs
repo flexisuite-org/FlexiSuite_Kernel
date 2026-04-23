@@ -172,11 +172,11 @@ END $$;
                  v_role_created_by_migration := true;
                END IF;
 
-               DROP FUNCTION IF EXISTS flexi.log_privileged_audit(text, text, jsonb);
-
                IF EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'flexi_kernel_admin') THEN
                  REVOKE EXECUTE ON FUNCTION flexi.log_privileged_audit(text, text, jsonb) FROM flexi_kernel_admin;
                END IF;
+
+               DROP FUNCTION IF EXISTS flexi.log_privileged_audit(text, text, jsonb);
 
                IF EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'flexi_kernel_definer') THEN
                  REVOKE USAGE ON SCHEMA flexi FROM flexi_kernel_definer;
