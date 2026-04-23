@@ -175,7 +175,7 @@ END $$;
                DROP FUNCTION IF EXISTS flexi.log_privileged_audit(text, text, jsonb);
 
                IF EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'flexi_kernel_admin') THEN
-                 REVOKE USAGE ON SCHEMA flexi FROM flexi_kernel_admin;
+                 REVOKE EXECUTE ON FUNCTION flexi.log_privileged_audit(text, text, jsonb) FROM flexi_kernel_admin;
                END IF;
 
                IF EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'flexi_kernel_definer') THEN
