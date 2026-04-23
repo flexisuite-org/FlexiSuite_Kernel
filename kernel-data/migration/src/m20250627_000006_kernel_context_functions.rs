@@ -123,6 +123,68 @@ BEGIN
     END IF;
 END $$;
 
+-- Record pre-existing direct grants for pre-provisioned owner roles. PostgreSQL
+-- privileges are boolean flags, so rollback cannot distinguish a grant that
+-- existed before this migration from a grant added by this migration unless we
+-- persist the baseline before issuing GRANT.
+DO $$
+DECLARE
+    v_role_oid oid;
+    v_role_comment text;
+    v_state jsonb;
+BEGIN
+    SELECT r.oid, pg_catalog.shobj_description(r.oid, 'pg_authid')
+    INTO v_role_oid, v_role_comment
+    FROM pg_catalog.pg_roles r
+    WHERE r.rolname = 'flexi_kernel_definer';
+
+    IF v_role_comment IS DISTINCT FROM 'Created by migration m20250627_000006'
+       AND (v_role_comment IS NULL OR v_role_comment NOT LIKE 'flexi:m20250627_000006:%') THEN
+        v_state := pg_catalog.jsonb_build_object(
+            'old_comment', v_role_comment,
+            'schema_usage', EXISTS (
+                SELECT 1
+                FROM pg_catalog.pg_namespace n,
+                     pg_catalog.aclexplode(COALESCE(n.nspacl, pg_catalog.acldefault('n', n.nspowner))) acl
+                WHERE n.nspname = 'flexi'
+                  AND acl.grantee = v_role_oid
+                  AND acl.privilege_type = 'USAGE'
+            ),
+            'schema_create', EXISTS (
+                SELECT 1
+                FROM pg_catalog.pg_namespace n,
+                     pg_catalog.aclexplode(COALESCE(n.nspacl, pg_catalog.acldefault('n', n.nspowner))) acl
+                WHERE n.nspname = 'flexi'
+                  AND acl.grantee = v_role_oid
+                  AND acl.privilege_type = 'CREATE'
+            ),
+            'audit_insert', EXISTS (
+                SELECT 1
+                FROM pg_catalog.pg_class c
+                JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace,
+                     pg_catalog.aclexplode(COALESCE(c.relacl, pg_catalog.acldefault('r', c.relowner))) acl
+                WHERE n.nspname = 'flexi'
+                  AND c.relname = 'audit_logs'
+                  AND acl.grantee = v_role_oid
+                  AND acl.privilege_type = 'INSERT'
+            ),
+            'authorized_tenant_execute', EXISTS (
+                SELECT 1
+                FROM pg_catalog.pg_proc p
+                JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace,
+                     pg_catalog.aclexplode(COALESCE(p.proacl, pg_catalog.acldefault('f', p.proowner))) acl
+                WHERE n.nspname = 'flexi'
+                  AND p.proname = 'authorized_tenant_id'
+                  AND p.pronargs = 0
+                  AND acl.grantee = v_role_oid
+                  AND acl.privilege_type = 'EXECUTE'
+            )
+        );
+
+        EXECUTE pg_catalog.format('COMMENT ON ROLE flexi_kernel_definer IS %L', 'flexi:m20250627_000006:' || v_state::text);
+    END IF;
+END $$;
+
 -- Grant schema privileges before ownership transfer; ALTER FUNCTION OWNER requires
 -- the new owner to have CREATE privilege on the schema containing the function.
 GRANT USAGE ON SCHEMA flexi TO flexi_kernel_definer;
@@ -133,7 +195,32 @@ GRANT CREATE ON SCHEMA flexi TO flexi_kernel_definer;
 -- sufficient SET ROLE capability on flexi_kernel_definer; CREATEROLE plus CREATE
 -- on the schema is not sufficient for a non-superuser migration runner.
 ALTER FUNCTION flexi.log_privileged_audit(text, text, jsonb) OWNER TO flexi_kernel_definer;
-REVOKE CREATE ON SCHEMA flexi FROM flexi_kernel_definer;
+
+DO $$
+DECLARE
+    v_role_comment text;
+    v_state jsonb;
+    v_had_schema_create boolean := false;
+BEGIN
+    SELECT pg_catalog.shobj_description(r.oid, 'pg_authid')
+    INTO v_role_comment
+    FROM pg_catalog.pg_roles r
+    WHERE r.rolname = 'flexi_kernel_definer';
+
+    IF v_role_comment = 'Created by migration m20250627_000006' THEN
+        REVOKE CREATE ON SCHEMA flexi FROM flexi_kernel_definer;
+    ELSIF v_role_comment LIKE 'flexi:m20250627_000006:%' THEN
+        v_state := pg_catalog.substring(v_role_comment FROM pg_catalog.length('flexi:m20250627_000006:') + 1)::jsonb;
+        v_had_schema_create := COALESCE((v_state ->> 'schema_create')::boolean, false);
+
+        IF NOT v_had_schema_create THEN
+            REVOKE CREATE ON SCHEMA flexi FROM flexi_kernel_definer;
+        END IF;
+    ELSE
+        -- Legacy fallback for databases migrated before baseline tracking existed.
+        REVOKE CREATE ON SCHEMA flexi FROM flexi_kernel_definer;
+    END IF;
+END $$;
 
 -- Grant INSERT on audit_logs so the NOLOGIN owner can operate.
 GRANT INSERT ON flexi.audit_logs TO flexi_kernel_definer;
@@ -162,13 +249,16 @@ END $$;
             "DO $$
              DECLARE
                v_role_created_by_migration boolean := false;
+               v_role_comment text;
+               v_state jsonb;
+               v_old_comment text;
              BEGIN
-               IF EXISTS (
-                 SELECT 1
-                 FROM pg_catalog.pg_roles r
-                 WHERE r.rolname = 'flexi_kernel_definer'
-                   AND pg_catalog.shobj_description(r.oid, 'pg_authid') = 'Created by migration m20250627_000006'
-               ) THEN
+               SELECT pg_catalog.shobj_description(r.oid, 'pg_authid')
+               INTO v_role_comment
+               FROM pg_catalog.pg_roles r
+               WHERE r.rolname = 'flexi_kernel_definer';
+
+               IF v_role_comment = 'Created by migration m20250627_000006' THEN
                  v_role_created_by_migration := true;
                END IF;
 
@@ -179,14 +269,40 @@ END $$;
                DROP FUNCTION IF EXISTS flexi.log_privileged_audit(text, text, jsonb);
 
                IF EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'flexi_kernel_definer') THEN
-                 REVOKE USAGE ON SCHEMA flexi FROM flexi_kernel_definer;
-                 REVOKE CREATE ON SCHEMA flexi FROM flexi_kernel_definer;
-                 REVOKE INSERT ON flexi.audit_logs FROM flexi_kernel_definer;
-                 REVOKE EXECUTE ON FUNCTION flexi.authorized_tenant_id() FROM flexi_kernel_definer;
-
                  -- Only drop the role if its marker proves this migration created it.
                  IF v_role_created_by_migration THEN
+                   REVOKE USAGE ON SCHEMA flexi FROM flexi_kernel_definer;
+                   REVOKE CREATE ON SCHEMA flexi FROM flexi_kernel_definer;
+                   REVOKE INSERT ON flexi.audit_logs FROM flexi_kernel_definer;
+                   REVOKE EXECUTE ON FUNCTION flexi.authorized_tenant_id() FROM flexi_kernel_definer;
                    DROP ROLE flexi_kernel_definer;
+                 ELSIF v_role_comment LIKE 'flexi:m20250627_000006:%' THEN
+                   v_state := pg_catalog.substring(v_role_comment FROM pg_catalog.length('flexi:m20250627_000006:') + 1)::jsonb;
+
+                   IF NOT COALESCE((v_state ->> 'schema_usage')::boolean, false) THEN
+                     REVOKE USAGE ON SCHEMA flexi FROM flexi_kernel_definer;
+                   END IF;
+
+                   IF NOT COALESCE((v_state ->> 'schema_create')::boolean, false) THEN
+                     REVOKE CREATE ON SCHEMA flexi FROM flexi_kernel_definer;
+                   END IF;
+
+                   IF NOT COALESCE((v_state ->> 'audit_insert')::boolean, false) THEN
+                     REVOKE INSERT ON flexi.audit_logs FROM flexi_kernel_definer;
+                   END IF;
+
+                   IF NOT COALESCE((v_state ->> 'authorized_tenant_execute')::boolean, false) THEN
+                     REVOKE EXECUTE ON FUNCTION flexi.authorized_tenant_id() FROM flexi_kernel_definer;
+                   END IF;
+
+                   v_old_comment := v_state ->> 'old_comment';
+                   EXECUTE pg_catalog.format('COMMENT ON ROLE flexi_kernel_definer IS %L', v_old_comment);
+                 ELSE
+                   -- Legacy fallback for databases migrated before baseline tracking existed.
+                   REVOKE USAGE ON SCHEMA flexi FROM flexi_kernel_definer;
+                   REVOKE CREATE ON SCHEMA flexi FROM flexi_kernel_definer;
+                   REVOKE INSERT ON flexi.audit_logs FROM flexi_kernel_definer;
+                   REVOKE EXECUTE ON FUNCTION flexi.authorized_tenant_id() FROM flexi_kernel_definer;
                  END IF;
                END IF;
              END $$;",
