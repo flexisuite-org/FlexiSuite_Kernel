@@ -318,3 +318,50 @@ async fn test_poll_never_exceeds_max_count_across_multiple_shards() {
         "the two polls should observe different ordering keys from different shards",
     );
 }
+
+#[tokio::test]
+async fn test_poison_pill_is_acked() {
+    let (node, client) = start_redis_server().await;
+    let tenant_id = TenantId::new("tenant-poison").unwrap();
+    let stream_base = "test_poison_stream";
+    let consumer_group = "test_group";
+
+    // Inject a poison pill
+    let mut conn = client.get_connection_manager().await.unwrap();
+    let shard_key = format!("{}:{}:0", tenant_id, stream_base);
+    let _: () = redis::cmd("XADD")
+        .arg(&shard_key)
+        .arg("*")
+        .arg("data")
+        .arg("invalid_json_payload")
+        .query_async(&mut conn)
+        .await
+        .unwrap();
+
+    let consumer = RedisConsumer::new(client.clone()).await.expect("consumer");
+
+    // Poll the consumer. It should encounter the poison pill, log an error,
+    // XACK it, and return empty (or other valid messages if present).
+    let deliveries = consumer
+        .poll(&tenant_id, stream_base, consumer_group, "consumer-1", 10)
+        .await
+        .expect("poll should succeed even with poison pill");
+
+    assert_eq!(deliveries.len(), 0, "poison pill should be dropped from result");
+
+    // Ensure the message was actually XACKed (Pending Entries List should be empty)
+    let pending: redis::Value = redis::cmd("XPENDING")
+        .arg(&shard_key)
+        .arg(consumer_group)
+        .query_async(&mut conn)
+        .await
+        .unwrap();
+
+    // XPENDING returns [total_pending, min_id, max_id, [consumers]]
+    let pending_arr = match pending {
+        redis::Value::Array(ref arr) => arr,
+        _ => panic!("Expected array"),
+    };
+    let total_pending: i64 = redis::FromRedisValue::from_redis_value(&pending_arr[0]).unwrap();
+    assert_eq!(total_pending, 0, "Poison pill must be XACKed (PEL should be empty)");
+}

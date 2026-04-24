@@ -132,25 +132,55 @@ impl RedisConsumer {
         })
     }
 
-    fn decode_stream_read(reply: StreamReadReply) -> Result<Vec<Delivery>, EventError> {
+    async fn decode_stream_read(
+        &self,
+        consumer_group: &str,
+        reply: StreamReadReply,
+    ) -> Result<Vec<Delivery>, EventError> {
         let mut deliveries = Vec::new();
         for key in reply.keys {
             for stream_id in key.ids {
-                deliveries.push(Self::decode_stream_entry(&key.key, &stream_id)?);
+                match Self::decode_stream_entry(&key.key, &stream_id) {
+                    Ok(delivery) => deliveries.push(delivery),
+                    Err(e) => {
+                        tracing::error!(
+                            stream_key = %key.key,
+                            delivery_id = %stream_id.id,
+                            error = %e,
+                            "Poison pill detected: failed to decode stream entry. Force-acking to unblock consumer."
+                        );
+                        let mut conn = self.connection_manager.clone();
+                        let _: Result<i32, _> = conn.xack(&key.key, consumer_group, &[&stream_id.id]).await;
+                    }
+                }
             }
         }
         Ok(deliveries)
     }
 
-    fn decode_claimed(
+    async fn decode_claimed(
+        &self,
         stream_key: &str,
+        consumer_group: &str,
         reply: StreamClaimReply,
     ) -> Result<Vec<Delivery>, EventError> {
-        reply
-            .ids
-            .iter()
-            .map(|stream_id| Self::decode_stream_entry(stream_key, stream_id))
-            .collect()
+        let mut deliveries = Vec::new();
+        for stream_id in reply.ids {
+            match Self::decode_stream_entry(stream_key, &stream_id) {
+                Ok(delivery) => deliveries.push(delivery),
+                Err(e) => {
+                    tracing::error!(
+                        stream_key = %stream_key,
+                        delivery_id = %stream_id.id,
+                        error = %e,
+                        "Poison pill detected in claimed entries: failed to decode. Force-acking to unblock consumer."
+                    );
+                    let mut conn = self.connection_manager.clone();
+                    let _: Result<i32, _> = conn.xack(stream_key, consumer_group, &[&stream_id.id]).await;
+                }
+            }
+        }
+        Ok(deliveries)
     }
 
     fn build_read_options(
@@ -210,7 +240,7 @@ impl RedisConsumer {
     }
 
     fn is_nogroup_error(error: &RedisError) -> bool {
-        error.code() == Some("NOGROUP")
+        error.code() == Some("NOGROUP") || error.to_string().contains("NOGROUP")
     }
 
     fn consumer_group_cache_key(
@@ -330,56 +360,75 @@ impl RedisConsumer {
         let keys = Self::stream_keys_for_tenant_ordered(tenant_id, stream_base, start_shard);
         let mut deliveries = Vec::new();
 
-        // Phase 1: Non-blocking scan across all shards to respect strict max_count
+        // Phase 1: Non-blocking scan across all shards using Lua script to avoid N+1 queries.
+        let script = redis::Script::new(
+            r#"
+            local max_count = tonumber(ARGV[1])
+            local group = ARGV[2]
+            local consumer = ARGV[3]
+            local result = {}
+            local total_read = 0
+
+            for i, key in ipairs(KEYS) do
+                if total_read >= max_count then
+                    break
+                end
+                local remaining = max_count - total_read
+                local reply = redis.pcall('XREADGROUP', 'GROUP', group, consumer, 'COUNT', remaining, 'STREAMS', key, '>')
+                if type(reply) == 'table' and reply.err then
+                    return reply
+                elseif reply then
+                    table.insert(result, reply[1])
+                    total_read = total_read + #reply[1][2]
+                end
+            end
+            return result
+            "#,
+        );
+
+        let mut invocation = script.prepare_invoke();
         for key in &keys {
-            if deliveries.len() >= max_count {
-                break;
-            }
-
-            let remaining = max_count.saturating_sub(deliveries.len());
-            let options =
-                Self::build_read_options(consumer_group, consumer_name, remaining, None, false);
-            let mut conn = self.connection_manager.clone();
-            let reply: Result<StreamReadReply, RedisError> =
-                conn.xread_options(&[key.as_str()], &[">"], &options).await;
-
-            let reply = self
-                .recover_nogroup_and_retry(
-                    tenant_id,
-                    stream_base,
-                    key.as_str(),
-                    consumer_group,
-                    "poll_once",
-                    reply,
-                    || async {
-                        let mut retry_conn = self.connection_manager.clone();
-                        retry_conn
-                            .xread_options(&[key.as_str()], &[">"], &options)
-                            .await
-                    },
-                )
-                .await?;
-
-            let reply = reply.map_err(|e| {
-                EventError::Consumer(format!("failed to read stream group entries: {e}"))
-            })?;
-            let mut shard_deliveries = Self::decode_stream_read(reply)?;
-            deliveries.append(&mut shard_deliveries);
+            invocation.key(key.as_str());
         }
+        invocation.arg(max_count).arg(consumer_group).arg(consumer_name);
+
+        let mut conn = self.connection_manager.clone();
+        let reply: Result<StreamReadReply, RedisError> = invocation.invoke_async(&mut conn).await;
+
+        let stream_key_log = format!("{tenant_id}:{stream_base}:*");
+        let reply = self
+            .recover_nogroup_and_retry(
+                tenant_id,
+                stream_base,
+                &stream_key_log,
+                consumer_group,
+                "poll_once_lua",
+                reply,
+                || async {
+                    let mut retry_conn = self.connection_manager.clone();
+                    invocation.invoke_async(&mut retry_conn).await
+                },
+            )
+            .await?;
+
+        let reply = reply.map_err(|e| {
+            EventError::Consumer(format!("failed to read stream group entries: {e}"))
+        })?;
+
+        let mut shard_deliveries = self.decode_stream_read(consumer_group, reply).await?;
+        deliveries.append(&mut shard_deliveries);
 
         if !deliveries.is_empty() {
-            deliveries.truncate(max_count);
+            // We do not truncate here as we exactly respected max_count via the Lua script
             return Ok(deliveries);
         }
 
-        // Phase 2: Blocking Fallback. Read from a single shard to provide fair coverage over time.
+        // Phase 2: Blocking Fallback. Read from ALL shards simultaneously.
         // pass false to NOACK to ensure at-least-once delivery.
-        // Note: Blocking on a single shard means worst-case latency for a message on a specific
-        // shard can be (SHARD_COUNT * block_timeout) during periods of zero activity.
         let blocking_options = Self::build_read_options(
             consumer_group,
             consumer_name,
-            1,
+            1, // Read up to 1 per shard to minimize max_count violation risk
             Some(self.block_timeout),
             false,
         );
@@ -389,21 +438,21 @@ impl RedisConsumer {
 
         let mut conn = self.connection_manager.clone();
         let reply: Result<StreamReadReply, RedisError> = conn
-            .xread_options(&key_strs[0..1], &id_strs[0..1], &blocking_options)
+            .xread_options(&key_strs, &id_strs, &blocking_options)
             .await;
 
         let reply = self
             .recover_nogroup_and_retry(
                 tenant_id,
                 stream_base,
-                key_strs[0],
+                &stream_key_log,
                 consumer_group,
                 "blocking poll_once",
                 reply,
                 || async {
                     let mut retry_conn = self.connection_manager.clone();
                     retry_conn
-                        .xread_options(&key_strs[0..1], &id_strs[0..1], &blocking_options)
+                        .xread_options(&key_strs, &id_strs, &blocking_options)
                         .await
                 },
             )
@@ -417,7 +466,8 @@ impl RedisConsumer {
             return Ok(Vec::new());
         }
 
-        let deliveries = Self::decode_stream_read(reply)?;
+        let mut blocking_deliveries = self.decode_stream_read(consumer_group, reply).await?;
+        deliveries.append(&mut blocking_deliveries);
         Ok(deliveries)
     }
 
@@ -445,10 +495,14 @@ impl RedisConsumer {
             }
 
             let mut next_stream_id = "0-0".to_string();
+            const MAX_AUTOCLAIM_SCANS: usize = 10;
+            let mut scan_count = 0;
+
             loop {
-                if claimed.len() >= max_count {
+                if claimed.len() >= max_count || scan_count >= MAX_AUTOCLAIM_SCANS {
                     break;
                 }
+                scan_count += 1;
 
                 let remaining = max_count - claimed.len();
                 let mut conn = self.connection_manager.clone();
@@ -501,12 +555,16 @@ impl RedisConsumer {
                     continue;
                 }
 
-                claimed.extend(Self::decode_claimed(
-                    &key,
-                    StreamClaimReply {
-                        ids: claimed_entries,
-                    },
-                )?);
+                claimed.extend(
+                    self.decode_claimed(
+                        &key,
+                        consumer_group,
+                        StreamClaimReply {
+                            ids: claimed_entries,
+                        },
+                    )
+                    .await?,
+                );
 
                 if next_cursor == "0-0" {
                     break;
