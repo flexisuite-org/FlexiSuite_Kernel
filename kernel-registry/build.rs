@@ -1,5 +1,5 @@
 fn main() {
-    // Hard fail if development-only features are enabled in release-like builds.
+    // Hard fail if the development-only feature (`test-utils`) is enabled in release-like builds.
     // PROFILE names can be customized, so guard with DEBUG/OPT_LEVEL instead of
     // relying on CARGO_CFG_DEBUG_ASSERTIONS for build-script execution.
     let release_like = std::env::var("DEBUG")
