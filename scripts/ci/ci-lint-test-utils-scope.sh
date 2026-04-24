@@ -69,6 +69,12 @@ if cargo check --release -p kernel-data --features enable_dev_auth >/tmp/kernel-
   exit 1
 fi
 
+if ! grep -q "enable_dev_auth must not be enabled in release builds" /tmp/kernel-data-enable-dev-auth.log; then
+  echo "Error: kernel-data release build failed for an unexpected reason with enable_dev_auth"
+  cat /tmp/kernel-data-enable-dev-auth.log
+  exit 1
+fi
+
 for pkg in "kernel-api" "kernel-core" "kernel-data" "kernel-registry"; do
   if cargo check --release -p "$pkg" --features test-utils >/tmp/"$pkg"-test-utils.log 2>&1; then
     echo "Error: $pkg release build unexpectedly accepted test-utils"
@@ -81,9 +87,3 @@ for pkg in "kernel-api" "kernel-core" "kernel-data" "kernel-registry"; do
     exit 1
   fi
 done
-
-if ! grep -q "enable_dev_auth must not be enabled in release builds" /tmp/kernel-data-enable-dev-auth.log; then
-  echo "Error: kernel-data release build failed for an unexpected reason with enable_dev_auth"
-  cat /tmp/kernel-data-enable-dev-auth.log
-  exit 1
-fi
