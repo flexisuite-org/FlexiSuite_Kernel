@@ -7,12 +7,15 @@ cd "$ROOT_DIR"
 ALLOWED_FILES=(
   "tests/contract/Cargo.toml"
   "kernel-registry/Cargo.toml"
+  "kernel-core/Cargo.toml"
+  "kernel-api/Cargo.toml"
+  "kernel-data/Cargo.toml"
 )
 
 mapfile -t CARGO_FILES < <(find . -name Cargo.toml -not -path './target/*' | sort)
 
 violations=()
-PACKAGES=("kernel-api" "kernel-core")
+PACKAGES=("kernel-api" "kernel-core" "kernel-data" "kernel-registry")
 for file in "${CARGO_FILES[@]}"; do
   file="${file#./}"
   for pkg in "${PACKAGES[@]}"; do
@@ -32,7 +35,7 @@ for file in "${CARGO_FILES[@]}"; do
 done
 
 if (( ${#violations[@]} > 0 )); then
-  echo "Error: kernel-api/kernel-core test-utils feature is only allowed in:"
+  echo "Error: test-utils feature is only allowed in:"
   for allowed_file in "${ALLOWED_FILES[@]}"; do
     echo "  - $allowed_file"
   done
@@ -42,9 +45,11 @@ if (( ${#violations[@]} > 0 )); then
   exit 1
 fi
 
-echo "OK: kernel-api/kernel-core test-utils usage is limited to approved Cargo.toml files"
+echo "OK: test-utils usage is limited to approved Cargo.toml files"
 cargo check --release -p kernel-api
 cargo check --release -p kernel-core
+cargo check --release -p kernel-data
+cargo check --release -p kernel-registry
 
 if cargo check --release -p kernel-api --features enable_dev_auth >/tmp/kernel-api-enable-dev-auth.log 2>&1; then
   echo "Error: kernel-api release build unexpectedly accepted enable_dev_auth"
@@ -69,3 +74,16 @@ if ! grep -q "enable_dev_auth must not be enabled in release builds" /tmp/kernel
   cat /tmp/kernel-data-enable-dev-auth.log
   exit 1
 fi
+
+for pkg in "kernel-api" "kernel-core" "kernel-data" "kernel-registry"; do
+  if cargo check --release -p "$pkg" --features test-utils >/tmp/"$pkg"-test-utils.log 2>&1; then
+    echo "Error: $pkg release build unexpectedly accepted test-utils"
+    cat /tmp/"$pkg"-test-utils.log
+    exit 1
+  fi
+  if ! grep -Eq "test-utils .*must not be enabled in release builds|test-utils enabled in release profile" /tmp/"$pkg"-test-utils.log; then
+    echo "Error: $pkg release build failed for an unexpected reason with test-utils"
+    cat /tmp/"$pkg"-test-utils.log
+    exit 1
+  fi
+done

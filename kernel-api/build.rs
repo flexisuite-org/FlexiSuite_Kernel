@@ -14,7 +14,7 @@ fn main() {
         );
     }
     if release_like && std::env::var("CARGO_FEATURE_TEST_UTILS").is_ok() {
-        panic!("test-utils must not be enabled in release builds—it bypasses authentication.");
+        panic!("test-utils must not be enabled in release builds—it bypasses security controls.");
     }
     println!("cargo:rerun-if-env-changed=PROFILE");
     println!("cargo:rerun-if-env-changed=DEBUG");
