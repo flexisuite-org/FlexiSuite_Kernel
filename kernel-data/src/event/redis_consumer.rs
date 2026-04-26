@@ -382,86 +382,73 @@ impl RedisConsumer {
         let keys = Self::stream_keys_for_tenant_ordered(tenant_id, stream_base, start_shard);
         let mut deliveries = Vec::new();
 
-        // Phase 1: Non-blocking scan across all shards using a bounded per-shard loop
-        // We use a loop here instead of a Lua script to avoid discarding already-read deliveries
-        // if a subsequent shard returns a NOGROUP error.
+        // Phase 1: Non-blocking scan across shards. Keep Redis calls per-shard so a later
+        // NOGROUP cannot hide already-read entries in the PEL, and avoid Lua server blocking.
         for key in &keys {
             if deliveries.len() >= max_count {
-                break;
+                return Ok(deliveries);
             }
 
-            let remaining = max_count.saturating_sub(deliveries.len());
-            let options =
-                Self::build_read_options(consumer_group, consumer_name, remaining, None, false);
+            let remaining = max_count - deliveries.len();
+            let read_options = Self::build_read_options(
+                consumer_group,
+                consumer_name,
+                remaining,
+                None,
+                false,
+            );
+            let key_strs = [key.as_str()];
+            let id_strs = [">"];
+
             let mut conn = self.connection_manager.clone();
             let reply: Result<StreamReadReply, RedisError> =
-                conn.xread_options(&[key.as_str()], &[">"], &options).await;
+                conn.xread_options(&key_strs, &id_strs, &read_options).await;
 
             let reply = self
                 .recover_nogroup_and_retry(
                     tenant_id,
                     stream_base,
-                    key.as_str(),
+                    key,
                     consumer_group,
                     "poll_once",
                     reply,
                     || async {
                         let mut retry_conn = self.connection_manager.clone();
                         retry_conn
-                            .xread_options(&[key.as_str()], &[">"], &options)
+                            .xread_options(&key_strs, &id_strs, &read_options)
                             .await
                     },
                 )
-                .await;
+                .await?;
 
-            let reply = match reply {
-                Ok(Ok(r)) => r,
-                Ok(Err(e)) => {
-                    if deliveries.is_empty() {
-                        return Err(EventError::Consumer(format!("failed to read stream group entries: {e}")));
-                    }
-                    break;
-                }
-                Err(e) => {
-                    if deliveries.is_empty() {
-                        return Err(e);
-                    }
-                    break;
-                }
-            };
-
-            match self.decode_stream_read(consumer_group, reply).await {
-                Ok(mut shard_deliveries) => {
-                    deliveries.append(&mut shard_deliveries);
-                }
-                Err(e) => {
-                    if deliveries.is_empty() {
-                        return Err(e);
-                    }
-                    break;
-                }
-            }
+            let reply = reply.map_err(|e| {
+                EventError::Consumer(format!("failed to read stream group entries: {e}"))
+            })?;
+            let mut shard_deliveries = self.decode_stream_read(consumer_group, reply).await?;
+            deliveries.append(&mut shard_deliveries);
         }
 
         if !deliveries.is_empty() {
             return Ok(deliveries);
         }
 
-        // Phase 2: Blocking Fallback. Read from a bounded subset of shards.
-        // We bound the subset to at most `max_count` streams to ensure we never read
-        // more than `max_count` messages into the PEL across all shards.
-        // pass false to NOACK to ensure at-least-once delivery.
-        let bounded_keys = &keys[..max_count.min(keys.len())];
+        // Phase 2: Blocking fallback. Read at most one entry from at most max_count shards so
+        // Redis never moves more messages into the PEL than this poll can return.
         let blocking_options = Self::build_read_options(
             consumer_group,
             consumer_name,
-            1, // Read up to 1 per shard
+            1,
             Some(self.block_timeout),
             false,
         );
 
-        let key_strs: Vec<&str> = bounded_keys.iter().map(|s| s.as_str()).collect();
-        let id_strs: Vec<&str> = vec![">"; bounded_keys.len()];
+        let blocking_key_count = max_count.min(keys.len());
+        let key_strs: Vec<&str> = keys
+            .iter()
+            .take(blocking_key_count)
+            .map(|s| s.as_str())
+            .collect();
+        let id_strs: Vec<&str> = vec![">"; key_strs.len()];
 
         let mut conn = self.connection_manager.clone();
         let reply: Result<StreamReadReply, RedisError> = conn
@@ -494,10 +481,7 @@ impl RedisConsumer {
             return Ok(Vec::new());
         }
 
-        let mut blocking_deliveries = self.decode_stream_read(consumer_group, reply).await?;
-        deliveries.append(&mut blocking_deliveries);
-        deliveries.truncate(max_count);
-        Ok(deliveries)
+        self.decode_stream_read(consumer_group, reply).await
     }
 
     async fn claim_pending_once(
