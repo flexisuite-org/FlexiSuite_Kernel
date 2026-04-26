@@ -154,7 +154,13 @@ impl RedisConsumer {
                             error = %e,
                             "Tenant isolation violation detected while decoding stream entry; refusing to force-ack"
                         );
-                        return Err(e);
+                        if deliveries.is_empty() {
+                            return Err(e);
+                        } else {
+                            // Preserve earlier successfully decoded deliveries from this batch so they aren't orphaned in PEL.
+                            // The consumer will retry this isolation-violating message on the next poll.
+                            return Ok(deliveries);
+                        }
                     }
                     Err(e) => {
                         tracing::error!(
@@ -205,7 +211,13 @@ impl RedisConsumer {
                         error = %e,
                         "Tenant isolation violation detected while decoding claimed entry; refusing to force-ack"
                     );
-                    return Err(e);
+                    if deliveries.is_empty() {
+                        return Err(e);
+                    } else {
+                        // Preserve earlier successfully decoded deliveries from this batch so they aren't orphaned in PEL.
+                        // The consumer will retry this isolation-violating message on the next poll.
+                        return Ok(deliveries);
+                    }
                 }
                 Err(e) => {
                     tracing::error!(
