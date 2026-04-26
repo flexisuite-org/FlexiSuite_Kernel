@@ -365,3 +365,47 @@ async fn test_poison_pill_is_acked() {
     let total_pending: i64 = redis::FromRedisValue::from_redis_value(&pending_arr[0]).unwrap();
     assert_eq!(total_pending, 0, "Poison pill must be XACKed (PEL should be empty)");
 }
+
+#[tokio::test]
+async fn test_phase_2_respects_max_count() {
+    let (node, client) = start_redis_server().await;
+    let tenant_id = TenantId::new("tenant-phase2").unwrap();
+    let stream_base = "test_phase2_stream";
+    let consumer_group = "test_group";
+
+    let consumer = RedisConsumer::new(client.clone()).await.expect("consumer");
+    let mut conn = client.get_connection_manager().await.unwrap();
+
+    // Spawn a task to inject events into multiple shards after a delay (so Phase 1 misses them)
+    let tenant_id_clone = tenant_id.clone();
+    let mut conn_clone = conn.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        for i in 0..5 {
+            let shard_key = format!("{}:{}:{}", tenant_id_clone, "test_phase2_stream", i);
+            let _: () = redis::cmd("XADD")
+                .arg(&shard_key)
+                .arg("*")
+                .arg("data")
+                .arg(serde_json::to_string(&EventEnvelope {
+                    event_id: Uuid::now_v7(),
+                    tenant_id: tenant_id_clone.clone(),
+                    order_mode: OrderMode::Entity { entity_id: Uuid::now_v7(), seq: Some(1) },
+                    payload: serde_json::json!({ "seq": 1 }),
+                    created_at: Utc::now(),
+                    event_type: "test".to_string(),
+                }).unwrap())
+                .query_async(&mut conn_clone)
+                .await
+                .unwrap();
+        }
+    });
+
+    // Read with max_count = 2 using blocking read (Phase 2 will catch it)
+    let deliveries = consumer
+        .poll(&tenant_id, stream_base, consumer_group, "consumer-1", 2)
+        .await
+        .expect("poll");
+
+    assert!(deliveries.len() <= 2, "must not exceed max_count");
+}

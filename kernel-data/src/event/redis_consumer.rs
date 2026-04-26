@@ -382,87 +382,93 @@ impl RedisConsumer {
         let keys = Self::stream_keys_for_tenant_ordered(tenant_id, stream_base, start_shard);
         let mut deliveries = Vec::new();
 
-        // Phase 1: Non-blocking scan across all shards using Lua script to avoid N+1 queries.
-        let script = redis::Script::new(
-            r#"
-            local max_count = tonumber(ARGV[1])
-            local group = ARGV[2]
-            local consumer = ARGV[3]
-            local result = {}
-            local total_read = 0
-
-            for i, key in ipairs(KEYS) do
-                if total_read >= max_count then
-                    break
-                end
-                local remaining = max_count - total_read
-                local reply = redis.pcall('XREADGROUP', 'GROUP', group, consumer, 'COUNT', remaining, 'STREAMS', key, '>')
-                if type(reply) == 'table' and reply.err then
-                    return reply
-                elseif reply then
-                    table.insert(result, reply[1])
-                    total_read = total_read + #reply[1][2]
-                end
-            end
-            return result
-            "#,
-        );
-
-        let mut invocation = script.prepare_invoke();
+        // Phase 1: Non-blocking scan across all shards using a bounded per-shard loop
+        // We use a loop here instead of a Lua script to avoid discarding already-read deliveries
+        // if a subsequent shard returns a NOGROUP error.
         for key in &keys {
-            invocation.key(key.as_str());
+            if deliveries.len() >= max_count {
+                break;
+            }
+
+            let remaining = max_count.saturating_sub(deliveries.len());
+            let options =
+                Self::build_read_options(consumer_group, consumer_name, remaining, None, false);
+            let mut conn = self.connection_manager.clone();
+            let reply: Result<StreamReadReply, RedisError> =
+                conn.xread_options(&[key.as_str()], &[">"], &options).await;
+
+            let reply = self
+                .recover_nogroup_and_retry(
+                    tenant_id,
+                    stream_base,
+                    key.as_str(),
+                    consumer_group,
+                    "poll_once",
+                    reply,
+                    || async {
+                        let mut retry_conn = self.connection_manager.clone();
+                        retry_conn
+                            .xread_options(&[key.as_str()], &[">"], &options)
+                            .await
+                    },
+                )
+                .await;
+
+            let reply = match reply {
+                Ok(Ok(r)) => r,
+                Ok(Err(e)) => {
+                    if deliveries.is_empty() {
+                        return Err(EventError::Consumer(format!("failed to read stream group entries: {e}")));
+                    }
+                    break;
+                }
+                Err(e) => {
+                    if deliveries.is_empty() {
+                        return Err(e);
+                    }
+                    break;
+                }
+            };
+
+            match self.decode_stream_read(consumer_group, reply).await {
+                Ok(mut shard_deliveries) => {
+                    deliveries.append(&mut shard_deliveries);
+                }
+                Err(e) => {
+                    if deliveries.is_empty() {
+                        return Err(e);
+                    }
+                    break;
+                }
+            }
         }
-        invocation.arg(max_count).arg(consumer_group).arg(consumer_name);
-
-        let mut conn = self.connection_manager.clone();
-        let reply: Result<StreamReadReply, RedisError> = invocation.invoke_async(&mut conn).await;
-
-        let stream_key_log = format!("{tenant_id}:{stream_base}:*");
-        let reply = self
-            .recover_nogroup_and_retry(
-                tenant_id,
-                stream_base,
-                &stream_key_log,
-                consumer_group,
-                "poll_once_lua",
-                reply,
-                || async {
-                    let mut retry_conn = self.connection_manager.clone();
-                    invocation.invoke_async(&mut retry_conn).await
-                },
-            )
-            .await?;
-
-        let reply = reply.map_err(|e| {
-            EventError::Consumer(format!("failed to read stream group entries: {e}"))
-        })?;
-
-        let mut shard_deliveries = self.decode_stream_read(consumer_group, reply).await?;
-        deliveries.append(&mut shard_deliveries);
 
         if !deliveries.is_empty() {
-            // We do not truncate here as we exactly respected max_count via the Lua script
             return Ok(deliveries);
         }
 
-        // Phase 2: Blocking Fallback. Read from ALL shards simultaneously.
+        // Phase 2: Blocking Fallback. Read from a bounded subset of shards.
+        // We bound the subset to at most `max_count` streams to ensure we never read
+        // more than `max_count` messages into the PEL across all shards.
         // pass false to NOACK to ensure at-least-once delivery.
+        let bounded_keys = &keys[..max_count.min(keys.len())];
         let blocking_options = Self::build_read_options(
             consumer_group,
             consumer_name,
-            1, // Read up to 1 per shard to minimize max_count violation risk
+            1, // Read up to 1 per shard
             Some(self.block_timeout),
             false,
         );
 
-        let key_strs: Vec<&str> = keys.iter().map(|s| s.as_str()).collect();
-        let id_strs: Vec<&str> = vec![">"; keys.len()];
+        let key_strs: Vec<&str> = bounded_keys.iter().map(|s| s.as_str()).collect();
+        let id_strs: Vec<&str> = vec![">"; bounded_keys.len()];
 
         let mut conn = self.connection_manager.clone();
         let reply: Result<StreamReadReply, RedisError> = conn
             .xread_options(&key_strs, &id_strs, &blocking_options)
             .await;
 
+        let stream_key_log = format!("{tenant_id}:{stream_base}:*");
         let reply = self
             .recover_nogroup_and_retry(
                 tenant_id,
