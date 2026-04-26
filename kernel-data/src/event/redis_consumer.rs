@@ -150,7 +150,18 @@ impl RedisConsumer {
                             "Poison pill detected: failed to decode stream entry. Force-acking to unblock consumer."
                         );
                         let mut conn = self.connection_manager.clone();
-                        let _: Result<i32, _> = conn.xack(&key.key, consumer_group, &[&stream_id.id]).await;
+                        if let Err(ack_err) = conn
+                            .xack::<_, _, _, i32>(&key.key, consumer_group, &[&stream_id.id])
+                            .await
+                        {
+                            tracing::warn!(
+                                stream_key = %key.key,
+                                consumer_group = %consumer_group,
+                                delivery_id = %stream_id.id,
+                                error = %ack_err,
+                                "Failed to force-ack poison pill; entry will be redelivered"
+                            );
+                        }
                     }
                 }
             }
@@ -176,7 +187,18 @@ impl RedisConsumer {
                         "Poison pill detected in claimed entries: failed to decode. Force-acking to unblock consumer."
                     );
                     let mut conn = self.connection_manager.clone();
-                    let _: Result<i32, _> = conn.xack(stream_key, consumer_group, &[&stream_id.id]).await;
+                    if let Err(ack_err) = conn
+                        .xack::<_, _, _, i32>(stream_key, consumer_group, &[&stream_id.id])
+                        .await
+                    {
+                        tracing::warn!(
+                            stream_key = %stream_key,
+                            consumer_group = %consumer_group,
+                            delivery_id = %stream_id.id,
+                            error = %ack_err,
+                            "Failed to force-ack poison pill; entry will be redelivered"
+                        );
+                    }
                 }
             }
         }
@@ -322,7 +344,7 @@ impl RedisConsumer {
     {
         if let Err(error) = &reply {
             // Redis returns NOGROUP when the consumer group does not exist.
-            if error.code() == Some("NOGROUP") {
+            if Self::is_nogroup_error(error) {
                 tracing::warn!(
                     tenant_id = %tenant_id,
                     stream_key = %stream_key,
@@ -468,6 +490,7 @@ impl RedisConsumer {
 
         let mut blocking_deliveries = self.decode_stream_read(consumer_group, reply).await?;
         deliveries.append(&mut blocking_deliveries);
+        deliveries.truncate(max_count);
         Ok(deliveries)
     }
 
