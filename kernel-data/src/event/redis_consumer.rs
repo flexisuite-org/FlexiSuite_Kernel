@@ -143,9 +143,14 @@ impl RedisConsumer {
                 match Self::decode_stream_entry(&key.key, &stream_id) {
                     Ok(delivery) => deliveries.push(delivery),
                     Err(e) if Self::is_tenant_isolation_error(&e) => {
-                        tracing::error!(
+                        // Metrics note: `kernel-data` currently lacks an established metrics facility (no prometheus crate).
+                        // Instead of adding a new dependency just for this PR, we rely on tracing logs for
+                        // observability of tenant isolation violations. A follow-up issue should add proper metrics
+                        // (e.g., `kernel.event.tenant_isolation_violation_total`).
+                        tracing::warn!(
                             stream_key = %key.key,
                             delivery_id = %stream_id.id,
+                            dropped_deliveries = deliveries.len(),
                             error = %e,
                             "Tenant isolation violation detected while decoding stream entry; refusing to force-ack"
                         );
@@ -189,9 +194,14 @@ impl RedisConsumer {
             match Self::decode_stream_entry(stream_key, &stream_id) {
                 Ok(delivery) => deliveries.push(delivery),
                 Err(e) if Self::is_tenant_isolation_error(&e) => {
-                    tracing::error!(
+                    // Metrics note: `kernel-data` currently lacks an established metrics facility (no prometheus crate).
+                    // Instead of adding a new dependency just for this PR, we rely on tracing logs for
+                    // observability of tenant isolation violations. A follow-up issue should add proper metrics
+                    // (e.g., `kernel.event.tenant_isolation_violation_total`).
+                    tracing::warn!(
                         stream_key = %stream_key,
                         delivery_id = %stream_id.id,
+                        dropped_deliveries = deliveries.len(),
                         error = %e,
                         "Tenant isolation violation detected while decoding claimed entry; refusing to force-ack"
                     );
