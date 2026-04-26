@@ -142,6 +142,15 @@ impl RedisConsumer {
             for stream_id in key.ids {
                 match Self::decode_stream_entry(&key.key, &stream_id) {
                     Ok(delivery) => deliveries.push(delivery),
+                    Err(e) if Self::is_tenant_isolation_error(&e) => {
+                        tracing::error!(
+                            stream_key = %key.key,
+                            delivery_id = %stream_id.id,
+                            error = %e,
+                            "Tenant isolation violation detected while decoding stream entry; refusing to force-ack"
+                        );
+                        return Err(e);
+                    }
                     Err(e) => {
                         tracing::error!(
                             stream_key = %key.key,
@@ -179,6 +188,15 @@ impl RedisConsumer {
         for stream_id in reply.ids {
             match Self::decode_stream_entry(stream_key, &stream_id) {
                 Ok(delivery) => deliveries.push(delivery),
+                Err(e) if Self::is_tenant_isolation_error(&e) => {
+                    tracing::error!(
+                        stream_key = %stream_key,
+                        delivery_id = %stream_id.id,
+                        error = %e,
+                        "Tenant isolation violation detected while decoding claimed entry; refusing to force-ack"
+                    );
+                    return Err(e);
+                }
                 Err(e) => {
                     tracing::error!(
                         stream_key = %stream_key,
@@ -263,6 +281,10 @@ impl RedisConsumer {
 
     fn is_nogroup_error(error: &RedisError) -> bool {
         error.code() == Some("NOGROUP") || error.to_string().contains("NOGROUP")
+    }
+
+    fn is_tenant_isolation_error(error: &EventError) -> bool {
+        matches!(error, EventError::Consumer(message) if message.contains("does not match tenant_id"))
     }
 
     fn consumer_group_cache_key(
