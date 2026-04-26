@@ -417,8 +417,10 @@ impl RedisConsumer {
         let keys = Self::stream_keys_for_tenant_ordered(tenant_id, stream_base, start_shard);
         let mut deliveries = Vec::new();
 
-        // Phase 1: Non-blocking scan across shards. Keep Redis calls per-shard so a later
-        // NOGROUP cannot hide already-read entries in the PEL, and avoid Lua server blocking.
+        // Phase 1: Non-blocking scan across shards. We intentionally use per-shard `xread_options`
+        // rather than Lua consolidation to avoid Lua server blocking, preserve per-shard NOGROUP
+        // recovery semantics, and avoid partial Lua-script PEL orphaning where earlier read entries
+        // are discarded if a later shard throws an error.
         for key in &keys {
             if deliveries.len() >= max_count {
                 return Ok(deliveries);
