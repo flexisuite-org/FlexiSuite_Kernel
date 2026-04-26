@@ -290,6 +290,9 @@ impl RedisConsumer {
     }
 
     fn is_nogroup_error(error: &RedisError) -> bool {
+        // Check `error.code()` for standard native Redis NOGROUP errors, and fallback
+        // to searching the string representation to handle cases where Lua `pcall`
+        // wraps the NOGROUP error in a generic ERR code.
         error.code() == Some("NOGROUP") || error.to_string().contains("NOGROUP")
     }
 
@@ -513,6 +516,9 @@ impl RedisConsumer {
             .xread_options(&key_strs, &id_strs, &blocking_options)
             .await;
 
+        // We pass a synthetic stream_key (`*`) to `recover_nogroup_and_retry` for logging
+        // purposes, as Phase 2 uses a single `XREAD` over multiple shard keys. This ensures
+        // the NOGROUP recovery logs a logical aggregate stream rather than a misleading single shard.
         let stream_key_log = format!("{tenant_id}:{stream_base}:*");
         let reply = self
             .recover_nogroup_and_retry(
@@ -566,6 +572,9 @@ impl RedisConsumer {
             }
 
             let mut next_stream_id = "0-0".to_string();
+
+            // Limit loop iterations to prevent an infinite empty scan (DoS loop) when
+            // the pending entries list (PEL) is filled with messages that are not yet idle enough.
             const MAX_AUTOCLAIM_SCANS: usize = 10;
             let mut scan_count = 0;
 
