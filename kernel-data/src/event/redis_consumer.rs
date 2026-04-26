@@ -419,11 +419,25 @@ impl RedisConsumer {
                             .await
                     },
                 )
-                .await?;
+                .await;
 
-            let reply = reply.map_err(|e| {
-                EventError::Consumer(format!("failed to read stream group entries: {e}"))
-            })?;
+            let reply = match reply {
+                Ok(Ok(reply)) => reply,
+                Ok(Err(e)) => {
+                    if deliveries.is_empty() {
+                        return Err(EventError::Consumer(format!(
+                            "failed to read stream group entries: {e}"
+                        )));
+                    }
+                    break;
+                }
+                Err(e) => {
+                    if deliveries.is_empty() {
+                        return Err(e);
+                    }
+                    break;
+                }
+            };
             let mut shard_deliveries = self.decode_stream_read(consumer_group, reply).await?;
             deliveries.append(&mut shard_deliveries);
         }
