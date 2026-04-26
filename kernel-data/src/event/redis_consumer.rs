@@ -284,7 +284,7 @@ impl RedisConsumer {
     }
 
     fn is_tenant_isolation_error(error: &EventError) -> bool {
-        matches!(error, EventError::Consumer(message) if message.contains("does not match tenant_id"))
+        matches!(error, EventError::TenantIsolation { .. })
     }
 
     fn consumer_group_cache_key(
@@ -451,12 +451,24 @@ impl RedisConsumer {
                             "failed to read stream group entries: {e}"
                         )));
                     }
+                    tracing::warn!(
+                        stream_key = %key,
+                        error = %e,
+                        delivered_count = deliveries.len(),
+                        "Stopping shard scan after partial deliveries because a later shard read failed"
+                    );
                     break;
                 }
                 Err(e) => {
                     if deliveries.is_empty() {
                         return Err(e);
                     }
+                    tracing::warn!(
+                        stream_key = %key,
+                        error = %e,
+                        delivered_count = deliveries.len(),
+                        "Stopping shard scan after partial deliveries because NOGROUP recovery failed"
+                    );
                     break;
                 }
             };
@@ -844,7 +856,7 @@ mod tests {
 
         let err = RedisConsumer::decode_stream_entry("tenant-2:events:4", &stream_id)
             .expect_err("tenant mismatch must fail");
-        assert!(matches!(err, EventError::Consumer(_)));
+        assert!(matches!(err, EventError::TenantIsolation { .. }));
     }
 
     #[test]

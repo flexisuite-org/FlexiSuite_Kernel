@@ -16,6 +16,11 @@ pub enum EventError {
     Producer(String),
     #[error("consumer error: {0}")]
     Consumer(String),
+    #[error("tenant isolation violation: stream_key '{stream_key}' does not match tenant_id '{tenant_id}'")]
+    TenantIsolation {
+        stream_key: String,
+        tenant_id: TenantId,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -141,10 +146,10 @@ pub const SHARD_COUNT: u64 = 64;
 pub fn validate_stream_key(stream_key: &str, tenant_id: &TenantId) -> Result<(), EventError> {
     let prefix = format!("{}:", tenant_id);
     if !stream_key.starts_with(&prefix) {
-        return Err(EventError::Consumer(format!(
-            "stream_key '{}' does not match tenant_id '{}'",
-            stream_key, tenant_id
-        )));
+        return Err(EventError::TenantIsolation {
+            stream_key: stream_key.to_string(),
+            tenant_id: tenant_id.clone(),
+        });
     }
     Ok(())
 }
@@ -288,7 +293,9 @@ mod tests {
         assert!(validate_stream_key("tenant_a:orders:0", &tenant_id).is_ok());
 
         // Invalid cases
-        assert!(validate_stream_key("tenant_b:orders:0", &tenant_id).is_err());
+        let err = validate_stream_key("tenant_b:orders:0", &tenant_id)
+            .expect_err("tenant mismatch must fail");
+        assert!(matches!(err, EventError::TenantIsolation { .. }));
         assert!(validate_stream_key("orders:0", &tenant_id).is_err());
         assert!(validate_stream_key("tenant_a_suffix:orders:0", &tenant_id).is_err());
 
