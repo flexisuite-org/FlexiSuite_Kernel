@@ -7,6 +7,7 @@ use thiserror::Error;
 use uuid::Uuid;
 
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum EventError {
     #[error("serialization error: {0}")]
     Serialization(#[from] serde_json::Error),
@@ -141,8 +142,9 @@ pub struct Delivery {
 
 pub const SHARD_COUNT: u64 = 64;
 
-/// Validates that a stream_key matches the given tenant_id.
-/// Returns Ok(()) if the key starts with "{tenant_id}:", Err(EventError) otherwise.
+/// Validates that the given stream key corresponds to the specified tenant ID.
+/// Returns `Ok(())` if the `stream_key` starts with `"{tenant_id}:"`.
+/// Returns `EventError::TenantIsolation { stream_key, tenant_id }` if there is a mismatch.
 pub fn validate_stream_key(stream_key: &str, tenant_id: &TenantId) -> Result<(), EventError> {
     let prefix = format!("{}:", tenant_id);
     if !stream_key.starts_with(&prefix) {
@@ -295,7 +297,13 @@ mod tests {
         // Invalid cases
         let err = validate_stream_key("tenant_b:orders:0", &tenant_id)
             .expect_err("tenant mismatch must fail");
-        assert!(matches!(err, EventError::TenantIsolation { .. }));
+        match err {
+            EventError::TenantIsolation { stream_key, tenant_id: err_tenant_id } => {
+                assert_eq!(stream_key, "tenant_b:orders:0");
+                assert_eq!(err_tenant_id, tenant_id);
+            }
+            _ => panic!("Expected TenantIsolation error"),
+        }
         assert!(validate_stream_key("orders:0", &tenant_id).is_err());
         assert!(validate_stream_key("tenant_a_suffix:orders:0", &tenant_id).is_err());
 
