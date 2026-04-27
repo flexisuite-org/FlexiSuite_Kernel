@@ -499,8 +499,23 @@ impl RedisConsumer {
                     break;
                 }
             };
-            let mut shard_deliveries = self.decode_stream_read(consumer_group, reply).await?;
-            deliveries.append(&mut shard_deliveries);
+            match self.decode_stream_read(consumer_group, reply).await {
+                Ok(mut shard_deliveries) => {
+                    deliveries.append(&mut shard_deliveries);
+                }
+                Err(e) => {
+                    if deliveries.is_empty() {
+                        return Err(e);
+                    }
+                    tracing::warn!(
+                        stream_key = %key,
+                        error = %e,
+                        delivered_count = deliveries.len(),
+                        "Stopping shard scan after partial deliveries because a later shard decode failed"
+                    );
+                    break;
+                }
+            }
         }
 
         if !deliveries.is_empty() {
@@ -593,7 +608,20 @@ impl RedisConsumer {
             let mut scan_count = 0;
 
             loop {
-                if claimed.len() >= max_count || scan_count >= MAX_AUTOCLAIM_SCANS {
+                if claimed.len() >= max_count {
+                    break;
+                }
+                if scan_count >= MAX_AUTOCLAIM_SCANS {
+                    tracing::warn!(
+                        tenant_id = %tenant_id,
+                        stream_key = %key,
+                        consumer_group = %consumer_group,
+                        scan_count = scan_count,
+                        max_autoclaim_scans = MAX_AUTOCLAIM_SCANS,
+                        claimed_count = claimed.len(),
+                        max_count = max_count,
+                        "MAX_AUTOCLAIM_SCANS exhausted before reaching max_count; stopping autoclaim scan for this shard to prevent DoS loop"
+                    );
                     break;
                 }
                 scan_count += 1;
