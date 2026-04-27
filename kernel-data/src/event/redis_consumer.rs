@@ -150,7 +150,7 @@ impl RedisConsumer {
                         tracing::warn!(
                             stream_key = %key.key,
                             delivery_id = %stream_id.id,
-                            dropped_deliveries = deliveries.len(),
+                            preserved_deliveries = deliveries.len(),
                             error = %e,
                             "Tenant isolation violation detected while decoding stream entry; refusing to force-ack"
                         );
@@ -207,7 +207,7 @@ impl RedisConsumer {
                     tracing::warn!(
                         stream_key = %stream_key,
                         delivery_id = %stream_id.id,
-                        dropped_deliveries = deliveries.len(),
+                        preserved_deliveries = deliveries.len(),
                         error = %e,
                         "Tenant isolation violation detected while decoding claimed entry; refusing to force-ack"
                     );
@@ -302,10 +302,7 @@ impl RedisConsumer {
     }
 
     fn is_nogroup_error(error: &RedisError) -> bool {
-        // Check `error.code()` for standard native Redis NOGROUP errors, and fallback
-        // to searching the string representation to handle cases where Lua `pcall`
-        // wraps the NOGROUP error in a generic ERR code.
-        error.code() == Some("NOGROUP") || error.to_string().contains("NOGROUP")
+        error.code() == Some("NOGROUP")
     }
 
     fn is_tenant_isolation_error(error: &EventError) -> bool {
@@ -677,16 +674,23 @@ impl RedisConsumer {
                     continue;
                 }
 
-                claimed.extend(
-                    self.decode_claimed(
-                        &key,
-                        consumer_group,
-                        StreamClaimReply {
-                            ids: claimed_entries,
-                        },
-                    )
-                    .await?,
-                );
+                match self.decode_claimed(
+                    &key,
+                    consumer_group,
+                    StreamClaimReply {
+                        ids: claimed_entries,
+                    },
+                ).await {
+                    Ok(mut dec_claimed) => claimed.append(&mut dec_claimed),
+                    Err(e) => {
+                        if claimed.is_empty() {
+                            return Err(e);
+                        }
+                        // Preserve previously claimed messages rather than discarding them,
+                        // returning early so the isolation error isn't silently swallowed.
+                        return Ok(claimed);
+                    }
+                }
 
                 if next_cursor == "0-0" {
                     break;
