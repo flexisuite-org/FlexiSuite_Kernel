@@ -150,18 +150,13 @@ impl RedisConsumer {
                         tracing::warn!(
                             stream_key = %key.key,
                             delivery_id = %stream_id.id,
-                            preserved_deliveries = deliveries.len(),
                             error = %e,
                             "Tenant isolation violation detected while decoding stream entry; refusing to force-ack"
                         );
-                        if deliveries.is_empty() {
-                            return Err(e);
-                        } else {
-                            // Preserve earlier successfully decoded deliveries from this batch so they aren't orphaned in the PEL.
-                            // The isolation-violating message is intentionally retained in the PEL for observability,
-                            // but is intentionally NOT consumed (fail-closed security design).
-                            return Ok(deliveries);
-                        }
+                        // The isolation-violating message is intentionally retained in the PEL for observability,
+                        // but is intentionally NOT consumed (fail-closed security design).
+                        // We continue to the next entry to avoid orphaning subsequent valid entries in the PEL.
+                        continue;
                     }
                     Err(e) => {
                         tracing::error!(
@@ -182,12 +177,10 @@ impl RedisConsumer {
                                 error = %ack_err,
                                 "Failed to force-ack poison pill; entry will be redelivered"
                             );
-                            let err = EventError::Consumer(format!("failed to force-ack poison pill: {}", ack_err));
-                            if deliveries.is_empty() {
-                                return Err(err);
-                            }
-                            return Ok(deliveries);
                         }
+                        // Continue to the next entry whether xack succeeded or failed,
+                        // to avoid orphaning subsequent valid entries in the PEL.
+                        continue;
                     }
                 }
             }
@@ -213,18 +206,13 @@ impl RedisConsumer {
                     tracing::warn!(
                         stream_key = %stream_key,
                         delivery_id = %stream_id.id,
-                        preserved_deliveries = deliveries.len(),
                         error = %e,
                         "Tenant isolation violation detected while decoding claimed entry; refusing to force-ack"
                     );
-                    if deliveries.is_empty() {
-                        return Err(e);
-                    } else {
-                        // Preserve earlier successfully decoded deliveries from this batch so they aren't orphaned in the PEL.
-                        // The isolation-violating message is intentionally retained in the PEL for observability,
-                        // but is intentionally NOT consumed (fail-closed security design).
-                        return Ok(deliveries);
-                    }
+                    // The isolation-violating message is intentionally retained in the PEL for observability,
+                    // but is intentionally NOT consumed (fail-closed security design).
+                    // We continue to the next entry to avoid orphaning subsequent valid entries in the PEL.
+                    continue;
                 }
                 Err(e) => {
                     tracing::error!(
@@ -245,12 +233,10 @@ impl RedisConsumer {
                             error = %ack_err,
                             "Failed to force-ack poison pill; entry will be redelivered"
                         );
-                        let err = EventError::Consumer(format!("failed to force-ack poison pill: {}", ack_err));
-                        if deliveries.is_empty() {
-                            return Err(err);
-                        }
-                        return Ok(deliveries);
                     }
+                    // Continue to the next entry whether xack succeeded or failed,
+                    // to avoid orphaning subsequent valid entries in the PEL.
+                    continue;
                 }
             }
         }

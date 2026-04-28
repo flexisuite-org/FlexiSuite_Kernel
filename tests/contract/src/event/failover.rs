@@ -414,3 +414,149 @@ async fn test_phase_2_respects_max_count() {
     assert!(!deliveries.is_empty(), "must read at least one message");
     assert!(deliveries.len() <= 2, "must not exceed max_count");
 }
+
+
+#[tokio::test]
+async fn test_mid_batch_poison_pill_preserves_surrounding_valid_entries() {
+    let (node, client) = start_redis_server().await;
+    let tenant_id = TenantId::new("tenant-mid-poison").unwrap();
+    let stream_base = "test_mid_poison_stream";
+    let consumer_group = "test_group";
+
+    let mut conn = client.get_connection_manager().await.unwrap();
+    let shard_key = format!("{}:{}:0", tenant_id, stream_base);
+
+    // Create the group
+    let _: () = redis::cmd("XGROUP")
+        .arg("CREATE")
+        .arg(&shard_key)
+        .arg(consumer_group)
+        .arg("0")
+        .arg("MKSTREAM")
+        .query_async(&mut conn)
+        .await
+        .unwrap();
+
+    let mut pipe = redis::pipe();
+
+    // Valid 1
+    pipe.cmd("XADD").arg(&shard_key).arg("*").arg("data").arg(serde_json::to_string(&EventEnvelope {
+        event_id: Uuid::now_v7(), tenant_id: tenant_id.clone(), order_mode: OrderMode::Causality { key: "a".to_string(), seq: Some(1) },
+        payload: serde_json::json!({ "seq": 1 }), created_at: Utc::now(), event_type: "t".to_string(),
+    }).unwrap());
+
+    // Poison
+    pipe.cmd("XADD").arg(&shard_key).arg("*").arg("data").arg("invalid_json_payload");
+
+    // Valid 2
+    pipe.cmd("XADD").arg(&shard_key).arg("*").arg("data").arg(serde_json::to_string(&EventEnvelope {
+        event_id: Uuid::now_v7(), tenant_id: tenant_id.clone(), order_mode: OrderMode::Causality { key: "a".to_string(), seq: Some(2) },
+        payload: serde_json::json!({ "seq": 2 }), created_at: Utc::now(), event_type: "t".to_string(),
+    }).unwrap());
+
+    pipe.query_async::<()>(&mut conn).await.unwrap();
+
+    let consumer = RedisConsumer::new(client.clone()).await.unwrap();
+    let deliveries = consumer
+        .poll(&tenant_id, stream_base, consumer_group, "consumer-1", 10)
+        .await
+        .expect("poll");
+
+    assert_eq!(deliveries.len(), 2, "must decode and return exactly both valid messages, skipping poison");
+
+    // Check pending list
+    let pending: redis::Value = redis::cmd("XPENDING")
+        .arg(&shard_key)
+        .arg(consumer_group)
+        .query_async(&mut conn)
+        .await
+        .unwrap();
+    let pending_arr = match pending { redis::Value::Array(ref arr) => arr, _ => panic!("Expected array") };
+    let total_pending: i64 = redis::FromRedisValue::from_redis_value(&pending_arr[0]).unwrap();
+
+    // The valid entries are NOT auto-acked by poll! Poll just returns them.
+    // XREADGROUP adds them to PEL. The caller must call consumer.ack().
+    // We should ack the valid ones to prove they can be acked and verify the poison one was auto-xacked.
+    consumer.ack(&tenant_id, &shard_key, consumer_group, &deliveries[0].delivery_id).await.unwrap();
+    consumer.ack(&tenant_id, &shard_key, consumer_group, &deliveries[1].delivery_id).await.unwrap();
+
+    let pending: redis::Value = redis::cmd("XPENDING")
+        .arg(&shard_key)
+        .arg(consumer_group)
+        .query_async(&mut conn)
+        .await
+        .unwrap();
+    let pending_arr = match pending { redis::Value::Array(ref arr) => arr, _ => panic!("Expected array") };
+    let total_pending: i64 = redis::FromRedisValue::from_redis_value(&pending_arr[0]).unwrap();
+
+    // Poison is force-acked, valid entries are explicitly acked. PEL must be empty!
+    assert_eq!(total_pending, 0, "PEL should be empty since poison pill was force-acked");
+}
+
+#[tokio::test]
+async fn test_mid_batch_tenant_mismatch_preserves_surrounding_valid_entries() {
+    let (node, client) = start_redis_server().await;
+    let tenant_id = TenantId::new("tenant-mid-iso").unwrap();
+    let stream_base = "test_mid_iso_stream";
+    let consumer_group = "test_group";
+
+    let mut conn = client.get_connection_manager().await.unwrap();
+    let shard_key = format!("{}:{}:0", tenant_id, stream_base);
+
+    // Create the group
+    let _: () = redis::cmd("XGROUP")
+        .arg("CREATE")
+        .arg(&shard_key)
+        .arg(consumer_group)
+        .arg("0")
+        .arg("MKSTREAM")
+        .query_async(&mut conn)
+        .await
+        .unwrap();
+
+    let mut pipe = redis::pipe();
+
+    // Valid 1
+    pipe.cmd("XADD").arg(&shard_key).arg("*").arg("data").arg(serde_json::to_string(&EventEnvelope {
+        event_id: Uuid::now_v7(), tenant_id: tenant_id.clone(), order_mode: OrderMode::Causality { key: "a".to_string(), seq: Some(1) },
+        payload: serde_json::json!({ "seq": 1 }), created_at: Utc::now(), event_type: "t".to_string(),
+    }).unwrap());
+
+    // Tenant mismatch
+    pipe.cmd("XADD").arg(&shard_key).arg("*").arg("data").arg(serde_json::to_string(&EventEnvelope {
+        event_id: Uuid::now_v7(), tenant_id: TenantId::new("tenant-other").unwrap(), order_mode: OrderMode::Causality { key: "a".to_string(), seq: Some(1) },
+        payload: serde_json::json!({ "seq": 1 }), created_at: Utc::now(), event_type: "t".to_string(),
+    }).unwrap());
+
+    // Valid 2
+    pipe.cmd("XADD").arg(&shard_key).arg("*").arg("data").arg(serde_json::to_string(&EventEnvelope {
+        event_id: Uuid::now_v7(), tenant_id: tenant_id.clone(), order_mode: OrderMode::Causality { key: "a".to_string(), seq: Some(2) },
+        payload: serde_json::json!({ "seq": 2 }), created_at: Utc::now(), event_type: "t".to_string(),
+    }).unwrap());
+
+    pipe.query_async::<()>(&mut conn).await.unwrap();
+
+    let consumer = RedisConsumer::new(client.clone()).await.unwrap();
+    let deliveries = consumer
+        .poll(&tenant_id, stream_base, consumer_group, "consumer-1", 10)
+        .await
+        .expect("poll");
+
+    assert_eq!(deliveries.len(), 2, "must decode and return exactly both valid messages, skipping isolation failure");
+
+    // Ack valid ones
+    consumer.ack(&tenant_id, &shard_key, consumer_group, &deliveries[0].delivery_id).await.unwrap();
+    consumer.ack(&tenant_id, &shard_key, consumer_group, &deliveries[1].delivery_id).await.unwrap();
+
+    let pending: redis::Value = redis::cmd("XPENDING")
+        .arg(&shard_key)
+        .arg(consumer_group)
+        .query_async(&mut conn)
+        .await
+        .unwrap();
+    let pending_arr = match pending { redis::Value::Array(ref arr) => arr, _ => panic!("Expected array") };
+    let total_pending: i64 = redis::FromRedisValue::from_redis_value(&pending_arr[0]).unwrap();
+
+    // Mismatch remains in PEL!
+    assert_eq!(total_pending, 1, "Tenant mismatch entry must remain in PEL");
+}
