@@ -964,7 +964,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_decode_stream_read_fails_if_xack_fails() {
+    async fn test_decode_stream_read_continues_if_xack_fails() {
         let node = Redis::default()
             .with_tag("7.2-alpine")
             .start()
@@ -1002,10 +1002,9 @@ mod tests {
 
         let result = consumer.decode_stream_read("mygroup", reply).await;
 
-        // Should return Err instead of Ok(Vec::new()) because XACK failed
-        assert!(result.is_err(), "must return Err when xack fails");
-        let err_msg = result.unwrap_err().to_string();
-        assert!(err_msg.contains("failed to force-ack poison pill"));
+        // Should return Ok(Vec::new()) even if XACK failed, to prevent orphaning mid-batch
+        assert!(result.is_ok(), "must return Ok when xack fails to preserve valid deliveries");
+        assert!(result.unwrap().is_empty(), "must return empty deliveries when only poison pill is present");
     }
 
     #[tokio::test]
