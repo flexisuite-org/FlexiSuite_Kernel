@@ -327,7 +327,7 @@ async fn test_poison_pill_is_acked() {
     let consumer_group = "test_group";
 
     // Inject a poison pill
-    let conn = client.get_connection_manager().await.unwrap();
+    let mut conn = client.get_connection_manager().await.unwrap();
     let shard_key = format!("{}:{}:0", tenant_id, stream_base);
     let _: () = redis::cmd("XADD")
         .arg(&shard_key)
@@ -375,7 +375,7 @@ async fn test_phase_2_respects_max_count() {
     let consumer_group = "test_group";
 
     let consumer = RedisConsumer::new(client.clone()).await.expect("consumer");
-    let conn = client.get_connection_manager().await.unwrap();
+    let mut conn = client.get_connection_manager().await.unwrap();
 
     // Spawn a task to inject events into multiple shards after a delay (so Phase 1 misses them)
     let tenant_id_clone = tenant_id.clone();
@@ -423,7 +423,7 @@ async fn test_mid_batch_poison_pill_preserves_surrounding_valid_entries() {
     let stream_base = "test_mid_poison_stream";
     let consumer_group = "test_group";
 
-    let conn = client.get_connection_manager().await.unwrap();
+    let mut conn = client.get_connection_manager().await.unwrap();
     let shard_key = format!("{}:{}:0", tenant_id, stream_base);
 
     // Create the group
@@ -500,7 +500,7 @@ async fn test_mid_batch_tenant_mismatch_preserves_surrounding_valid_entries() {
     let stream_base = "test_mid_iso_stream";
     let consumer_group = "test_group";
 
-    let conn = client.get_connection_manager().await.unwrap();
+    let mut conn = client.get_connection_manager().await.unwrap();
     let shard_key = format!("{}:{}:0", tenant_id, stream_base);
 
     // Create the group
@@ -569,7 +569,7 @@ async fn test_claim_pending_once_preserves_surrounding_valid_entries_on_error() 
     let stream_base = "test_claim_err_stream";
     let consumer_group = "test_group";
 
-    let conn = client.get_connection_manager().await.unwrap();
+    let mut conn = client.get_connection_manager().await.unwrap();
 
     let shard_0 = format!("{}:{}:0", tenant_id, stream_base);
     let shard_1 = format!("{}:{}:1", tenant_id, stream_base);
