@@ -362,7 +362,8 @@ async fn test_poison_pill_is_acked() {
         redis::Value::Array(ref arr) => arr,
         _ => panic!("Expected array"),
     };
-    let total_pending: i64 = redis::FromRedisValue::from_redis_value(&pending_arr[0]).unwrap();
+    let total_pending: i64 =
+        redis::FromRedisValue::from_redis_value(pending_arr[0].clone()).unwrap();
     assert_eq!(total_pending, 0, "Poison pill must be XACKed (PEL should be empty)");
 }
 
@@ -374,7 +375,7 @@ async fn test_phase_2_respects_max_count() {
     let consumer_group = "test_group";
 
     let consumer = RedisConsumer::new(client.clone()).await.expect("consumer");
-    let mut conn = client.get_connection_manager().await.unwrap();
+    let conn = client.get_connection_manager().await.unwrap();
 
     // Spawn a task to inject events into multiple shards after a delay (so Phase 1 misses them)
     let tenant_id_clone = tenant_id.clone();
