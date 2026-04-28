@@ -158,7 +158,7 @@ impl RedisConsumer {
                             return Err(e);
                         } else {
                             // Preserve earlier successfully decoded deliveries from this batch so they aren't orphaned in PEL.
-                            // The consumer will retry this isolation-violating message on the next poll.
+                            // The isolation-violating message is intentionally retained in the PEL and NOT retried for security reasons (fail-closed).
                             return Ok(deliveries);
                         }
                     }
@@ -715,6 +715,17 @@ impl RedisConsumer {
                 }
                 next_stream_id = next_cursor;
             }
+        }
+
+        if claimed.len() > max_count {
+            tracing::warn!(
+                tenant_id = %tenant_id,
+                stream_base = %stream_base,
+                claimed_count = claimed.len(),
+                max_count = max_count,
+                "XAUTOCLAIM fetched more messages than max_count; truncating result to max_count (excess messages remain in PEL)"
+            );
+            claimed.truncate(max_count);
         }
 
         Ok(claimed)
