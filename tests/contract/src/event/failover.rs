@@ -321,13 +321,13 @@ async fn test_poll_never_exceeds_max_count_across_multiple_shards() {
 
 #[tokio::test]
 async fn test_poison_pill_is_acked() {
-    let (node, client) = start_redis_server().await;
+    let (_node, client) = start_redis_server().await;
     let tenant_id = TenantId::new("tenant-poison").unwrap();
     let stream_base = "test_poison_stream";
     let consumer_group = "test_group";
 
     // Inject a poison pill
-    let mut conn = client.get_connection_manager().await.unwrap();
+    let conn = client.get_connection_manager().await.unwrap();
     let shard_key = format!("{}:{}:0", tenant_id, stream_base);
     let _: () = redis::cmd("XADD")
         .arg(&shard_key)
@@ -369,13 +369,13 @@ async fn test_poison_pill_is_acked() {
 
 #[tokio::test]
 async fn test_phase_2_respects_max_count() {
-    let (node, client) = start_redis_server().await;
+    let (_node, client) = start_redis_server().await;
     let tenant_id = TenantId::new("tenant-phase2").unwrap();
     let stream_base = "test_phase2_stream";
     let consumer_group = "test_group";
 
     let consumer = RedisConsumer::new(client.clone()).await.expect("consumer");
-    let mut conn = client.get_connection_manager().await.unwrap();
+    let conn = client.get_connection_manager().await.unwrap();
 
     // Spawn a task to inject events into multiple shards after a delay (so Phase 1 misses them)
     let tenant_id_clone = tenant_id.clone();
@@ -418,12 +418,12 @@ async fn test_phase_2_respects_max_count() {
 
 #[tokio::test]
 async fn test_mid_batch_poison_pill_preserves_surrounding_valid_entries() {
-    let (node, client) = start_redis_server().await;
+    let (_node, client) = start_redis_server().await;
     let tenant_id = TenantId::new("tenant-mid-poison").unwrap();
     let stream_base = "test_mid_poison_stream";
     let consumer_group = "test_group";
 
-    let mut conn = client.get_connection_manager().await.unwrap();
+    let conn = client.get_connection_manager().await.unwrap();
     let shard_key = format!("{}:{}:0", tenant_id, stream_base);
 
     // Create the group
@@ -472,7 +472,7 @@ async fn test_mid_batch_poison_pill_preserves_surrounding_valid_entries() {
         .await
         .unwrap();
     let pending_arr = match pending { redis::Value::Array(ref arr) => arr, _ => panic!("Expected array") };
-    let total_pending: i64 = redis::FromRedisValue::from_redis_value(&pending_arr[0]).unwrap();
+    let total_pending: i64 = redis::FromRedisValue::from_redis_value(pending_arr[0].clone()).unwrap();
 
     // The valid entries are NOT auto-acked by poll! Poll just returns them.
     // XREADGROUP adds them to PEL. The caller must call consumer.ack().
@@ -487,7 +487,7 @@ async fn test_mid_batch_poison_pill_preserves_surrounding_valid_entries() {
         .await
         .unwrap();
     let pending_arr = match pending { redis::Value::Array(ref arr) => arr, _ => panic!("Expected array") };
-    let total_pending: i64 = redis::FromRedisValue::from_redis_value(&pending_arr[0]).unwrap();
+    let total_pending: i64 = redis::FromRedisValue::from_redis_value(pending_arr[0].clone()).unwrap();
 
     // Poison is force-acked, valid entries are explicitly acked. PEL must be empty!
     assert_eq!(total_pending, 0, "PEL should be empty since poison pill was force-acked");
@@ -495,12 +495,12 @@ async fn test_mid_batch_poison_pill_preserves_surrounding_valid_entries() {
 
 #[tokio::test]
 async fn test_mid_batch_tenant_mismatch_preserves_surrounding_valid_entries() {
-    let (node, client) = start_redis_server().await;
+    let (_node, client) = start_redis_server().await;
     let tenant_id = TenantId::new("tenant-mid-iso").unwrap();
     let stream_base = "test_mid_iso_stream";
     let consumer_group = "test_group";
 
-    let mut conn = client.get_connection_manager().await.unwrap();
+    let conn = client.get_connection_manager().await.unwrap();
     let shard_key = format!("{}:{}:0", tenant_id, stream_base);
 
     // Create the group
@@ -555,8 +555,78 @@ async fn test_mid_batch_tenant_mismatch_preserves_surrounding_valid_entries() {
         .await
         .unwrap();
     let pending_arr = match pending { redis::Value::Array(ref arr) => arr, _ => panic!("Expected array") };
-    let total_pending: i64 = redis::FromRedisValue::from_redis_value(&pending_arr[0]).unwrap();
+    let total_pending: i64 = redis::FromRedisValue::from_redis_value(pending_arr[0].clone()).unwrap();
 
     // Mismatch remains in PEL!
     assert_eq!(total_pending, 1, "Tenant mismatch entry must remain in PEL");
+}
+
+
+#[tokio::test]
+async fn test_claim_pending_once_preserves_surrounding_valid_entries_on_error() {
+    let (_node, client) = start_redis_server().await;
+    let tenant_id = TenantId::new("tenant-claim-err").unwrap();
+    let stream_base = "test_claim_err_stream";
+    let consumer_group = "test_group";
+
+    let conn = client.get_connection_manager().await.unwrap();
+
+    let shard_0 = format!("{}:{}:0", tenant_id, stream_base);
+    let shard_1 = format!("{}:{}:1", tenant_id, stream_base);
+
+    // Create group on both shards
+    let _: () = redis::cmd("XGROUP").arg("CREATE").arg(&shard_0).arg(consumer_group).arg("0").arg("MKSTREAM").query_async(&mut conn).await.unwrap();
+    let _: () = redis::cmd("XGROUP").arg("CREATE").arg(&shard_1).arg(consumer_group).arg("0").arg("MKSTREAM").query_async(&mut conn).await.unwrap();
+
+    // Inject 1 event into shard 0
+    let _: () = redis::cmd("XADD").arg(&shard_0).arg("*").arg("data").arg(serde_json::to_string(&EventEnvelope {
+        event_id: Uuid::now_v7(), tenant_id: tenant_id.clone(), order_mode: OrderMode::Causality { key: "a".to_string(), seq: Some(1) },
+        payload: serde_json::json!({ "seq": 1 }), created_at: Utc::now(), event_type: "t".to_string(),
+    }).unwrap()).query_async(&mut conn).await.unwrap();
+
+    // Inject 1 event into shard 1
+    let _: () = redis::cmd("XADD").arg(&shard_1).arg("*").arg("data").arg(serde_json::to_string(&EventEnvelope {
+        event_id: Uuid::now_v7(), tenant_id: tenant_id.clone(), order_mode: OrderMode::Causality { key: "b".to_string(), seq: Some(1) },
+        payload: serde_json::json!({ "seq": 1 }), created_at: Utc::now(), event_type: "t".to_string(),
+    }).unwrap()).query_async(&mut conn).await.unwrap();
+
+    // Have consumer-1 read them to move them into PEL
+    let _: redis::Value = redis::cmd("XREADGROUP")
+        .arg("GROUP").arg(consumer_group).arg("consumer-1")
+        .arg("COUNT").arg(10)
+        .arg("STREAMS").arg(&shard_0).arg(&shard_1).arg(">").arg(">")
+        .query_async(&mut conn).await.unwrap();
+
+    // Destroy consumer group on shard 1 to simulate a NOGROUP mid-batch error
+    // XAUTOCLAIM on shard 1 will now fail and trigger NOGROUP recovery, which might succeed,
+    // but wait! If NOGROUP recovery succeeds, it just recreates the group and XAUTOCLAIM finds 0 pending!
+    // To cause a persistent error, we can change the type of shard_1 to STRING!
+    let _: () = redis::cmd("DEL").arg(&shard_1).query_async(&mut conn).await.unwrap();
+    let _: () = redis::cmd("SET").arg(&shard_1).arg("not a stream").query_async(&mut conn).await.unwrap();
+
+    let consumer = RedisConsumer::new(client.clone()).await.unwrap();
+
+    // Now call claim_pending. Shard 0 will successfully claim its entry.
+    // Shard 1 will throw a WRONGTYPE error from XAUTOCLAIM.
+    // The implementation MUST return Ok([delivery from shard 0]) instead of Err.
+    // To ensure we read from shard 0 first, claim_pending_once starts at a random shard,
+    // but it rotates through all.
+    // We can just try a few times to make sure we hit the order where shard 0 is before shard 1.
+    // Actually, shard count is 64. 0 and 1 are adjacent. If it starts at 0, it hits 0 then 1.
+    let mut claimed = Vec::new();
+    for _ in 0..64 {
+        let res = consumer.claim_pending(&tenant_id, stream_base, consumer_group, "consumer-2", 0, 10).await;
+        if let Ok(mut items) = res {
+            claimed.append(&mut items);
+        } else {
+            // It hit shard 1 first and threw an error! That's fine, we keep looping until we hit shard 0 first.
+            // Wait, if it hits shard 1 first, it throws an error and returns.
+            // On the next loop, `next_poll_start_shard` will advance! So it will eventually hit shard 0 first!
+        }
+        if !claimed.is_empty() {
+            break;
+        }
+    }
+
+    assert_eq!(claimed.len(), 1, "must preserve and return successfully claimed deliveries even if a later shard throws an error");
 }

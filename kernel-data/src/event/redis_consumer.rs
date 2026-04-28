@@ -656,11 +656,37 @@ impl RedisConsumer {
                                 .await
                         },
                     )
-                    .await?;
+                    .await;
 
-                let reply = reply.map_err(|e| {
-                    EventError::Consumer(format!("failed to claim pending entries: {e}"))
-                })?;
+                let reply = match reply {
+                    Ok(Ok(reply)) => reply,
+                    Ok(Err(e)) => {
+                        if claimed.is_empty() {
+                            return Err(EventError::Consumer(format!(
+                                "failed to claim pending entries: {e}"
+                            )));
+                        }
+                        tracing::warn!(
+                            stream_key = %key,
+                            error = %e,
+                            claimed_count = claimed.len(),
+                            "Stopping autoclaim scan after partial deliveries because a later shard read failed"
+                        );
+                        return Ok(claimed);
+                    }
+                    Err(e) => {
+                        if claimed.is_empty() {
+                            return Err(e);
+                        }
+                        tracing::warn!(
+                            stream_key = %key,
+                            error = %e,
+                            claimed_count = claimed.len(),
+                            "Stopping autoclaim scan after partial deliveries because NOGROUP recovery failed"
+                        );
+                        return Ok(claimed);
+                    }
+                };
 
                 let claimed_entries = reply.claimed;
                 let next_cursor = reply.next_stream_id;
