@@ -157,8 +157,9 @@ impl RedisConsumer {
                         if deliveries.is_empty() {
                             return Err(e);
                         } else {
-                            // Preserve earlier successfully decoded deliveries from this batch so they aren't orphaned in PEL.
-                            // The isolation-violating message is intentionally retained in the PEL and NOT retried for security reasons (fail-closed).
+                            // Preserve earlier successfully decoded deliveries from this batch so they aren't orphaned in the PEL.
+                            // The isolation-violating message is intentionally retained in the PEL and not force-acked,
+                            // so it can be observed again on later poll/claim attempts (fail-closed).
                             return Ok(deliveries);
                         }
                     }
@@ -219,8 +220,9 @@ impl RedisConsumer {
                     if deliveries.is_empty() {
                         return Err(e);
                     } else {
-                        // Preserve earlier successfully decoded deliveries from this batch so they aren't orphaned in PEL.
-                        // The consumer will retry this isolation-violating message on the next poll.
+                        // Preserve earlier successfully decoded deliveries from this batch so they aren't orphaned in the PEL.
+                        // The isolation-violating message is intentionally retained in the PEL and not force-acked,
+                        // so it can be observed again on later poll/claim attempts (fail-closed).
                         return Ok(deliveries);
                     }
                 }
