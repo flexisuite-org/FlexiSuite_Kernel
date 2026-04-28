@@ -158,8 +158,8 @@ impl RedisConsumer {
                             return Err(e);
                         } else {
                             // Preserve earlier successfully decoded deliveries from this batch so they aren't orphaned in the PEL.
-                            // The isolation-violating message is intentionally retained in the PEL and not force-acked,
-                            // so it can be observed again on later poll/claim attempts (fail-closed).
+                            // The isolation-violating message is intentionally retained in the PEL for observability,
+                            // but is intentionally NOT consumed (fail-closed security design).
                             return Ok(deliveries);
                         }
                     }
@@ -221,8 +221,8 @@ impl RedisConsumer {
                         return Err(e);
                     } else {
                         // Preserve earlier successfully decoded deliveries from this batch so they aren't orphaned in the PEL.
-                        // The isolation-violating message is intentionally retained in the PEL and not force-acked,
-                        // so it can be observed again on later poll/claim attempts (fail-closed).
+                        // The isolation-violating message is intentionally retained in the PEL for observability,
+                        // but is intentionally NOT consumed (fail-closed security design).
                         return Ok(deliveries);
                     }
                 }

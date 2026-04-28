@@ -368,6 +368,7 @@ async fn test_poison_pill_is_acked() {
 }
 
 #[tokio::test]
+#[tokio::test]
 async fn test_phase_2_respects_max_count() {
     let (node, client) = start_redis_server().await;
     let tenant_id = TenantId::new("tenant-phase2").unwrap();
@@ -375,16 +376,19 @@ async fn test_phase_2_respects_max_count() {
     let consumer_group = "test_group";
 
     let consumer = RedisConsumer::new(client.clone()).await.expect("consumer");
-    let conn = client.get_connection_manager().await.unwrap();
+    let mut conn = client.get_connection_manager().await.unwrap();
 
     // Spawn a task to inject events into multiple shards after a delay (so Phase 1 misses them)
     let tenant_id_clone = tenant_id.clone();
     let mut conn_clone = conn.clone();
     tokio::spawn(async move {
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        // Use a pipeline to inject all events atomically. This ensures deterministic
+        // wake-up behavior for the blocked Phase 2 XREADGROUP, so it sees all shards having data.
+        let mut pipe = redis::pipe();
         for i in 0..5 {
             let shard_key = format!("{}:{}:{}", tenant_id_clone, "test_phase2_stream", i);
-            let _: () = redis::cmd("XADD")
+            pipe.cmd("XADD")
                 .arg(&shard_key)
                 .arg("*")
                 .arg("data")
@@ -395,11 +399,9 @@ async fn test_phase_2_respects_max_count() {
                     payload: serde_json::json!({ "seq": 1 }),
                     created_at: Utc::now(),
                     event_type: "test".to_string(),
-                }).unwrap())
-                .query_async(&mut conn_clone)
-                .await
-                .unwrap();
+                }).unwrap());
         }
+        pipe.query_async::<()>(&mut conn_clone).await.unwrap();
     });
 
     // Read with max_count = 2 using blocking read (Phase 2 will catch it)
@@ -408,9 +410,5 @@ async fn test_phase_2_respects_max_count() {
         .await
         .expect("poll");
 
-    // Due to the sequential XADD injection in the background task, the blocked XREADGROUP
-    // in Phase 2 may unblock as soon as the first shard receives its message, returning only 1 delivery
-    // rather than waiting for the remaining shards. This is perfectly normal and safe.
-    assert!(!deliveries.is_empty(), "must read at least one message");
-    assert!(deliveries.len() <= 2, "must not exceed max_count");
+    assert_eq!(deliveries.len(), 2, "must strictly read exactly max_count messages deterministically");
 }
