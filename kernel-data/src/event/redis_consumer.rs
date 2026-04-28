@@ -182,7 +182,11 @@ impl RedisConsumer {
                                 error = %ack_err,
                                 "Failed to force-ack poison pill; entry will be redelivered"
                             );
-                            return Err(EventError::Consumer(format!("failed to force-ack poison pill: {}", ack_err)));
+                            let err = EventError::Consumer(format!("failed to force-ack poison pill: {}", ack_err));
+                            if deliveries.is_empty() {
+                                return Err(err);
+                            }
+                            return Ok(deliveries);
                         }
                     }
                 }
@@ -241,7 +245,11 @@ impl RedisConsumer {
                             error = %ack_err,
                             "Failed to force-ack poison pill; entry will be redelivered"
                         );
-                        return Err(EventError::Consumer(format!("failed to force-ack poison pill: {}", ack_err)));
+                        let err = EventError::Consumer(format!("failed to force-ack poison pill: {}", ack_err));
+                        if deliveries.is_empty() {
+                            return Err(err);
+                        }
+                        return Ok(deliveries);
                     }
                 }
             }

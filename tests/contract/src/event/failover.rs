@@ -368,7 +368,6 @@ async fn test_poison_pill_is_acked() {
 }
 
 #[tokio::test]
-#[tokio::test]
 async fn test_phase_2_respects_max_count() {
     let (node, client) = start_redis_server().await;
     let tenant_id = TenantId::new("tenant-phase2").unwrap();
