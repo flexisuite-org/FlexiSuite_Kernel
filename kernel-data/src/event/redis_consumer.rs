@@ -181,6 +181,7 @@ impl RedisConsumer {
                                 error = %ack_err,
                                 "Failed to force-ack poison pill; entry will be redelivered"
                             );
+                            return Err(EventError::Consumer(format!("failed to force-ack poison pill: {}", ack_err)));
                         }
                     }
                 }
@@ -238,6 +239,7 @@ impl RedisConsumer {
                             error = %ack_err,
                             "Failed to force-ack poison pill; entry will be redelivered"
                         );
+                        return Err(EventError::Consumer(format!("failed to force-ack poison pill: {}", ack_err)));
                     }
                 }
             }
@@ -686,6 +688,14 @@ impl RedisConsumer {
                         if claimed.is_empty() {
                             return Err(e);
                         }
+                        tracing::warn!(
+                            tenant_id = %tenant_id,
+                            stream_key = %key,
+                            consumer_group = %consumer_group,
+                            claimed_count = claimed.len(),
+                            error = %e,
+                            "Stopping autoclaim scan after partial deliveries because a later shard decode failed"
+                        );
                         // Preserve previously claimed messages rather than discarding them,
                         // returning early so the isolation error isn't silently swallowed.
                         return Ok(claimed);
@@ -944,6 +954,51 @@ mod tests {
             RedisConsumer::decode_stream_entry("tenant-1:events:4", &stream_id).expect("delivery");
         let encoded = serde_json::to_string(&delivery.event).expect("encode");
         assert_eq!(encoded, payload);
+    }
+
+    #[tokio::test]
+    async fn test_decode_stream_read_fails_if_xack_fails() {
+        let node = Redis::default()
+            .with_tag("7.2-alpine")
+            .start()
+            .await
+            .expect("start redis");
+        let port = node.get_host_port_ipv4(REDIS_PORT).await.expect("get port");
+        let redis_url = format!("redis://127.0.0.1:{port}/");
+        let client = redis::Client::open(redis_url).unwrap();
+        let consumer = RedisConsumer::new(client.clone()).await.unwrap();
+
+        // Create a STRING key so XACK will fail with WRONGTYPE
+        let mut conn = client.get_connection_manager().await.unwrap();
+        let _: () = redis::cmd("SET")
+            .arg("tenant-1:events:0")
+            .arg("not a stream")
+            .query_async(&mut conn)
+            .await
+            .unwrap();
+
+        // Construct a StreamReadReply with a poison pill
+        let stream_id = StreamId {
+            id: "1-0".to_string(),
+            map: [("data".to_string(), redis::Value::BulkString(b"invalid_json".to_vec()))]
+                .into_iter()
+                .collect(),
+            milliseconds_elapsed_from_delivery: None,
+            delivered_count: None,
+        };
+        let reply = redis::streams::StreamReadReply {
+            keys: vec![redis::streams::StreamKey {
+                key: "tenant-1:events:0".to_string(),
+                ids: vec![stream_id],
+            }],
+        };
+
+        let result = consumer.decode_stream_read("mygroup", reply).await;
+
+        // Should return Err instead of Ok(Vec::new()) because XACK failed
+        assert!(result.is_err(), "must return Err when xack fails");
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("failed to force-ack poison pill"));
     }
 
     #[tokio::test]
