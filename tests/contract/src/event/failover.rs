@@ -408,5 +408,5 @@ async fn test_phase_2_respects_max_count() {
         .await
         .expect("poll");
 
-    assert!(deliveries.len() <= 2, "must not exceed max_count");
+    assert_eq!(deliveries.len(), 2, "must read exactly max_count messages");
 }
