@@ -385,6 +385,7 @@ async fn test_phase_2_respects_max_count() {
         // Use a pipeline to inject all events atomically. This ensures deterministic
         // wake-up behavior for the blocked Phase 2 XREADGROUP, so it sees all shards having data.
         let mut pipe = redis::pipe();
+        pipe.atomic(); // Ensure MULTI/EXEC transaction so XREADGROUP cannot wake up mid-injection
         for i in 0..5 {
             let shard_key = format!("{}:{}:{}", tenant_id_clone, "test_phase2_stream", i);
             pipe.cmd("XADD")
@@ -601,10 +602,14 @@ async fn test_claim_pending_once_preserves_surrounding_valid_entries_on_error() 
     // XAUTOCLAIM on shard 1 will now fail and trigger NOGROUP recovery, which might succeed,
     // but wait! If NOGROUP recovery succeeds, it just recreates the group and XAUTOCLAIM finds 0 pending!
     // To cause a persistent error, we can change the type of shard_1 to STRING!
+    let consumer = RedisConsumer::new(client.clone()).await.unwrap();
+
+    // Pre-warm consumer group cache so it doesn't run ensure_consumer_groups later
+    // during claim_pending, which would hit the WRONGTYPE error prematurely.
+    let _ = consumer.claim_pending(&tenant_id, stream_base, consumer_group, "consumer-2", 0, 1).await;
+
     let _: () = redis::cmd("DEL").arg(&shard_1).query_async(&mut conn).await.unwrap();
     let _: () = redis::cmd("SET").arg(&shard_1).arg("not a stream").query_async(&mut conn).await.unwrap();
-
-    let consumer = RedisConsumer::new(client.clone()).await.unwrap();
 
     // Now call claim_pending. Shard 0 will successfully claim its entry.
     // Shard 1 will throw a WRONGTYPE error from XAUTOCLAIM.

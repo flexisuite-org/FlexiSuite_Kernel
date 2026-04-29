@@ -602,7 +602,7 @@ impl RedisConsumer {
         let keys = Self::stream_keys_for_tenant_ordered(tenant_id, stream_base, start_shard);
         let mut claimed = Vec::new();
 
-        for key in keys {
+        'shards: for key in keys {
             if claimed.len() >= max_count {
                 break;
             }
@@ -732,7 +732,7 @@ impl RedisConsumer {
                         );
                         // Preserve previously claimed messages rather than discarding them,
                         // returning early so the isolation error isn't silently swallowed.
-                        return Ok(claimed);
+                        break 'shards;
                     }
                 }
 
