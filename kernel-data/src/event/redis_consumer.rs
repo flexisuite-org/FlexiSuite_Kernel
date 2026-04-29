@@ -177,9 +177,15 @@ impl RedisConsumer {
                                 error = %ack_err,
                                 "Failed to force-ack poison pill; entry will be redelivered"
                             );
+                            let err = EventError::Consumer(format!("failed to force-ack poison pill: {}", ack_err));
+                            if deliveries.is_empty() {
+                                return Err(err);
+                            } else {
+                                // Preserve earlier successfully decoded deliveries from this batch.
+                                // Subsequent entries in this batch remain in the PEL but will be fetched on next poll.
+                                return Ok(deliveries);
+                            }
                         }
-                        // Continue to the next entry whether xack succeeded or failed,
-                        // to avoid orphaning subsequent valid entries in the PEL.
                         continue;
                     }
                 }
@@ -233,9 +239,15 @@ impl RedisConsumer {
                             error = %ack_err,
                             "Failed to force-ack poison pill; entry will be redelivered"
                         );
+                        let err = EventError::Consumer(format!("failed to force-ack poison pill: {}", ack_err));
+                        if deliveries.is_empty() {
+                            return Err(err);
+                        } else {
+                            // Preserve earlier successfully decoded deliveries from this batch.
+                            // Subsequent entries in this batch remain in the PEL but will be fetched on next poll.
+                            return Ok(deliveries);
+                        }
                     }
-                    // Continue to the next entry whether xack succeeded or failed,
-                    // to avoid orphaning subsequent valid entries in the PEL.
                     continue;
                 }
             }
