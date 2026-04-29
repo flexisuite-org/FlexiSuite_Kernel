@@ -363,7 +363,7 @@ async fn test_poison_pill_is_acked() {
         _ => panic!("Expected array"),
     };
     let total_pending: i64 =
-        redis::FromRedisValue::from_redis_value(&pending_arr[0]).unwrap();
+        redis::FromRedisValue::from_redis_value(pending_arr[0].clone()).unwrap();
     assert_eq!(total_pending, 0, "Poison pill must be XACKed (PEL should be empty)");
 }
 
@@ -375,7 +375,7 @@ async fn test_phase_2_respects_max_count() {
     let consumer_group = "test_group";
 
     let consumer = RedisConsumer::new(client.clone()).await.expect("consumer");
-    let mut conn = client.get_connection_manager().await.unwrap();
+    let conn = client.get_connection_manager().await.unwrap();
 
     // Spawn a task to inject events into multiple shards after a delay (so Phase 1 misses them)
     let tenant_id_clone = tenant_id.clone();
@@ -472,7 +472,7 @@ async fn test_mid_batch_poison_pill_preserves_surrounding_valid_entries() {
         .await
         .unwrap();
     let pending_arr = match pending { redis::Value::Array(ref arr) => arr, _ => panic!("Expected array") };
-    let total_pending: i64 = redis::FromRedisValue::from_redis_value(&pending_arr[0]).unwrap();
+    let _total_pending: i64 = redis::FromRedisValue::from_redis_value(pending_arr[0].clone()).unwrap();
 
     // The valid entries are NOT auto-acked by poll! Poll just returns them.
     // XREADGROUP adds them to PEL. The caller must call consumer.ack().
@@ -487,7 +487,7 @@ async fn test_mid_batch_poison_pill_preserves_surrounding_valid_entries() {
         .await
         .unwrap();
     let pending_arr = match pending { redis::Value::Array(ref arr) => arr, _ => panic!("Expected array") };
-    let total_pending: i64 = redis::FromRedisValue::from_redis_value(&pending_arr[0]).unwrap();
+    let total_pending: i64 = redis::FromRedisValue::from_redis_value(pending_arr[0].clone()).unwrap();
 
     // Poison is force-acked, valid entries are explicitly acked. PEL must be empty!
     assert_eq!(total_pending, 0, "PEL should be empty since poison pill was force-acked");
@@ -563,7 +563,7 @@ async fn test_mid_batch_tenant_mismatch_preserves_surrounding_valid_entries() {
         .await
         .unwrap();
     let pending_arr = match pending { redis::Value::Array(ref arr) => arr, _ => panic!("Expected array") };
-    let total_pending: i64 = redis::FromRedisValue::from_redis_value(&pending_arr[0]).unwrap();
+    let total_pending: i64 = redis::FromRedisValue::from_redis_value(pending_arr[0].clone()).unwrap();
 
     // Mismatch remains in PEL!
     assert_eq!(total_pending, 1, "Tenant mismatch entry must remain in PEL");
