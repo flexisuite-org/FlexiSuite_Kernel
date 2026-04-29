@@ -174,6 +174,7 @@ impl RedisConsumer {
                                 stream_key = %key.key,
                                 consumer_group = %consumer_group,
                                 delivery_id = %stream_id.id,
+                                preserved_deliveries = deliveries.len(),
                                 error = %ack_err,
                                 "Failed to force-ack poison pill; entry will be redelivered"
                             );
@@ -182,7 +183,8 @@ impl RedisConsumer {
                                 return Err(err);
                             } else {
                                 // Preserve earlier successfully decoded deliveries from this batch.
-                                // Subsequent entries in this batch remain in the PEL but will be fetched on next poll.
+                                // Subsequent entries in this batch remain in the PEL and require
+                                // `claim_pending` (XAUTOCLAIM) to be re-processed.
                                 return Ok(deliveries);
                             }
                         }
@@ -236,6 +238,7 @@ impl RedisConsumer {
                             stream_key = %stream_key,
                             consumer_group = %consumer_group,
                             delivery_id = %stream_id.id,
+                            preserved_deliveries = deliveries.len(),
                             error = %ack_err,
                             "Failed to force-ack poison pill; entry will be redelivered"
                         );
@@ -244,7 +247,8 @@ impl RedisConsumer {
                             return Err(err);
                         } else {
                             // Preserve earlier successfully decoded deliveries from this batch.
-                            // Subsequent entries in this batch remain in the PEL but will be fetched on next poll.
+                            // Subsequent entries in this batch remain in the PEL and require
+                            // `claim_pending` (XAUTOCLAIM) to be re-processed.
                             return Ok(deliveries);
                         }
                     }
@@ -312,7 +316,7 @@ impl RedisConsumer {
     }
 
     fn is_nogroup_error(error: &RedisError) -> bool {
-        error.code() == Some("NOGROUP")
+        error.code() == Some("NOGROUP") || error.to_string().contains("NOGROUP")
     }
 
     fn is_tenant_isolation_error(error: &EventError) -> bool {
