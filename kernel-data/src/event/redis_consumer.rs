@@ -154,7 +154,7 @@ impl RedisConsumer {
                             "Tenant isolation violation detected while decoding stream entry; refusing to force-ack"
                         );
                         // The isolation-violating message is intentionally retained in the PEL for observability,
-                        // but is intentionally NOT consumed (fail-closed security design).
+                        // but is intentionally NOT consumed (fail-closed security design) and requires claim_pending intervention.
                         // We continue to the next entry to avoid orphaning subsequent valid entries in the PEL.
                         continue;
                     }
