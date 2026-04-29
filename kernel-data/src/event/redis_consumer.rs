@@ -154,7 +154,7 @@ impl RedisConsumer {
                             "Tenant isolation violation detected while decoding stream entry; refusing to force-ack"
                         );
                         // The isolation-violating message is intentionally retained in the PEL for observability,
-                        // but is intentionally NOT consumed (fail-closed security design) and requires claim_pending intervention.
+                        // but is intentionally NOT consumed (fail-closed security design) and requires `claim_pending` intervention.and requires claim_pending intervention.
                         // We continue to the next entry to avoid orphaning subsequent valid entries in the PEL.
                         continue;
                     }
@@ -178,15 +178,7 @@ impl RedisConsumer {
                                 error = %ack_err,
                                 "Failed to force-ack poison pill; entry will be redelivered"
                             );
-                            let err = EventError::Consumer(format!("failed to force-ack poison pill: {}", ack_err));
-                            if deliveries.is_empty() {
-                                return Err(err);
-                            } else {
-                                // Preserve earlier successfully decoded deliveries from this batch.
-                                // Subsequent entries in this batch remain in the PEL and require
-                                // `claim_pending` (XAUTOCLAIM) to be re-processed.
-                                return Ok(deliveries);
-                            }
+
                         }
                         continue;
                     }
@@ -218,7 +210,7 @@ impl RedisConsumer {
                         "Tenant isolation violation detected while decoding claimed entry; refusing to force-ack"
                     );
                     // The isolation-violating message is intentionally retained in the PEL for observability,
-                    // but is intentionally NOT consumed (fail-closed security design).
+                    // but is intentionally NOT consumed (fail-closed security design) and requires `claim_pending` intervention.
                     // We continue to the next entry to avoid orphaning subsequent valid entries in the PEL.
                     continue;
                 }
@@ -242,15 +234,7 @@ impl RedisConsumer {
                             error = %ack_err,
                             "Failed to force-ack poison pill; entry will be redelivered"
                         );
-                        let err = EventError::Consumer(format!("failed to force-ack poison pill: {}", ack_err));
-                        if deliveries.is_empty() {
-                            return Err(err);
-                        } else {
-                            // Preserve earlier successfully decoded deliveries from this batch.
-                            // Subsequent entries in this batch remain in the PEL and require
-                            // `claim_pending` (XAUTOCLAIM) to be re-processed.
-                            return Ok(deliveries);
-                        }
+
                     }
                     continue;
                 }
@@ -1006,7 +990,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_decode_stream_read_fails_if_xack_fails() {
+    async fn test_decode_stream_read_continues_if_xack_fails() {
         let node = Redis::default()
             .with_tag("7.2-alpine")
             .start()
@@ -1044,11 +1028,9 @@ mod tests {
 
         let result = consumer.decode_stream_read("mygroup", reply).await;
 
-        // Since `deliveries` is empty (this is the first entry), XACK failure should return Err
-        // to strictly fail-closed rather than swallowing the Redis health anomaly.
-        assert!(result.is_err(), "must return Err when xack fails on an empty batch");
-        let err_msg = result.unwrap_err().to_string();
-        assert!(err_msg.contains("failed to force-ack poison pill"));
+        // Should return Ok(Vec::new()) even if XACK failed, to prevent orphaning mid-batch
+        assert!(result.is_ok(), "must return Ok when xack fails to preserve valid deliveries");
+        assert!(result.unwrap().is_empty(), "must return empty deliveries when only poison pill is present");
     }
 
     #[tokio::test]

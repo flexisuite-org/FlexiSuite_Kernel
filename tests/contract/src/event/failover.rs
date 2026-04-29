@@ -545,6 +545,14 @@ async fn test_mid_batch_tenant_mismatch_preserves_surrounding_valid_entries() {
 
     assert_eq!(deliveries.len(), 2, "must decode and return exactly both valid messages, skipping isolation failure");
 
+    // CR-3: Verify returned deliveries belong to the correct tenant
+    assert_eq!(deliveries[0].event.tenant_id, tenant_id);
+    assert_eq!(deliveries[1].event.tenant_id, tenant_id);
+    let seq0 = match deliveries[0].event.order_mode { OrderMode::Causality { seq: Some(s), .. } => s, _ => panic!("bad order mode") };
+    let seq1 = match deliveries[1].event.order_mode { OrderMode::Causality { seq: Some(s), .. } => s, _ => panic!("bad order mode") };
+    assert_eq!(seq0, 1);
+    assert_eq!(seq1, 2);
+
     // Ack valid ones
     consumer.ack(&tenant_id, &shard_key, consumer_group, &deliveries[0].delivery_id).await.unwrap();
     consumer.ack(&tenant_id, &shard_key, consumer_group, &deliveries[1].delivery_id).await.unwrap();
