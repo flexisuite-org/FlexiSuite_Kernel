@@ -412,8 +412,7 @@ async fn test_phase_2_respects_max_count() {
 
     let _ = injector.await.expect("injector task should not panic");
 
-    assert!(!deliveries.is_empty(), "must read at least one message");
-    assert!(deliveries.len() <= 2, "must not exceed max_count");
+    assert_eq!(deliveries.len(), 2, "must read exactly max_count messages");
 }
 
 
@@ -587,6 +586,12 @@ async fn test_claim_pending_once_preserves_surrounding_valid_entries_on_error() 
     let _: () = redis::cmd("XGROUP").arg("CREATE").arg(&shard_0).arg(consumer_group).arg("0").arg("MKSTREAM").query_async(&mut conn).await.unwrap();
     let _: () = redis::cmd("XGROUP").arg("CREATE").arg(&shard_1).arg(consumer_group).arg("0").arg("MKSTREAM").query_async(&mut conn).await.unwrap();
 
+    let consumer = RedisConsumer::new(client.clone()).await.unwrap();
+
+    // Pre-warm consumer group cache before test data is inserted so the warm-up
+    // cannot claim and consume entries that this test needs to observe.
+    let _ = consumer.claim_pending(&tenant_id, stream_base, consumer_group, "consumer-2", 0, 1).await;
+
     // Inject 1 event into shard 0
     let _: () = redis::cmd("XADD").arg(&shard_0).arg("*").arg("data").arg(serde_json::to_string(&EventEnvelope {
         event_id: Uuid::now_v7(), tenant_id: tenant_id.clone(), order_mode: OrderMode::Causality { key: "a".to_string(), seq: Some(1) },
@@ -605,16 +610,6 @@ async fn test_claim_pending_once_preserves_surrounding_valid_entries_on_error() 
         .arg("COUNT").arg(10)
         .arg("STREAMS").arg(&shard_0).arg(&shard_1).arg(">").arg(">")
         .query_async(&mut conn).await.unwrap();
-
-    // Destroy consumer group on shard 1 to simulate a NOGROUP mid-batch error
-    // XAUTOCLAIM on shard 1 will now fail and trigger NOGROUP recovery, which might succeed,
-    // but wait! If NOGROUP recovery succeeds, it just recreates the group and XAUTOCLAIM finds 0 pending!
-    // To cause a persistent error, we can change the type of shard_1 to STRING!
-    let consumer = RedisConsumer::new(client.clone()).await.unwrap();
-
-    // Pre-warm consumer group cache so it doesn't run ensure_consumer_groups later
-    // during claim_pending, which would hit the WRONGTYPE error prematurely.
-    let _ = consumer.claim_pending(&tenant_id, stream_base, consumer_group, "consumer-2", 0, 1).await;
 
     let _: () = redis::cmd("DEL").arg(&shard_1).query_async(&mut conn).await.unwrap();
     let _: () = redis::cmd("SET").arg(&shard_1).arg("not a stream").query_async(&mut conn).await.unwrap();

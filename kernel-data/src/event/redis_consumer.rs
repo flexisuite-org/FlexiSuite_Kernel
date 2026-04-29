@@ -153,8 +153,8 @@ impl RedisConsumer {
                             error = %e,
                             "Tenant isolation violation detected while decoding stream entry; refusing to force-ack"
                         );
-                        // The isolation-violating message is intentionally retained in the PEL for observability,
-                        // but is intentionally NOT consumed (fail-closed security design) and requires `claim_pending` intervention.and requires claim_pending intervention.
+                        // This entry remains in the PEL and requires `claim_pending` to re-process.
+                        // It will NOT be retried by a regular poll.
                         // We continue to the next entry to avoid orphaning subsequent valid entries in the PEL.
                         continue;
                     }
@@ -209,8 +209,8 @@ impl RedisConsumer {
                         error = %e,
                         "Tenant isolation violation detected while decoding claimed entry; refusing to force-ack"
                     );
-                    // The isolation-violating message is intentionally retained in the PEL for observability,
-                    // but is intentionally NOT consumed (fail-closed security design) and requires `claim_pending` intervention.
+                    // This entry remains in the PEL and requires `claim_pending` to re-process.
+                    // It will NOT be retried by a regular poll.
                     // We continue to the next entry to avoid orphaning subsequent valid entries in the PEL.
                     continue;
                 }
