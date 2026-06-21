@@ -15,7 +15,7 @@ jobs:
     name: ci:lint-test-utils-scope
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Verify test-utils scope and production build
         run: bash scripts/ci/ci-lint-test-utils-scope.sh
 
@@ -23,7 +23,7 @@ jobs:
     name: ci:lint-traceability
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Run traceability lint
         run: bash scripts/ci/ci-lint-traceability.sh
 
@@ -33,7 +33,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
         with:
           fetch-depth: 0
           persist-credentials: false
@@ -44,7 +44,7 @@ jobs:
     name: ci:lint-slo-profile
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Run SLO profile lint
         run: bash scripts/ci/ci-lint-slo-profile.sh
 
@@ -57,7 +57,7 @@ jobs:
       matrix:
         suite: [auth, quota, idempotency, worker, diagnostics, supplychain]
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Run contract suite
         run: bash scripts/ci/ci-test-contract-suite.sh "${{ matrix.suite }}"
 
@@ -65,7 +65,7 @@ jobs:
     name: ci:e2e-frontend-security
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Run frontend security e2e stub
         run: bash scripts/ci/ci-e2e-frontend-security.sh
 
@@ -73,7 +73,7 @@ jobs:
     name: ci:e2e-worker-protocol-fallback-a11y
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Run worker fallback a11y e2e stub
         run: bash scripts/ci/ci-e2e-worker-protocol-fallback-a11y.sh
 
@@ -81,7 +81,7 @@ jobs:
     name: ci:e2e-canvas-fallback-metrics
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Run canvas fallback metrics e2e stub
         run: bash scripts/ci/ci-e2e-canvas-fallback-metrics.sh
 
@@ -89,6 +89,6 @@ jobs:
     name: ci:test-observability
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Run observability contract checks
         run: bash scripts/ci/ci-test-observability.sh

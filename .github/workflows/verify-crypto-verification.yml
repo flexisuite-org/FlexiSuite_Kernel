@@ -13,7 +13,7 @@ jobs:
   verify-crypto-verification:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
       - name: Run kernel-core tests without test-utils

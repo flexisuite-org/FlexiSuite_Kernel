@@ -31,7 +31,7 @@ jobs:
     name: ci:lint-sql-security
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Run SQL security lint
         run: bash scripts/ci/ci-lint-sql-security.sh
 
@@ -39,7 +39,7 @@ jobs:
     name: ci:lint-manifest-trust-root
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Run trust root lint
         run: bash scripts/ci/ci-lint-manifest-trust-root.sh
 
@@ -47,7 +47,7 @@ jobs:
     name: ci:test-manifest-break-glass
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Run break-glass contract test stub
         run: bash scripts/ci/ci-test-manifest-break-glass.sh
 
@@ -56,6 +56,6 @@ jobs:
     runs-on: ubuntu-latest
     if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.run_nightly)
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Run nightly reliability suites
         run: bash scripts/ci/nightly-test-reliability.sh
