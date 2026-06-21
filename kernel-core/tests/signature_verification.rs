@@ -4,14 +4,11 @@ use ed25519_dalek::{Signer, SigningKey, VerifyingKey};
 use kernel_core::supplychain::{
     KeyStatus, Manifest, TrustedKey, VerificationResult, verify_manifest,
 };
-#[cfg(not(feature = "test-utils"))]
-use rand::rngs::OsRng;
 
 #[cfg(not(feature = "test-utils"))]
 #[test]
 fn test_manifest_signature_verification_real_crypto() {
-    let mut csprng = OsRng;
-    let signing_key = SigningKey::generate(&mut csprng);
+    let signing_key = SigningKey::from_bytes(&[42u8; 32]);
     let verifying_key: VerifyingKey = (&signing_key).into();
     let public_bytes = verifying_key.to_bytes();
 

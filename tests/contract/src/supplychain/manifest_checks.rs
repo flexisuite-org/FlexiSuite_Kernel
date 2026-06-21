@@ -5,7 +5,6 @@ mod tests {
         BreakGlassContext, KeyStatus, Manifest, TrustedKey, VerificationResult, verify_break_glass,
         verify_manifest,
     };
-    use rand::rngs::OsRng;
 
     fn sign_digest(signing_key: &SigningKey, digest: &str) -> String {
         hex::encode(signing_key.sign(digest.as_bytes()).to_bytes())
@@ -13,8 +12,7 @@ mod tests {
 
     #[test]
     fn test_manifest_signature_trust_root() {
-        let mut csprng = OsRng;
-        let signing_key = SigningKey::generate(&mut csprng);
+        let signing_key = SigningKey::from_bytes(&[42u8; 32]);
         let public_key = signing_key.verifying_key().to_bytes();
 
         let digest_ok = "sha256-123";
