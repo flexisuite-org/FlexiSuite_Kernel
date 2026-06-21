@@ -19,4 +19,4 @@ thiserror = "2.0.18"
 tokio = { version = "1.49.0", features = ["full"] }
 url = "2.5"
 wasmtime = "43.0.2"
-wasmtime-wasi = "42.0.2"
+wasmtime-wasi = "44.0.2"
