@@ -132,25 +132,115 @@ impl RedisConsumer {
         })
     }
 
-    fn decode_stream_read(reply: StreamReadReply) -> Result<Vec<Delivery>, EventError> {
+    async fn decode_stream_read(
+        &self,
+        consumer_group: &str,
+        reply: StreamReadReply,
+    ) -> Result<Vec<Delivery>, EventError> {
         let mut deliveries = Vec::new();
         for key in reply.keys {
             for stream_id in key.ids {
-                deliveries.push(Self::decode_stream_entry(&key.key, &stream_id)?);
+                match Self::decode_stream_entry(&key.key, &stream_id) {
+                    Ok(delivery) => deliveries.push(delivery),
+                    Err(e) if Self::is_tenant_isolation_error(&e) => {
+                        // Metrics note: `kernel-data` currently lacks an established metrics facility (no prometheus crate).
+                        // Instead of adding a new dependency just for this PR, we rely on tracing logs for
+                        // observability of tenant isolation violations. A follow-up issue should add proper metrics
+                        // (e.g., `kernel.event.tenant_isolation_violation_total`).
+                        tracing::warn!(
+                            stream_key = %key.key,
+                            delivery_id = %stream_id.id,
+                            error = %e,
+                            "Tenant isolation violation detected while decoding stream entry; refusing to force-ack"
+                        );
+                        // This entry remains in the PEL and requires `claim_pending` to re-process.
+                        // It will NOT be retried by a regular poll.
+                        // We continue to the next entry to avoid orphaning subsequent valid entries in the PEL.
+                        continue;
+                    }
+                    Err(e) => {
+                        tracing::error!(
+                            stream_key = %key.key,
+                            delivery_id = %stream_id.id,
+                            error = %e,
+                            "Poison pill detected: failed to decode stream entry. Force-acking to unblock consumer."
+                        );
+                        let mut conn = self.connection_manager.clone();
+                        if let Err(ack_err) = conn
+                            .xack::<_, _, _, i32>(&key.key, consumer_group, &[&stream_id.id])
+                            .await
+                        {
+                            tracing::warn!(
+                                stream_key = %key.key,
+                                consumer_group = %consumer_group,
+                                delivery_id = %stream_id.id,
+                                preserved_deliveries = deliveries.len(),
+                                error = %ack_err,
+                                "Failed to force-ack poison pill; entry will be redelivered"
+                            );
+
+                        }
+                        continue;
+                    }
+                }
             }
         }
         Ok(deliveries)
     }
 
-    fn decode_claimed(
+    async fn decode_claimed(
+        &self,
         stream_key: &str,
+        consumer_group: &str,
         reply: StreamClaimReply,
     ) -> Result<Vec<Delivery>, EventError> {
-        reply
-            .ids
-            .iter()
-            .map(|stream_id| Self::decode_stream_entry(stream_key, stream_id))
-            .collect()
+        let mut deliveries = Vec::new();
+        for stream_id in reply.ids {
+            match Self::decode_stream_entry(stream_key, &stream_id) {
+                Ok(delivery) => deliveries.push(delivery),
+                Err(e) if Self::is_tenant_isolation_error(&e) => {
+                    // Metrics note: `kernel-data` currently lacks an established metrics facility (no prometheus crate).
+                    // Instead of adding a new dependency just for this PR, we rely on tracing logs for
+                    // observability of tenant isolation violations. A follow-up issue should add proper metrics
+                    // (e.g., `kernel.event.tenant_isolation_violation_total`).
+                    tracing::warn!(
+                        stream_key = %stream_key,
+                        delivery_id = %stream_id.id,
+                        error = %e,
+                        "Tenant isolation violation detected while decoding claimed entry; refusing to force-ack"
+                    );
+                    // This entry remains in the PEL and requires `claim_pending` to re-process.
+                    // It will NOT be retried by a regular poll.
+                    // We continue to the next entry to avoid orphaning subsequent valid entries in the PEL.
+                    continue;
+                }
+                Err(e) => {
+                    tracing::error!(
+                        stream_key = %stream_key,
+                        delivery_id = %stream_id.id,
+                        error = %e,
+                        "Poison pill detected in claimed entries: failed to decode. Force-acking to unblock consumer."
+                    );
+                    let mut conn = self.connection_manager.clone();
+                    if let Err(ack_err) = conn
+                        .xack::<_, _, _, i32>(stream_key, consumer_group, &[&stream_id.id])
+                        .await
+                    {
+                        tracing::warn!(
+                            stream_key = %stream_key,
+                            consumer_group = %consumer_group,
+                            delivery_id = %stream_id.id,
+                            preserved_deliveries = deliveries.len(),
+                            error = %ack_err,
+                            "Failed to force-ack poison pill; entry will be redelivered"
+                        );
+
+                    }
+                    continue;
+                }
+            }
+        }
+        Ok(deliveries)
     }
 
     fn build_read_options(
@@ -210,7 +300,11 @@ impl RedisConsumer {
     }
 
     fn is_nogroup_error(error: &RedisError) -> bool {
-        error.code() == Some("NOGROUP")
+        error.code() == Some("NOGROUP") || error.to_string().contains("NOGROUP")
+    }
+
+    fn is_tenant_isolation_error(error: &EventError) -> bool {
+        matches!(error, EventError::TenantIsolation { .. })
     }
 
     fn consumer_group_cache_key(
@@ -292,7 +386,7 @@ impl RedisConsumer {
     {
         if let Err(error) = &reply {
             // Redis returns NOGROUP when the consumer group does not exist.
-            if error.code() == Some("NOGROUP") {
+            if Self::is_nogroup_error(error) {
                 tracing::warn!(
                     tenant_id = %tenant_id,
                     stream_key = %stream_key,
@@ -330,52 +424,101 @@ impl RedisConsumer {
         let keys = Self::stream_keys_for_tenant_ordered(tenant_id, stream_base, start_shard);
         let mut deliveries = Vec::new();
 
-        // Phase 1: Non-blocking scan across all shards to respect strict max_count
+        // Phase 1: Non-blocking scan across shards. We intentionally use per-shard `xread_options`
+        // rather than Lua consolidation to avoid Lua server blocking, preserve per-shard NOGROUP
+        // recovery semantics, and avoid partial Lua-script PEL orphaning where earlier read entries
+        // are discarded if a later shard throws an error.
         for key in &keys {
             if deliveries.len() >= max_count {
-                break;
+                return Ok(deliveries);
             }
 
-            let remaining = max_count.saturating_sub(deliveries.len());
-            let options =
-                Self::build_read_options(consumer_group, consumer_name, remaining, None, false);
+            let remaining = max_count - deliveries.len();
+            let read_options = Self::build_read_options(
+                consumer_group,
+                consumer_name,
+                remaining,
+                None,
+                false,
+            );
+            let key_strs = [key.as_str()];
+            let id_strs = [">"];
+
             let mut conn = self.connection_manager.clone();
             let reply: Result<StreamReadReply, RedisError> =
-                conn.xread_options(&[key.as_str()], &[">"], &options).await;
+                conn.xread_options(&key_strs, &id_strs, &read_options).await;
 
             let reply = self
                 .recover_nogroup_and_retry(
                     tenant_id,
                     stream_base,
-                    key.as_str(),
+                    key,
                     consumer_group,
                     "poll_once",
                     reply,
                     || async {
                         let mut retry_conn = self.connection_manager.clone();
                         retry_conn
-                            .xread_options(&[key.as_str()], &[">"], &options)
+                            .xread_options(&key_strs, &id_strs, &read_options)
                             .await
                     },
                 )
-                .await?;
+                .await;
 
-            let reply = reply.map_err(|e| {
-                EventError::Consumer(format!("failed to read stream group entries: {e}"))
-            })?;
-            let mut shard_deliveries = Self::decode_stream_read(reply)?;
-            deliveries.append(&mut shard_deliveries);
+            let reply = match reply {
+                Ok(Ok(reply)) => reply,
+                Ok(Err(e)) => {
+                    if deliveries.is_empty() {
+                        return Err(EventError::Consumer(format!(
+                            "failed to read stream group entries: {e}"
+                        )));
+                    }
+                    tracing::warn!(
+                        stream_key = %key,
+                        error = %e,
+                        delivered_count = deliveries.len(),
+                        "Stopping shard scan after partial deliveries because a later shard read failed"
+                    );
+                    break;
+                }
+                Err(e) => {
+                    if deliveries.is_empty() {
+                        return Err(e);
+                    }
+                    tracing::warn!(
+                        stream_key = %key,
+                        error = %e,
+                        delivered_count = deliveries.len(),
+                        "Stopping shard scan after partial deliveries because NOGROUP recovery failed"
+                    );
+                    break;
+                }
+            };
+            match self.decode_stream_read(consumer_group, reply).await {
+                Ok(mut shard_deliveries) => {
+                    deliveries.append(&mut shard_deliveries);
+                }
+                Err(e) => {
+                    if deliveries.is_empty() {
+                        return Err(e);
+                    }
+                    tracing::warn!(
+                        stream_key = %key,
+                        error = %e,
+                        delivered_count = deliveries.len(),
+                        "Stopping shard scan after partial deliveries because a later shard decode failed"
+                    );
+                    break;
+                }
+            }
         }
 
         if !deliveries.is_empty() {
-            deliveries.truncate(max_count);
             return Ok(deliveries);
         }
 
-        // Phase 2: Blocking Fallback. Read from a single shard to provide fair coverage over time.
-        // pass false to NOACK to ensure at-least-once delivery.
-        // Note: Blocking on a single shard means worst-case latency for a message on a specific
-        // shard can be (SHARD_COUNT * block_timeout) during periods of zero activity.
+        // Phase 2: Blocking fallback. Read at most one entry from at most max_count shards so
+        // Redis never moves more messages into the PEL than this poll can return.
         let blocking_options = Self::build_read_options(
             consumer_group,
             consumer_name,
@@ -384,26 +527,35 @@ impl RedisConsumer {
             false,
         );
 
-        let key_strs: Vec<&str> = keys.iter().map(|s| s.as_str()).collect();
-        let id_strs: Vec<&str> = vec![">"; keys.len()];
+        let blocking_key_count = max_count.min(keys.len());
+        let key_strs: Vec<&str> = keys
+            .iter()
+            .take(blocking_key_count)
+            .map(|s| s.as_str())
+            .collect();
+        let id_strs: Vec<&str> = vec![">"; key_strs.len()];
 
         let mut conn = self.connection_manager.clone();
         let reply: Result<StreamReadReply, RedisError> = conn
-            .xread_options(&key_strs[0..1], &id_strs[0..1], &blocking_options)
+            .xread_options(&key_strs, &id_strs, &blocking_options)
             .await;
 
+        // We pass a synthetic stream_key (`*`) to `recover_nogroup_and_retry` for logging
+        // purposes, as Phase 2 uses a single `XREAD` over multiple shard keys. This ensures
+        // the NOGROUP recovery logs a logical aggregate stream rather than a misleading single shard.
+        let stream_key_log = format!("{tenant_id}:{stream_base}:*");
         let reply = self
             .recover_nogroup_and_retry(
                 tenant_id,
                 stream_base,
-                key_strs[0],
+                &stream_key_log,
                 consumer_group,
                 "blocking poll_once",
                 reply,
                 || async {
                     let mut retry_conn = self.connection_manager.clone();
                     retry_conn
-                        .xread_options(&key_strs[0..1], &id_strs[0..1], &blocking_options)
+                        .xread_options(&key_strs, &id_strs, &blocking_options)
                         .await
                 },
             )
@@ -417,8 +569,7 @@ impl RedisConsumer {
             return Ok(Vec::new());
         }
 
-        let deliveries = Self::decode_stream_read(reply)?;
-        Ok(deliveries)
+        self.decode_stream_read(consumer_group, reply).await
     }
 
     async fn claim_pending_once(
@@ -439,16 +590,36 @@ impl RedisConsumer {
         let keys = Self::stream_keys_for_tenant_ordered(tenant_id, stream_base, start_shard);
         let mut claimed = Vec::new();
 
-        for key in keys {
+        'shards: for key in keys {
             if claimed.len() >= max_count {
                 break;
             }
 
             let mut next_stream_id = "0-0".to_string();
+
+            // Limit loop iterations to prevent an infinite empty scan (DoS loop) when
+            // the pending entries list (PEL) is filled with messages that are not yet idle enough.
+            const MAX_AUTOCLAIM_SCANS: usize = 10;
+            let mut scan_count = 0;
+
             loop {
                 if claimed.len() >= max_count {
                     break;
                 }
+                if scan_count >= MAX_AUTOCLAIM_SCANS {
+                    tracing::warn!(
+                        tenant_id = %tenant_id,
+                        stream_key = %key,
+                        consumer_group = %consumer_group,
+                        scan_count = scan_count,
+                        max_autoclaim_scans = MAX_AUTOCLAIM_SCANS,
+                        claimed_count = claimed.len(),
+                        max_count = max_count,
+                        "MAX_AUTOCLAIM_SCANS exhausted before reaching max_count; stopping autoclaim scan for this shard to prevent DoS loop"
+                    );
+                    break;
+                }
+                scan_count += 1;
 
                 let remaining = max_count - claimed.len();
                 let mut conn = self.connection_manager.clone();
@@ -485,11 +656,37 @@ impl RedisConsumer {
                                 .await
                         },
                     )
-                    .await?;
+                    .await;
 
-                let reply = reply.map_err(|e| {
-                    EventError::Consumer(format!("failed to claim pending entries: {e}"))
-                })?;
+                let reply = match reply {
+                    Ok(Ok(reply)) => reply,
+                    Ok(Err(e)) => {
+                        if claimed.is_empty() {
+                            return Err(EventError::Consumer(format!(
+                                "failed to claim pending entries: {e}"
+                            )));
+                        }
+                        tracing::warn!(
+                            stream_key = %key,
+                            error = %e,
+                            claimed_count = claimed.len(),
+                            "Stopping autoclaim scan after partial deliveries because a later shard read failed"
+                        );
+                        return Ok(claimed);
+                    }
+                    Err(e) => {
+                        if claimed.is_empty() {
+                            return Err(e);
+                        }
+                        tracing::warn!(
+                            stream_key = %key,
+                            error = %e,
+                            claimed_count = claimed.len(),
+                            "Stopping autoclaim scan after partial deliveries because NOGROUP recovery failed"
+                        );
+                        return Ok(claimed);
+                    }
+                };
 
                 let claimed_entries = reply.claimed;
                 let next_cursor = reply.next_stream_id;
@@ -501,18 +698,48 @@ impl RedisConsumer {
                     continue;
                 }
 
-                claimed.extend(Self::decode_claimed(
+                match self.decode_claimed(
                     &key,
+                    consumer_group,
                     StreamClaimReply {
                         ids: claimed_entries,
                     },
-                )?);
+                ).await {
+                    Ok(mut dec_claimed) => claimed.append(&mut dec_claimed),
+                    Err(e) => {
+                        if claimed.is_empty() {
+                            return Err(e);
+                        }
+                        tracing::warn!(
+                            tenant_id = %tenant_id,
+                            stream_key = %key,
+                            consumer_group = %consumer_group,
+                            claimed_count = claimed.len(),
+                            error = %e,
+                            "Stopping autoclaim scan after partial deliveries because a later shard decode failed"
+                        );
+                        // Preserve previously claimed messages rather than discarding them,
+                        // returning early so the isolation error isn't silently swallowed.
+                        break 'shards;
+                    }
+                }
 
                 if next_cursor == "0-0" {
                     break;
                 }
                 next_stream_id = next_cursor;
             }
+        }
+
+        if claimed.len() > max_count {
+            tracing::warn!(
+                tenant_id = %tenant_id,
+                stream_base = %stream_base,
+                claimed_count = claimed.len(),
+                max_count = max_count,
+                "XAUTOCLAIM fetched more messages than max_count; truncating result to max_count (excess messages remain in PEL)"
+            );
+            claimed.truncate(max_count);
         }
 
         Ok(claimed)
@@ -737,7 +964,7 @@ mod tests {
 
         let err = RedisConsumer::decode_stream_entry("tenant-2:events:4", &stream_id)
             .expect_err("tenant mismatch must fail");
-        assert!(matches!(err, EventError::Consumer(_)));
+        assert!(matches!(err, EventError::TenantIsolation { .. }));
     }
 
     #[test]
@@ -760,6 +987,50 @@ mod tests {
             RedisConsumer::decode_stream_entry("tenant-1:events:4", &stream_id).expect("delivery");
         let encoded = serde_json::to_string(&delivery.event).expect("encode");
         assert_eq!(encoded, payload);
+    }
+
+    #[tokio::test]
+    async fn test_decode_stream_read_continues_if_xack_fails() {
+        let node = Redis::default()
+            .with_tag("7.2-alpine")
+            .start()
+            .await
+            .expect("start redis");
+        let port = node.get_host_port_ipv4(REDIS_PORT).await.expect("get port");
+        let redis_url = format!("redis://127.0.0.1:{port}/");
+        let client = redis::Client::open(redis_url).unwrap();
+        let consumer = RedisConsumer::new(client.clone()).await.unwrap();
+
+        // Create a STRING key so XACK will fail with WRONGTYPE
+        let mut conn = client.get_connection_manager().await.unwrap();
+        let _: () = redis::cmd("SET")
+            .arg("tenant-1:events:0")
+            .arg("not a stream")
+            .query_async(&mut conn)
+            .await
+            .unwrap();
+
+        // Construct a StreamReadReply with a poison pill
+        let stream_id = StreamId {
+            id: "1-0".to_string(),
+            map: [("data".to_string(), redis::Value::BulkString(b"invalid_json".to_vec()))]
+                .into_iter()
+                .collect(),
+            milliseconds_elapsed_from_delivery: None,
+            delivered_count: None,
+        };
+        let reply = redis::streams::StreamReadReply {
+            keys: vec![redis::streams::StreamKey {
+                key: "tenant-1:events:0".to_string(),
+                ids: vec![stream_id],
+            }],
+        };
+
+        let result = consumer.decode_stream_read("mygroup", reply).await;
+
+        // Should return Ok(Vec::new()) even if XACK failed, to prevent orphaning mid-batch
+        assert!(result.is_ok(), "must return Ok when xack fails to preserve valid deliveries");
+        assert!(result.unwrap().is_empty(), "must return empty deliveries when only poison pill is present");
     }
 
     #[tokio::test]
