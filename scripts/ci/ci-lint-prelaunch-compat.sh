@@ -12,9 +12,14 @@ if [[ -z "${base_ref}" ]]; then
   fi
 fi
 
-if [[ -z "${base_ref}" ]] || ! git rev-parse --verify "${base_ref}" >/dev/null 2>&1; then
-  echo "prelaunch compat lint skipped: no base ref available"
-  exit 0
+if [[ -z "${base_ref}" ]]; then
+  echo "prelaunch compat lint error: base branch reference could not be determined" >&2
+  exit 1
+fi
+
+if ! git rev-parse --verify "${base_ref}" >/dev/null 2>&1; then
+  echo "prelaunch compat lint error: base ref '${base_ref}' could not be resolved" >&2
+  exit 1
 fi
 
 diff_range="${base_ref}...HEAD"
