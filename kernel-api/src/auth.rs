@@ -833,10 +833,8 @@ mod tests {
     fn setup_auth_runtime_test() -> [u8; 64] {
         let (private_key, public_key_b64) = TEST_KEYS.get_or_init(|| {
             use ed25519_dalek::{SigningKey, VerifyingKey};
-            use rand::rngs::OsRng;
 
-            let mut csprng = OsRng;
-            let signing_key = SigningKey::generate(&mut csprng);
+            let signing_key = SigningKey::from_bytes(&[42u8; 32]);
             let verifying_key: VerifyingKey = (&signing_key).into();
 
             let mut combined = [0u8; 64];

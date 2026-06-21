@@ -22,10 +22,8 @@ pub fn setup() {
 fn get_test_keypair() -> (Vec<u8>, String) {
     let (priv_bytes, pub_b64) = TEST_KEYS.get_or_init(|| {
         use ed25519_dalek::{SigningKey, VerifyingKey};
-        use rand::rngs::OsRng;
 
-        let mut csprng = OsRng;
-        let signing_key = SigningKey::generate(&mut csprng);
+        let signing_key = SigningKey::from_bytes(&[42u8; 32]);
         let verifying_key: VerifyingKey = (&signing_key).into();
 
         // PASETO V4 Public expects a 64-byte private key (seed + public)
