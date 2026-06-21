@@ -42,7 +42,7 @@ temp-env = "=0.3.6"
 # test-utils feature is primarily used for integration tests
 kernel-data = { path = "../kernel-data", features = ["test-utils"] }
 ed25519-dalek = { workspace = true }
-rand = "0.8"
+rand = "0.10"
 
 [features]
 enable_dev_auth = ["kernel-data/enable_dev_auth"]
