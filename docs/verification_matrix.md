@@ -12,10 +12,11 @@
 
 | REQ-ID | 検証ゲート | 主検証ジョブ/手段 | 失敗条件 |
 |---|---|---|---|
+| `REQ-PRELAUNCH-COMPAT` | PR-Blocking | `ci:lint-prelaunch-compat`, `ci:lint-traceability` | Pre-Launch中に未公開境界向けの互換性コードが追加され、許可根拠（公開済み境界・実データ/外部連携・仕様承認のいずれか）と対象境界・期限・削除条件・監視指標・削除予定Issueが記録されていない |
 | `REQ-AUTH-SEC` | PR-Blocking | `ci:lint-sql-security`, `ci:test-contract`（auth suite）, `ci:e2e-frontend-security` | `SECURITY DEFINER` 標準契約違反、`X-Tenant-Id` の本番許容、`401/403` 境界の逸脱 |
 | `REQ-AUTH-SOURCE` | PR-Blocking | `ci:test-auth-contract` | Token/Header抽出不備、Debugヘッダの本番受理 |
 | `REQ-CONTRACT-VERIFY` | PR-Blocking | `ci:lint-traceability`, `ci:test-contract`, `ci:test-observability` | 契約ドキュメントと実装/検証の不整合、契約テスト欠落、メトリクス契約欠落 |
-| `REQ-TENANT-TOKEN-V2` | PR-Blocking + Nightly | `ci:test-auth-contract`, `nightly:test-token-compat`, `nightly:test-token-version-usage` | v2発行不備、`kid` 欠落受理、互換期限超過受理、14日連続ゼロ未達でv1停止 |
+| `REQ-TENANT-TOKEN-V2` | PR-Blocking + Conditional Nightly | `ci:test-auth-contract`, `nightly:test-token-compat`（Launch Boundary例外時のみ）, `nightly:test-token-version-usage`（Launch Boundary例外時のみ） | v2発行不備、`kid` 欠落受理。Launch Boundary例外が成立した場合のみ、互換期限超過受理、14日連続ゼロ未達でのv1停止不履行 |
 | `REQ-KEY-REVOCATION-SLO` | PR-Blocking + Nightly + Drill | `ci:lint-drill-readiness`, `nightly:test-key-revocation-chaos`, 月次失効演習 | Readiness欠落、失効伝播 `p95 > 60s`、失効鍵で検証成功 |
 | `REQ-QUOTA-HTTP-CONTRACT` | PR-Blocking | `ci:test-contract`（quota suite） | 判定表と異なるHTTPコード、`Retry-After` 欠落/異常 |
 | `REQ-IDEMPOTENCY-HEADER` | PR-Blocking | `ci:test-contract`（idempotency suite） | `Idempotency-Key` 契約逸脱、衝突時 `409` 不履行 |
@@ -38,7 +39,7 @@
 | テナント隔離 | `TenantContext` なしDB操作を禁止 | `trybuild` によるコンパイル失敗テスト | `TenantScoped<T>` を経由しないDB操作がコンパイル成功 |
 | テナント隔離 | `DatabaseConnection` の外部公開禁止 | 可視性チェック + sealed trait 制約 | 生接続型が `pub` で公開される |
 | 認証トークン | `tenant_token` v2 (`kid` 必須) | auth schema lint + unit test | `kid` 欠落トークンを受理 |
-| 認証トークン | v1移行窓の機械判定 | migration policy lint | 2リリース/60日・14日連続ゼロ条件の未実装 |
+| 認証トークン | Launch Boundary例外時のv1旧形式受理窓の機械判定 | migration policy lint | 例外なしのPre-Launchで旧形式受理が有効、または例外成立時に2リリース/60日・14日連続ゼロ条件が未実装 |
 | 特権SQL | `SECURITY DEFINER` 標準テンプレート必須 | SQL Linter (AST優先) | `SET search_path = flexi, pg_catalog, pg_temp` 不在、`REVOKE ... FROM PUBLIC` 不在、`pg_catalog` 修飾欠落 |
 | 特権SQL | `flexi.kernel_mode` 利用禁止 | SQL AST lint (migration対象限定) | マイグレーションSQL内に検出 |
 | マニフェスト | 配布時は `DistManifest` のみ受理 | `manifest-validator` | `^`/`~` などRange残存、`digest` 欠落、未解決バージョン |
@@ -54,6 +55,7 @@
 | SLO | 測定環境固定 | `ops/slo_profile.yaml` lint | 必須項目欠落、無効値、トラフィックミックス欠落 |
 | SLO再現性 | ベンチ入力の固定化（seed/データ分布） | benchmark profile lint | `dataset_seed` / `dataset_version` / `distribution_profile` 欠落、実行時プロファイル不一致 |
 | Drill Readiness | DR実演習の準備情報固定 | runbook metadata lint | `runbook_updated_at` / `owner` / `next_drill_at` / `last_drill_report` 欠落 |
+| Launch Boundary | Pre-Launch中の未公開境界向け互換性コード禁止 | `ci:lint-prelaunch-compat` + `REQ-PRELAUNCH-COMPAT` の追跡 | 後方互換 shim、legacy fallback、deprecated API、旧形式受理、移行窓が、許可根拠と例外証跡なしに追加される |
 
 ## 2. 契約テスト (PR-Blocking: Integration/E2E)
 
@@ -62,7 +64,7 @@
 | 認証/RLS | `test_auth_replay_attack` | 同一Nonce再利用拒否 | 2回目は認証失敗 |
 | 認証/RLS | `test_rls_fail_closed` | 未認証時のFail-Closed | 読み取り結果0行 |
 | 認証トークン | `test_tenant_token_v2_kid_required` | `kid` なし拒否 | 認証失敗 |
-| 認証トークン | `test_tenant_token_v1_transition_window` | v1互換期間挙動 | 期間内受理・期間後拒否 |
+| 認証トークン | `test_tenant_token_v1_transition_window` | Launch Boundary例外時のv1旧形式受理期間挙動 | 例外なしのPre-Launchでは旧形式を受理しない。例外成立時のみ期間内受理・期間後拒否 |
 | 冪等性 | `test_idempotency_conflict` | 同一キー・異なる本文 | `409 Conflict` |
 | 冪等性 | `test_action_id_reuse` | 同一キー・同一本文の再送 | 既存 `action_id` を返却 |
 | 冪等性 | `test_action_status_lookup` | `GET /actions/{action_id}` | `PENDING/COMPLETED/FAILED` が整合 |
@@ -101,8 +103,8 @@
 | 領域 | テストケース | 検証観点 | 期待結果 |
 |---|---|---|---|
 | 鍵運用 | `nightly:test-key-revocation-chaos` | 失効伝播遅延 | `p95 <= 60秒` |
-| 認証トークン | `nightly:test-token-compat` | v1/v2互換窓検証 | 2リリース/60日規約に一致 |
-| 認証トークン | `nightly:test-token-version-usage` | v1/v2利用率可視化 | 14日連続ゼロ判定に必要な時系列を保持 |
+| 認証トークン | `nightly:test-token-compat` | Launch Boundary例外時のv1/v2互換窓検証 | 例外成立時のみ2リリース/60日規約に一致 |
+| 認証トークン | `nightly:test-token-version-usage` | Launch Boundary例外時のv1/v2利用率可視化 | 例外成立時のみ14日連続ゼロ判定に必要な時系列を保持 |
 | SLO | `nightly:test-slo-smoke` | Warm/Cold分離計測 | 逸脱時アラート発報 |
 | SLO | `nightly:test-slo-reproducibility` | 再現性（seed/分布/反復） | 同一 `dataset_seed` / `dataset_version` で結果の許容分散内再現、プロファイル不一致時Fail |
 | イベント耐障害 | `nightly:test-claim-pending-failover` | `claim_pending` 再配分 | 順序維持で回復 |
@@ -138,7 +140,8 @@
 
 | ジョブ名 | 実行内容 | ブロッキング |
 |---|---|---|
-| `ci:lint-traceability` | `REQ-*` 追加/変更時の検証マトリクス追随確認 | 必須 |
+| `ci:lint-prelaunch-compat` | PR差分で実装ファイルに互換性コードが追加された場合、`REQ-PRELAUNCH-COMPAT` 例外マーカーと `basis/boundary/deadline/removal/metric/issue` 証跡フィールドを要求する。既存互換コードの棚卸しはPRレビューで確認する | 必須 |
+| `ci:lint-traceability` | `REQ-*` 追加/変更時の検証マトリクス追随確認。Launch Boundaryに関する互換性例外はPRレビューで証跡確認する | 必須 |
 | `ci:lint-sql-security` | `SECURITY DEFINER` テンプレート検証、`flexi.kernel_mode` 検出（AST） | 必須 |
 | `ci:lint-manifest` | `DevManifest`/`DistManifest` ルール検証 | 必須 |
 | `ci:lint-manifest-trust-root` | `manifest_trust_root` 構造・署名・有効期限検証 | 必須 |

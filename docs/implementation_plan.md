@@ -7,6 +7,23 @@
 
 ---
 
+## Launch Boundary（公開境界）
+
+**Current launch status: Pre-Launch**
+
+FlexiSuite Kernel はまだ公開本番環境で一度も稼働しておらず、外部利用者に対する互換性契約も成立していない。この状態宣言は、本仕様における後方互換・移行・旧形式受理の解釈前提である。
+
+- `Current launch status` は本仕様内の互換性判断フラグとして扱う。別ファイルや環境変数による重複フラグを作ってはならない **(MUST NOT)**。
+- `Pre-Launch` の間、公開済みでない API、永続化形式、トークン形式、Manifest、Worker protocol、設定値、内部データモデルに対する後方互換 shim、legacy fallback、deprecated API、旧形式受理、移行窓を実装してはならない **(MUST NOT)**。
+- 互換性コードを導入してよいのは、以下のいずれかを同一PRで明示した場合に限る **(MAY)**。
+  - 実際に公開済みの本番境界（外部利用者、配布済みSDK、永続化済み本番データ形状、運用中のSelf-Hosted契約）が存在する。
+  - Launch 前でも、移行対象の実データまたは外部連携が存在し、互換性なしでは検証・移行・安全な巻き戻しが成立しない。
+  - 憲法改定または仕様承認により、互換性コードを明示的な例外として採用する。
+- 例外として互換性コードを導入するPRは、対象境界、期限、削除条件、監視指標、削除予定Issueを記録しなければならない **(MUST)**。
+- 本ポリシー導入時点で既に存在する互換性コードは、次に該当コードへ触れるPRで、Launch Boundary例外として記録するか削除するかを判断しなければならない **(MUST)**。未変更の既存コードを一括で正当化するものではない。
+- 本仕様内にある旧形式受理としての `v1`、後方互換目的の移行期間、後方互換、互換性目的の grace window、旧形式受理に関する記述は、公開済み境界または明示例外が成立した場合の契約である。`Pre-Launch` の間、それらを「将来に備えて」実装してはならない **(MUST NOT)**。APIバージョン、Manifestバージョン、鍵ローテーションなど安全運用上の猶予期間は、この禁止の対象ではない。
+- `Current launch status` を `Launched` または同等の状態へ変更するPRは、`docs/verification_matrix.md`、運用Runbook、リリース境界、互換性維持ポリシーを同時に更新しなければならない **(MUST)**。
+
 ## 0. 契約トレーサビリティと品質ゲート
 
 本仕様は、要件の「記述」と「検証」を分離しない。高リスク要件は `REQ-*` 識別子を持ち、`docs/verification_matrix.md` に少なくとも1つ以上の**自動検証**（`PR-Blocking` または `Nightly`）を紐付け**なければならない (MUST)**。
@@ -22,6 +39,7 @@
 
 | REQ-ID | 要件サマリ | 正本セクション |
 |---|---|---|
+| `REQ-PRELAUNCH-COMPAT` | Pre-Launch中は未公開境界向けの後方互換コードを原則禁止する | Launch Boundary |
 | `REQ-TENANT-TOKEN-V2` | `tenant_token` は `kid` を含むv2形式で発行し、段階移行を行う | 3.1, 4.6 |
 | `REQ-AUTH-SOURCE` | `tenant_token` またはデバッグヘッダからのコンテキスト抽出を強制する | 3.1 |
 | `REQ-KEY-REVOCATION-SLO` | 緊急失効は全ノードへ迅速伝播し、旧鍵受理を停止する | 4.6 |
@@ -100,6 +118,7 @@
 - **署名付きテナント認証 (Authorize Tenant)**:
   - アプリケーションはトランザクション開始直後に `SET LOCAL flexi.tenant_token = 'v2:kid:ts:nonce:tenant_id:signature'` を実行し、続いて `SELECT flexi.authorize_tenant()` を呼び出さ**なければならない (MUST)**。`signature` は `v2:kid:ts:nonce:tenant_id` に対するHMAC署名とする。
   - **移行互換 (REQ-TENANT-TOKEN-V2)**:
+    - 本項の旧形式 `v1` 受理は、Launch Boundaryに基づき、公開済み境界または明示例外が成立した場合に限り実装してよい **(MAY)**。`Pre-Launch` で該当境界・実データ・仕様承認が存在しない場合、旧形式受理を実装してはならない **(MUST NOT)**。
     - 旧形式 `v1:signature:ts:nonce:tenant_id` は、v2導入後の **2リリース期間** に限り検証を許可してよい **(MAY)**。
     - **2リリース期間の定義**: 本番環境向けに発行される連番リリースを2回（例: `kernel-v1.12.0` と `kernel-v1.13.0`）とし、暦日では最大60日を上限とする。2回到達または60日経過のいずれか早い方で互換期間を終了**しなければならない (MUST)**。
     - v2導入時点で新規発行は v2のみとし、v1新規発行を許可してはならない **(MUST NOT)**。

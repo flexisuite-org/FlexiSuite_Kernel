@@ -27,6 +27,19 @@ jobs:
       - name: Run traceability lint
         run: bash scripts/ci/ci-lint-traceability.sh
 
+  lint-prelaunch-compat:
+    name: ci:lint-prelaunch-compat
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Run pre-launch compatibility lint
+        run: bash scripts/ci/ci-lint-prelaunch-compat.sh
+
   lint-slo-profile:
     name: ci:lint-slo-profile
     runs-on: ubuntu-latest
