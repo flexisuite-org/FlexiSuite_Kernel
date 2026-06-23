@@ -10,4 +10,5 @@ for marker in manifest_trust_root.json manifest_trust_root.json.sig retired revo
   }
 done
 
-echo "manifest trust root lint stub passed"
+echo "::warning::manifest trust root lint is a scaffold check; signature verification is still required"
+echo "manifest trust root lint scaffold check passed"

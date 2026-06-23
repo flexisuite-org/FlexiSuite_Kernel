@@ -40,6 +40,7 @@ changed_files="$(
     ':(exclude)**/*.test.*' \
     ':(exclude)**/*.md' \
     ':(exclude)**/README*' \
+    ':(exclude).coderabbit.yaml' \
     ':(exclude).github/**' \
     ':(exclude)scripts/ci/ci-lint-prelaunch-compat.sh'
 )"

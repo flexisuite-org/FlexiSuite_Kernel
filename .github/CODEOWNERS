@@ -1,0 +1,33 @@
+# CODEOWNERS は高リスク領域を現在の書き込み権限者に割り当てる。
+# 組織内の team slug が安定したら、ユーザー名からチームへ置き換える。
+
+* @pdHaku0
+
+# 憲法文書とエージェント運用。
+/AGENTS.md @pdHaku0
+/docs/flexisuite-concept.md @pdHaku0
+/docs/implementation_plan.md @pdHaku0
+/docs/negative-space-spec.md @pdHaku0
+/docs/verification_matrix.md @pdHaku0
+/docs/development-workflow.md @pdHaku0
+
+# リポジトリ統治、CI、供給網ポリシー。
+/.github/** @pdHaku0
+/scripts/ci/** @pdHaku0
+/deny.toml @pdHaku0
+/.cargo/audit.toml @pdHaku0
+/docs/security-risk-acceptance.md @pdHaku0
+/Cargo.toml @pdHaku0
+/Cargo.lock @pdHaku0
+
+# Kernel境界、テナント分離、Runtime隔離、データ移行。
+/kernel-core/** @pdHaku0
+/kernel-api/** @pdHaku0
+/kernel-data/** @pdHaku0
+/kernel-runtime/** @pdHaku0
+/kernel-registry/** @pdHaku0
+/kernel-archiver/** @pdHaku0
+/ops/** @pdHaku0
+
+# 契約テストは高リスク要件の公開挙動を固定する。
+/tests/contract/** @pdHaku0

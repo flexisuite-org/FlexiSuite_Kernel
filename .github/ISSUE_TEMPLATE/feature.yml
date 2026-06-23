@@ -1,0 +1,119 @@
+name: "Feature / Enhancement"
+description: "機能追加や改善の提案。REQ-ID が不明でも maintainer triage に回せます。"
+title: "[Feature] "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        exploit手順、実在tenant識別子、悪用可能なtenant影響、secret、未公開の緩和策を含む場合は公開Issueに書かず、SECURITY.md に従ってください。
+  - type: textarea
+    id: context
+    attributes:
+      label: 履歴なしのAIエージェント向けコンテキスト
+      description: 履歴なしのAIエージェントが、このIssueだけを一次情報として着手できる背景を書いてください。
+      placeholder: |
+        - 背景:
+        - 現在の課題:
+        - 対象ファイル / 領域:
+        - 非対象:
+        - 読むべき仕様セクション:
+    validations:
+      required: true
+  - type: textarea
+    id: objective
+    attributes:
+      label: 目的
+      description: このタスクで何を達成するのか。
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: 完了条件
+      description: 実装完了を判断できるチェックリストを書いてください。
+      placeholder: |
+        - [ ]
+        - [ ]
+        - [ ] 影響範囲に対応する PR-Blocking gate がパスしている
+        - [ ] 実行した検証コマンドをPR本文に記録している
+    validations:
+      required: true
+  - type: input
+    id: traceability
+    attributes:
+      label: REQ-ID / Phase
+      description: 分かる場合は REQ-... / Phase ... を書いてください。不明な場合は「不明 / maintainer triage needed」で構いません。
+  - type: input
+    id: design_doc
+    attributes:
+      label: Design Doc / 関連仕様
+      description: 関連する仕様、設計文書、Issue、PRを書いてください。
+  - type: dropdown
+    id: verification_matrix
+    attributes:
+      label: Verification Matrix更新
+      options:
+        - 不明（maintainer triage needed）
+        - 更新が必要そう
+        - 更新不要そう
+    validations:
+      required: true
+  - type: textarea
+    id: constraints
+    attributes:
+      label: 異常系・制約事項
+      description: 失敗時の動作、セキュリティ制約、性能制約、非対象を書いてください。
+    validations:
+      required: true
+  - type: dropdown
+    id: launch_boundary
+    attributes:
+      label: Launch Boundary例外
+      options:
+        - 不明（maintainer triage needed）
+        - 例外なし
+        - 例外あり（basis/boundary/deadline/removal/metric/issue が必要）
+    validations:
+      required: true
+  - type: textarea
+    id: launch_boundary_evidence
+    attributes:
+      label: Launch Boundary証跡
+      description: 例外なしなら N/A、不明なら不明、例外ありなら basis / boundary / deadline / removal / metric / issue を書いてください。
+      render: text
+    validations:
+      required: true
+  - type: checkboxes
+    id: constitution
+    attributes:
+      label: 憲法確認（分かる範囲）
+      options:
+        - label: docs/implementation_plan.md の該当箇所を確認した
+        - label: docs/flexisuite-concept.md の思想と矛盾しないと思われる
+        - label: docs/negative-space-spec.md の禁止事項に触れないと思われる
+        - label: docs/verification_matrix.md の更新要否を確認した
+        - label: scaffold-only check を実検証として扱わない
+  - type: textarea
+    id: validation_plan
+    attributes:
+      label: 検証計画
+      placeholder: |
+        - PR-Blocking:
+        - Nightly:
+        - Operational Drill:
+        - scaffold-only check に留まる検証:
+    validations:
+      required: true
+  - type: dropdown
+    id: priority
+    attributes:
+      label: Priority
+      options:
+        - P0-Critical
+        - P1-High
+        - P2-Medium
+        - P3-Low
+        - P4-Backlog
+    validations:
+      required: true

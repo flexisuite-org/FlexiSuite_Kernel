@@ -17,3 +17,8 @@ The entire workspace requires **Rust 1.85** or newer.
 ## Getting Started
 
 Refer to the documentation in `docs/` for architecture details and setup instructions.
+
+## Contributing and Security
+
+- Contribution workflow: [`CONTRIBUTING.md`](./CONTRIBUTING.md)
+- Security reporting: [`SECURITY.md`](./SECURITY.md)

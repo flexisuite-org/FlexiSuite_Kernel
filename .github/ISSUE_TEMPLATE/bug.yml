@@ -1,0 +1,115 @@
+name: "Bug Report"
+description: "不具合報告。脆弱性詳細は公開Issueに書かないでください。"
+title: "[Bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        exploit手順、実在tenant識別子、悪用可能なtenant影響、secret、未公開の緩和策を含む場合は公開Issueに書かず、SECURITY.md に従ってください。
+  - type: textarea
+    id: summary
+    attributes:
+      label: 概要
+      description: 何が壊れているかを簡潔に書いてください。
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: 履歴なしのAIエージェント向けコンテキスト
+      description: 過去の会話を知らないエージェントが、このIssueだけで着手できる情報を書いてください。
+      placeholder: |
+        - 影響領域:
+        - 関連Issue / PR:
+        - 関連仕様:
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: 再現手順
+      placeholder: |
+        1.
+        2.
+        3.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: 期待される動作
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: 実際の動作
+    validations:
+      required: true
+  - type: input
+    id: traceability
+    attributes:
+      label: REQ-ID / Phase
+      description: 分かる場合は REQ-... / Phase ... を書いてください。不明な場合は「不明 / maintainer triage needed」で構いません。
+  - type: dropdown
+    id: verification_matrix
+    attributes:
+      label: Verification Matrix更新
+      options:
+        - 不明（maintainer triage needed）
+        - 更新が必要そう
+        - 更新不要そう
+    validations:
+      required: true
+  - type: dropdown
+    id: launch_boundary
+    attributes:
+      label: Launch Boundary例外
+      options:
+        - 不明（maintainer triage needed）
+        - 例外なし
+        - 例外あり（basis/boundary/deadline/removal/metric/issue が必要）
+    validations:
+      required: true
+  - type: textarea
+    id: launch_boundary_evidence
+    attributes:
+      label: Launch Boundary証跡
+      description: 例外なしなら N/A、不明なら不明、例外ありなら basis / boundary / deadline / removal / metric / issue を書いてください。
+      render: text
+    validations:
+      required: true
+  - type: checkboxes
+    id: disclosure_check
+    attributes:
+      label: 公開してよい内容か
+      options:
+        - label: 公開してはいけない脆弱性詳細を含めていない
+          required: true
+  - type: dropdown
+    id: boundary_impact
+    attributes:
+      label: セキュリティ・分離境界への影響
+      options:
+        - 不明（maintainer triage needed）
+        - 影響なしと思われる
+        - Tenant isolation / RLS / TenantContext
+        - Auth / token / key revocation
+        - Manifest signing / trust root / Developer Mode
+        - Worker isolation / sandbox / quota
+        - Diagnostics / PII / consent
+        - Dependencies / RustSec / supply chain
+    validations:
+      required: true
+  - type: textarea
+    id: boundary_notes
+    attributes:
+      label: 境界影響メモ
+      description: 分かる範囲で、影響がありそうな理由や不明点を書いてください。
+  - type: textarea
+    id: validation
+    attributes:
+      label: 検証ヒント
+      description: コマンド、失敗テスト、secretを除いたログ、期待するgateなど。
+      render: text

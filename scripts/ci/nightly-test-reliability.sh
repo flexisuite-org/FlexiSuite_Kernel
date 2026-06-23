@@ -22,4 +22,5 @@ for nightly in \
   }
 done
 
-echo "nightly reliability stub passed"
+echo "::warning::nightly reliability is a scaffold check; long-running reliability jobs are not implemented here"
+echo "nightly reliability scaffold check passed"

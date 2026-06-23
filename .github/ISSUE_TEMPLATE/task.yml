@@ -1,0 +1,121 @@
+name: "Task / Refactor"
+description: "リファクタリング、CI改善、ドキュメント更新などの内部タスク。"
+title: "[Task] "
+labels: ["internal"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        exploit手順、実在tenant識別子、悪用可能なtenant影響、secret、未公開の緩和策を含む場合は公開Issueに書かず、SECURITY.md に従ってください。
+  - type: textarea
+    id: overview
+    attributes:
+      label: 概要
+      description: 作業の目的と範囲を書いてください。
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: 履歴なしのAIエージェント向けコンテキスト
+      placeholder: |
+        - 背景:
+        - 対象ファイル / 領域:
+        - 非対象:
+        - 読むべき仕様セクション:
+    validations:
+      required: true
+  - type: input
+    id: traceability
+    attributes:
+      label: REQ-ID / Phase
+      description: 分かる場合は REQ-... / Phase ... を書いてください。不明な場合は「不明 / maintainer triage needed」で構いません。
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - ci
+        - deps
+        - documentation
+        - rust
+        - security
+        - other
+    validations:
+      required: true
+  - type: dropdown
+    id: verification_matrix
+    attributes:
+      label: Verification Matrix更新
+      options:
+        - 不明（maintainer triage needed）
+        - 更新が必要そう
+        - 更新不要そう
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: 完了条件
+      placeholder: |
+        - [ ]
+        - [ ]
+        - [ ] 実行した検証コマンドをPR本文に記録している
+    validations:
+      required: true
+  - type: textarea
+    id: impact
+    attributes:
+      label: 影響範囲
+      description: どこに影響が出るか。破壊的変更の有無も書いてください。
+    validations:
+      required: true
+  - type: dropdown
+    id: launch_boundary
+    attributes:
+      label: Launch Boundary例外
+      options:
+        - 不明（maintainer triage needed）
+        - 例外なし
+        - 例外あり（basis/boundary/deadline/removal/metric/issue が必要）
+    validations:
+      required: true
+  - type: textarea
+    id: launch_boundary_evidence
+    attributes:
+      label: Launch Boundary証跡
+      description: 例外なしなら N/A、不明なら不明、例外ありなら basis / boundary / deadline / removal / metric / issue を書いてください。
+      render: text
+    validations:
+      required: true
+  - type: checkboxes
+    id: constitution
+    attributes:
+      label: 憲法確認（分かる範囲）
+      options:
+        - label: docs/implementation_plan.md 等の関連仕様を確認した
+        - label: Issue本文にない推測で公開API・永続化形式・信頼境界を変更しない
+        - label: scaffold-only check を実検証として扱わない
+  - type: textarea
+    id: validation_plan
+    attributes:
+      label: 検証計画
+      placeholder: |
+        - PR-Blocking:
+        - Nightly:
+        - Operational Drill:
+        - scaffold-only check に留まる検証:
+    validations:
+      required: true
+  - type: dropdown
+    id: priority
+    attributes:
+      label: Priority
+      options:
+        - P0-Critical
+        - P1-High
+        - P2-Medium
+        - P3-Low
+        - P4-Backlog
+    validations:
+      required: true

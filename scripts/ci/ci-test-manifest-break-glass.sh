@@ -15,4 +15,5 @@ search_lines 'test_manifest_break_glass_scope_and_ttl' tests/contract/supplychai
   exit 1
 }
 
-echo "manifest break-glass contract stub passed"
+echo "::warning::manifest break-glass contract is a scaffold check; full contract test is still required"
+echo "manifest break-glass contract scaffold check passed"

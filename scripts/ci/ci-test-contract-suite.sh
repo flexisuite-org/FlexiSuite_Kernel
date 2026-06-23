@@ -18,4 +18,16 @@ suite_dir="tests/contract/${suite}"
   exit 1
 }
 
-echo "contract suite stub passed: ${suite}"
+case "$suite" in
+  auth | quota | idempotency | diagnostics | supplychain)
+    cargo test -p contract-tests "${suite}::"
+    ;;
+  worker)
+    echo "::warning::worker contract suite is a scaffold check; frontend/worker e2e implementation is still required"
+    echo "contract suite scaffold check passed: ${suite}"
+    ;;
+  *)
+    echo "unknown contract suite: ${suite}"
+    exit 1
+    ;;
+esac

@@ -9,24 +9,25 @@
 - `Nightly` は非PRブロッキングだが運用上必須とし、失敗時は24時間以内にインシデントを起票する。
 - `REQ-*` が `implementation_plan` に追加・変更されたPRは、本ファイルの追随更新がない場合にFailさせる。
 - `REQ-*` 未付与の `MUST/SHOULD` が追加・変更された場合も、本ファイルの該当領域（第1-4章）の更新を必須とする。
+- 下表の `ci:*` / `nightly:*` は仕様上の目標ゲート名である。現行CIで実検証に到達していないものは第5章の実装状態に従い、`scaffold:*` として扱う。
 
 | REQ-ID | 検証ゲート | 主検証ジョブ/手段 | 失敗条件 |
 |---|---|---|---|
 | `REQ-PRELAUNCH-COMPAT` | PR-Blocking | `ci:lint-prelaunch-compat`, `ci:lint-traceability` | Pre-Launch中に未公開境界向けの互換性コードが追加され、許可根拠（公開済み境界・実データ/外部連携・仕様承認のいずれか）と対象境界・期限・削除条件・監視指標・削除予定Issueが記録されていない |
-| `REQ-AUTH-SEC` | PR-Blocking | `ci:lint-sql-security`, `ci:test-contract`（auth suite）, `ci:e2e-frontend-security` | `SECURITY DEFINER` 標準契約違反、`X-Tenant-Id` の本番許容、`401/403` 境界の逸脱 |
-| `REQ-AUTH-SOURCE` | PR-Blocking | `ci:test-auth-contract` | Token/Header抽出不備、Debugヘッダの本番受理 |
-| `REQ-CONTRACT-VERIFY` | PR-Blocking | `ci:lint-traceability`, `ci:test-contract`, `ci:test-observability` | 契約ドキュメントと実装/検証の不整合、契約テスト欠落、メトリクス契約欠落 |
-| `REQ-TENANT-TOKEN-V2` | PR-Blocking + Conditional Nightly | `ci:test-auth-contract`, `nightly:test-token-compat`（Launch Boundary例外時のみ）, `nightly:test-token-version-usage`（Launch Boundary例外時のみ） | v2発行不備、`kid` 欠落受理。Launch Boundary例外が成立した場合のみ、互換期限超過受理、14日連続ゼロ未達でのv1停止不履行 |
+| `REQ-AUTH-SEC` | PR-Blocking | `ci:lint-sql-security`, `ci:test-contract (auth)`, `scaffold:ci:e2e-frontend-security` | `SECURITY DEFINER` 標準契約違反、`X-Tenant-Id` の本番許容、`401/403` 境界の逸脱 |
+| `REQ-AUTH-SOURCE` | PR-Blocking | `ci:test-contract (auth)` | Token/Header抽出不備、Debugヘッダの本番受理 |
+| `REQ-CONTRACT-VERIFY` | PR-Blocking | `ci:lint-traceability`, `ci:test-contract (auth)`, `ci:test-contract (diagnostics)`, `ci:test-contract (idempotency)`, `ci:test-contract (quota)`, `ci:test-contract (supplychain)`, `scaffold:ci:test-observability` | 契約ドキュメントと実装/検証の不整合、契約テスト欠落、メトリクス契約欠落 |
+| `REQ-TENANT-TOKEN-V2` | PR-Blocking + Conditional Nightly | `ci:test-contract (auth)`, `scaffold:nightly:test-reliability`（Launch Boundary例外時のみ） | v2発行不備、`kid` 欠落受理。Launch Boundary例外が成立した場合のみ、互換期限超過受理、14日連続ゼロ未達でのv1停止不履行 |
 | `REQ-KEY-REVOCATION-SLO` | PR-Blocking + Nightly + Drill | `ci:lint-drill-readiness`, `nightly:test-key-revocation-chaos`, 月次失効演習 | Readiness欠落、失効伝播 `p95 > 60s`、失効鍵で検証成功 |
-| `REQ-QUOTA-HTTP-CONTRACT` | PR-Blocking | `ci:test-contract`（quota suite） | 判定表と異なるHTTPコード、`Retry-After` 欠落/異常 |
-| `REQ-IDEMPOTENCY-HEADER` | PR-Blocking | `ci:test-contract`（idempotency suite） | `Idempotency-Key` 契約逸脱、衝突時 `409` 不履行 |
-| `REQ-IDEMPOTENCY-CONFLICT` | PR-Blocking | `ci:test-contract`（idempotency suite） | 衝突検知（同一キー・異Body）の失敗 |
-| `REQ-PROTOCOL-FALLBACK-UX` | PR-Blocking | `ci:e2e-frontend-security`, `ci:e2e-worker-protocol-fallback-a11y` | `protocol.error` 時に標準フォールバック/A11y要件未達 |
-| `REQ-DIAG-CONSENT` | PR-Blocking + Nightly | `ci:test-contract`（diagnostics consent suite）, `nightly:test-diagnostics-revocation-lag` | 同意なし送信、撤回後5分超で送信継続 |
-| `REQ-MANIFEST-TRUST-ROOT` | PR-Blocking + Nightly | `ci:lint-manifest-trust-root`, `ci:test-manifest-signature-contract`, `ci:test-manifest-break-glass`, `nightly:test-manifest-revocation-propagation`, `nightly:test-manifest-retired-window` | 署名検証順序違反、`revoked kid` 受理、`retired` 窓外受理、信頼ルート署名不一致、break-glassの時限/スコープ違反 |
-| `REQ-SUPPLYCHAIN-DIGEST-FORMAT` | PR-Blocking | `ci:test-contract` (supplychain) | digest prefix (`sha256-`/`sha384-`) 違反 |
-| `REQ-SUPPLYCHAIN-DIGEST-MATCH` | PR-Blocking | `ci:test-contract` (supplychain) | Manifest digest と artifact digest の不一致 |
-| `REQ-SIDELOADING-WARNING` | PR-Blocking | `ci:e2e-sideloading-warning` | Developer Mode時の警告・同意フロー欠落 |
+| `REQ-QUOTA-HTTP-CONTRACT` | PR-Blocking | `ci:test-contract (quota)` | 判定表と異なるHTTPコード、`Retry-After` 欠落/異常 |
+| `REQ-IDEMPOTENCY-HEADER` | PR-Blocking | `ci:test-contract (idempotency)` | `Idempotency-Key` 契約逸脱、衝突時 `409` 不履行 |
+| `REQ-IDEMPOTENCY-CONFLICT` | PR-Blocking | `ci:test-contract (idempotency)` | 衝突検知（同一キー・異Body）の失敗 |
+| `REQ-PROTOCOL-FALLBACK-UX` | PR-Blocking | `scaffold:ci:e2e-frontend-security`, `scaffold:ci:e2e-worker-protocol-fallback-a11y` | `protocol.error` 時に標準フォールバック/A11y要件未達 |
+| `REQ-DIAG-CONSENT` | PR-Blocking + Nightly | `ci:test-contract (diagnostics)`, `nightly:test-diagnostics-revocation-lag` | 同意なし送信、撤回後5分超で送信継続 |
+| `REQ-MANIFEST-TRUST-ROOT` | PR-Blocking + Nightly | `scaffold:ci:lint-manifest-trust-root`, `ci:test-contract (supplychain)`, `scaffold:ci:test-manifest-break-glass`, `scaffold:nightly:test-reliability` | 署名検証順序違反、`revoked kid` 受理、`retired` 窓外受理、信頼ルート署名不一致、break-glassの時限/スコープ違反 |
+| `REQ-SUPPLYCHAIN-DIGEST-FORMAT` | PR-Blocking | `ci:test-contract (supplychain)` | digest prefix (`sha256-`/`sha384-`) 違反 |
+| `REQ-SUPPLYCHAIN-DIGEST-MATCH` | PR-Blocking | `ci:test-contract (supplychain)` | Manifest digest と artifact digest の不一致 |
+| `REQ-SIDELOADING-WARNING` | PR-Blocking | `scaffold:ci:e2e-frontend-security` | Developer Mode時の警告・同意フロー欠落 |
 | `REQ-SLO-ENV-PROFILE` | PR-Blocking + Nightly | `ci:lint-slo-profile`, `nightly:test-slo-smoke` | `ops/slo_profile.yaml` 未一致でSLO判定 |
 | `REQ-DR-REHEARSAL` | PR-Blocking + Drill | `ci:lint-drill-readiness`, 月次ステージング/四半期本番相当演習 | Readiness欠落、RPO/RTO未達、演習記録欠落 |
 | `REQ-EVENT-GAP-001` | PR-Blocking | `ci:test-contract`（gap recovery suite） | Gap検出不備、欠番検知漏れ |
@@ -136,7 +137,43 @@
 | trust root | break-glass運用監視 | policy telemetry + audit | `manifest_signature_bypass_active_total`, `manifest_signature_bypass_expired_total` |
 | 信頼スコア | 係数固定 + 監査可能性 | バッチ計算 + 監査ログ | 再計算差分アラート |
 
-## 5. CI ジョブ構成 (推奨)
+## 5. CI ジョブ構成と実装状態
+
+実検証が未実装の足場は PR UI で見える status 名を `scaffold:*` にし、branch protection の required check に設定してはならない。ログの warning は補助であり、正式な `ci:*` / `nightly:*` 名で必須化するのは、失敗条件を実行で検出できる状態になってからとする。
+
+### 5.1 現行CIで required 候補にできる実ゲート
+
+| ジョブ名 | 現在の実行内容 | ブロッキング扱い |
+|---|---|---|
+| `ci:lint-test-utils-scope` | `test-utils` feature の使用範囲と release build を検証 | required候補 |
+| `ci:lint-traceability` | `REQ-*` 追加/変更時の検証マトリクス追随確認 | required候補 |
+| `ci:lint-prelaunch-compat` | PR差分で互換性コードが追加された場合、Launch Boundary例外証跡を要求 | required候補 |
+| `ci:lint-slo-profile` | `ops/slo_profile.yaml` の妥当性検証 | required候補 |
+| `ci:lint-sql-security` | `SECURITY DEFINER` テンプレート検証、`flexi.kernel_mode` 検出 | required候補 |
+| `ci:test-contract (auth)` | `cargo test -p contract-tests 'auth::'` | required候補 |
+| `ci:test-contract (quota)` | `cargo test -p contract-tests 'quota::'` | required候補 |
+| `ci:test-contract (idempotency)` | `cargo test -p contract-tests 'idempotency::'` | required候補 |
+| `ci:test-contract (diagnostics)` | `cargo test -p contract-tests 'diagnostics::'` | required候補 |
+| `ci:test-contract (supplychain)` | `cargo test -p contract-tests 'supplychain::'` | required候補 |
+| `verify-crypto-verification` | `cargo test -p kernel-core --no-default-features` | required候補 |
+| `dependency-review` | Dependency Review Action による新規依存脆弱性検出 | required候補 |
+| `ci:lint-risk-acceptance` | `scripts/ci/ci-lint-risk-acceptance.sh` による期限付きリスク受容台帳検証 | required候補 |
+
+### 5.2 現行CIでは scaffold 扱いの未実装ゲート
+
+| scaffold status | 目標ゲート | 未実装の実検証 |
+|---|---|---|
+| `scaffold:ci:test-contract (worker)` | `ci:test-contract (worker)` | Worker protocol / fallback / canvas metric の実契約テスト |
+| `scaffold:ci:e2e-frontend-security` | `ci:e2e-frontend-security` | COOP/COEP、CDNプロキシ、protocol fallback UI、Developer Mode sideloading warning のE2E |
+| `scaffold:ci:e2e-worker-protocol-fallback-a11y` | `ci:e2e-worker-protocol-fallback-a11y` | fallback のA11y/i18n E2E検証 |
+| `scaffold:ci:e2e-canvas-fallback-metrics` | `ci:e2e-canvas-fallback-metrics` | OffscreenCanvas非対応時のUX下限 + `worker_canvas_fallback_total` 計測検証 |
+| `scaffold:ci:lint-manifest-trust-root` | `ci:lint-manifest-trust-root` | `manifest_trust_root` 構造・署名・有効期限検証 |
+| `scaffold:ci:test-manifest-break-glass` | `ci:test-manifest-break-glass` | break-glass の時限無効化、スコープ限定、監査ログ必須項目の実契約テスト |
+| `scaffold:ci:test-observability` | `ci:test-observability` | メトリクス名/ラベル/アラートルールの実整合チェック |
+| `scaffold:cargo-deny-audit` | `cargo-deny-audit` | 既存 lockfile の RustSec / yanked / license / source / bans findings を解消または期限付き受容へ移す |
+| `scaffold:nightly:test-reliability` | `nightly:test-reliability` | 鍵失効・token互換・claim_pending・SLO・整合性の長時間検証 |
+
+### 5.3 仕様上の目標ゲート
 
 | ジョブ名 | 実行内容 | ブロッキング |
 |---|---|---|
@@ -148,8 +185,9 @@
 | `ci:test-manifest-break-glass` | break-glassの時限無効化、スコープ限定、監査ログ必須項目の契約テスト | 必須 |
 | `ci:lint-slo-profile` | `ops/slo_profile.yaml` の妥当性検証 | 必須 |
 | `ci:lint-drill-readiness` | DR/失効演習の Readiness メタデータ検証 | 必須 |
+| `cargo-deny-audit` | 既存lockfileを含む RustSec / yanked / license / source / bans を検証し、既存 findings 解消後に required 化する | 必須 |
 | `ci:test-compile-guards` | `trybuild` による型安全ガード検証 | 必須 |
-| `ci:test-contract` | 認証・冪等性・クォータ・イベント順序・診断・署名の契約テスト | 必須 |
+| `ci:test-contract` | 認証・冪等性・クォータ・イベント順序・診断・署名・Workerの契約テスト | 必須 |
 | `ci:e2e-frontend-security` | COOP/COEP、CDNプロキシ、protocol fallback UI のE2E | 必須 |
 | `ci:e2e-worker-protocol-fallback-a11y` | fallback のA11y/i18n E2E検証 | 必須 |
 | `ci:e2e-canvas-fallback-metrics` | OffscreenCanvas非対応時のUX下限 + `worker_canvas_fallback_total` 計測検証 | 必須 |

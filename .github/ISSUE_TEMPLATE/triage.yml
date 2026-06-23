@@ -1,0 +1,57 @@
+name: "Question / Triage"
+description: "どのテンプレートに入るか不明な相談・調査入口。脆弱性詳細は書かないでください。"
+title: "[Triage] "
+labels: ["triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        exploit手順、実在tenant識別子、悪用可能なtenant影響、secret、未公開の緩和策を含む場合は公開Issueに書かず、SECURITY.md に従ってください。
+  - type: textarea
+    id: summary
+    attributes:
+      label: 概要
+      description: 相談したいこと、判断してほしいことを短く書いてください。
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: 履歴なしのAIエージェント向けコンテキスト
+      description: 過去の会話を知らないエージェントが、このIssueだけで状況を理解できる情報を書いてください。
+      placeholder: |
+        - 背景:
+        - 関連Issue / PR:
+        - 対象ファイル / 領域:
+        - 非対象:
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - 不明
+        - ci
+        - deps
+        - documentation
+        - rust
+        - security
+        - governance
+        - other
+    validations:
+      required: true
+  - type: textarea
+    id: desired_outcome
+    attributes:
+      label: 期待する結果
+      description: 調査結果、方針決定、Issue分割、PR作成など、ほしいアウトプットを書いてください。
+    validations:
+      required: true
+  - type: checkboxes
+    id: disclosure_check
+    attributes:
+      label: 公開してよい内容か
+      options:
+        - label: 公開してはいけない脆弱性詳細を含めていない
+          required: true

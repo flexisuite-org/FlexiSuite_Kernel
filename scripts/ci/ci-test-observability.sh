@@ -10,4 +10,5 @@ for metric in worker_canvas_fallback_total manifest_signature_bypass_active_tota
   }
 done
 
-echo "observability checks passed"
+echo "::warning::observability contract is a scaffold check; metric emission tests are still required"
+echo "observability scaffold check passed"
