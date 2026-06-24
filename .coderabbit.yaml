@@ -1,19 +1,17 @@
 # /.coderabbit.yaml
-# FlexiSuite Kernel — CodeRabbit config (docs excluded)
+# FlexiSuite Kernel — CodeRabbit config
 
 reviews:
   # レビュー対象ファイルの制御
   path_filters:
     - "**/*"
 
-    # --- exclude noise / non-code ---
-    - "!**/*.md"
-    - "!docs/**"
+    # --- exclude archived legacy code and binary/minified noise ---
+    - "!docs/archive/**"
     - "!**/*.png"
     - "!**/*.jpg"
     - "!**/*.jpeg"
     - "!**/*.svg"
-    - "!**/*.lock"
     - "!**/*.min.*"
 
   # コードレビュー時の観点を注入
@@ -24,7 +22,7 @@ reviews:
         Prioritize:
         1) Security boundaries (tenant isolation, authn/z, permissions, supply chain)
         2) Contract correctness enforced by CI (REQ-* assumptions in code)
-        3) Backward compatibility and migration safety
+        3) Launch Boundary-compliant compatibility and migration safety
         4) Observability (metrics, logs, traces, debuggability)
         5) Performance regressions on hot paths
 
@@ -33,4 +31,34 @@ reviews:
         - Subjective refactors
         - Rewriting code without reducing risk
 
+        Pre-Launch compatibility is not a default good. Do not recommend
+        compatibility shims, legacy fallbacks, old-format acceptance, or
+        migration windows unless the change is for a launched boundary, real
+        data, an external integration, or an explicit spec exception with
+        basis/boundary/deadline/removal/metric/issue evidence.
+
         Suggest changes only when they clearly reduce risk or improve correctness.
+
+    - path: "docs/**"
+      instructions: |
+        Documentation is part of the contract. Review for consistency with
+        docs/implementation_plan.md as the SSOT, especially REQ-* traceability,
+        Launch Boundary exceptions, and verification_matrix.md follow-up.
+
+    - path: ".github/**"
+      instructions: |
+        Review GitHub governance as a security boundary. Check least-privilege
+        workflow permissions, branch-protection implications, CODEOWNERS
+        coverage, and whether scaffold checks are being presented as real
+        validation.
+
+    - path: "scripts/ci/**"
+      instructions: |
+        CI scripts enforce the contract. Flag checks that only search markers
+        or README files when their status name implies real validation.
+
+    - path: "Cargo.lock"
+      instructions: |
+        Treat dependency changes as supply-chain changes. Check RustSec,
+        duplicate critical crypto/TLS dependencies, yanked versions, and
+        whether risk acceptance is bounded and tracked.

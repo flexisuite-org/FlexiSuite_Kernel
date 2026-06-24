@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 非公開の脆弱性報告
+    url: https://github.com/flexisuite-org/FlexiSuite_Kernel/security/policy
+    about: exploit手順、実在tenant識別子、未修正の脆弱性詳細は公開Issueに書かず、セキュリティポリシーに従ってください。

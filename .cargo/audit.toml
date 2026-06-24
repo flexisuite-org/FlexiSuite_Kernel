@@ -1,7 +1,2 @@
 [advisories]
-ignore = [
-  # Via migration/tooling path: sea-orm-migration -> sea-schema/sea-orm-cli -> sqlx-mysql -> rsa.
-  # Upstream advisory currently has no fixed upgrade available.
-  # Review date: 2026-02-19. TODO: Revisit (Issue #390).
-  "RUSTSEC-2023-0071",
-]
+ignore = []

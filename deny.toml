@@ -17,6 +17,8 @@ all-features = true
 version = 2
 db-urls = ["https://github.com/rustsec/advisory-db"]
 yanked = "deny"
+unused-ignored-advisory = "deny"
+ignore = []
 
 # ---------------------------------------------------------------------------
 # [licenses] — License policy
@@ -45,31 +47,6 @@ confidence-threshold = 0.8
 # Deny multiple versions of the same crate by default (keeps the dep tree lean)
 multiple-versions = "deny"
 wildcards = "deny"
-
-# ---------------------------------------------------------------------------
-# Exact-version pins requiring periodic upstream verification
-#
-# Each entry MUST reference the internal tracking issue and upstream issue so
-# the pin can be re-evaluated during dependency maintenance reviews.
-#
-# tracing =0.1.43
-#   Reason : 0.1.44 introduced a ~10 MB binary size regression because
-#            test-macros were accidentally included in the release artifact.
-#   Upstream: https://github.com/tokio-rs/tracing/issues/3455
-#   Internal: https://github.com/flexisuite-org/FlexiSuite_Kernel/issues/25
-#   Action  : This is an indefinite workaround. Remove this skip entry only
-#             after an upstream fix is released and verified in this workspace;
-#             monitor tokio-rs/tracing#3455 periodically.
-# ---------------------------------------------------------------------------
-[[bans.skip]]
-name    = "tracing"
-version = "=0.1.43"
-reason  = "Pinned to avoid 0.1.44 binary-size regression; tracked in GH#25 / upstream tokio-rs/tracing#3455"
-
-[[bans.deny]]
-name    = "tracing"
-version = ">=0.1.44"
-reason  = "Explicitly deny tracing releases newer than the pinned 0.1.43 until tokio-rs/tracing#3455 is resolved and GH#25 is closed"
 
 # ---------------------------------------------------------------------------
 # [sources] — Allowed crate sources

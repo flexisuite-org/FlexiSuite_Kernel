@@ -1,0 +1,54 @@
+name: Supply Chain Audit
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  risk-acceptance:
+    name: ci:lint-risk-acceptance
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405
+        with:
+          python-version: "3.11"
+
+      - name: Lint risk acceptance ledger
+        run: bash scripts/ci/ci-lint-risk-acceptance.sh
+
+  cargo-deny-inventory:
+    name: scaffold:cargo-deny-audit
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          persist-credentials: false
+
+      - name: cargo-deny
+        # v2.0.20, pinned to commit to keep the supply-chain gate stable.
+        uses: EmbarkStudios/cargo-deny-action@bb137d7af7e4fb67e5f82a49c4fce4fad40782fe
+        with:
+          rust-version: "1.91"
+          command: check
+          arguments: --all-features
+          command-arguments: advisories bans licenses sources
+        continue-on-error: true
+
+      - name: Explain scaffold status
+        run: |
+          echo "::warning::cargo-deny audit is currently an inventory scaffold, not a merge gate. Promote it only after existing advisory/license/bans findings are resolved or bounded."
